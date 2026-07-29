@@ -1,0 +1,10 @@
+ARG NAS_BASE_IMAGE=ubuntu:24.04
+FROM ${NAS_BASE_IMAGE}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LD_LIBRARY_PATH=/opt/llama
+
+ENTRYPOINT ["/opt/llama/llama-server"]

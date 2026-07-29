@@ -1,0 +1,12 @@
+services:
+  app:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      NAS_AI_INFERENCE_BACKEND: vulkan
+  ollama:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      OLLAMA_VULKAN: "1"
+      GGML_VK_VISIBLE_DEVICES: ${GGML_VK_VISIBLE_DEVICES:-0}

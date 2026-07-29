@@ -1,0 +1,6 @@
+ARG SPEECH_BASE_IMAGE=ai-subtitle-generator-ai-subtitle:latest
+FROM ${SPEECH_BASE_IMAGE}
+
+COPY docker/speech_adapter.py /opt/nas-ai-space/speech_adapter.py
+
+ENTRYPOINT ["python", "/opt/nas-ai-space/speech_adapter.py"]

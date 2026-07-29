@@ -1,0 +1,266 @@
+name: nas-ai-space
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.nas
+      args:
+        NAS_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+    image: nas-ai-space:local
+    restart: unless-stopped
+    ports:
+      - "${NAS_AI_PORT:-8766}:8000"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      NAS_AI_DATA_DIR: /opt/nas-ai-space/data
+      NAS_AI_CACHE_DIR: /opt/nas-ai-space/data/cache
+      NAS_AI_SCAN_ROOT: /library
+      NAS_AI_UPLOAD_ROOT: /uploads
+      NAS_AI_RECYCLE_ROOT: /recycle
+      NAS_AI_MUTATION_ROOTS: /library=/maintenance/library
+      NAS_AI_WATCH_ENABLED: ${NAS_AI_WATCH_ENABLED:-true}
+      NAS_AI_WATCH_DEBOUNCE_SECONDS: ${NAS_AI_WATCH_DEBOUNCE_SECONDS:-5}
+      NAS_AI_WATCH_POLL_SECONDS: ${NAS_AI_WATCH_POLL_SECONDS:-30}
+      NAS_AI_WATCH_FALLBACK_SECONDS: ${NAS_AI_WATCH_FALLBACK_SECONDS:-900}
+      NAS_AI_MAX_UPLOAD_GB: ${NAS_AI_MAX_UPLOAD_GB:-20}
+      NAS_AI_API_TOKEN: ${NAS_AI_API_TOKEN:-}
+      NAS_AI_ALLOW_QUERY_TOKEN: ${NAS_AI_ALLOW_QUERY_TOKEN:-false}
+      NAS_AI_TASK_WORKERS: ${NAS_AI_TASK_WORKERS:-2}
+      NAS_AI_INDEX_WORKERS: ${NAS_AI_INDEX_WORKERS:-2}
+      NAS_AI_INDEX_BATCH_SIZE: ${NAS_AI_INDEX_BATCH_SIZE:-200}
+      NAS_AI_MIN_AVAILABLE_MEMORY_MB: ${NAS_AI_MIN_AVAILABLE_MEMORY_MB:-1024}
+      NAS_AI_MIN_FREE_SWAP_MB: ${NAS_AI_MIN_FREE_SWAP_MB:-512}
+      NAS_AI_INDEX_RETRY_MAX_ATTEMPTS: ${NAS_AI_INDEX_RETRY_MAX_ATTEMPTS:-3}
+      NAS_AI_INDEX_RETRY_BASE_SECONDS: ${NAS_AI_INDEX_RETRY_BASE_SECONDS:-300}
+      NAS_AI_AUTO_INDEX_ENABLED: ${NAS_AI_AUTO_INDEX_ENABLED:-false}
+      NAS_AI_AUTO_INDEX_START_HOUR: ${NAS_AI_AUTO_INDEX_START_HOUR:-0}
+      NAS_AI_AUTO_INDEX_END_HOUR: ${NAS_AI_AUTO_INDEX_END_HOUR:-7}
+      NAS_AI_AUTO_INDEX_BATCH_SIZE: ${NAS_AI_AUTO_INDEX_BATCH_SIZE:-200}
+      NAS_AI_TASK_RETENTION_DAYS: ${NAS_AI_TASK_RETENTION_DAYS:-30}
+      NAS_AI_TASK_RETENTION_COUNT: ${NAS_AI_TASK_RETENTION_COUNT:-2000}
+      NAS_AI_AUTOMATIC_BACKUP_ENABLED: ${NAS_AI_AUTOMATIC_BACKUP_ENABLED:-true}
+      NAS_AI_AUTOMATIC_BACKUP_INTERVAL_HOURS: ${NAS_AI_AUTOMATIC_BACKUP_INTERVAL_HOURS:-24}
+      NAS_AI_AUTOMATIC_BACKUP_RETENTION: ${NAS_AI_AUTOMATIC_BACKUP_RETENTION:-7}
+      NAS_AI_FACE_WORKERS: ${NAS_AI_FACE_WORKERS:-4}
+      NAS_AI_MAX_EXTRACT_MB: ${NAS_AI_MAX_EXTRACT_MB:-32}
+      NAS_AI_INFERENCE_BACKEND: vulkan
+      NAS_AI_EMBEDDING_URL: http://embedding:8080
+      NAS_AI_VISION_URL: http://vision:8080
+      NAS_AI_CHAT_URL: http://vision:8080
+      NAS_AI_EMBEDDING_MODEL: qwen3-embedding:0.6b
+      NAS_AI_VISION_MODEL: qwen3-vl:2b
+      NAS_AI_CHAT_MODEL: qwen3-vl:2b
+      NAS_AI_TRANSCRIPTION_URL: http://speech:8000
+      NAS_AI_TRANSCRIPTION_MODEL: ${NAS_AI_TRANSCRIPTION_MODEL:-Systran/faster-whisper-tiny}
+      NAS_AI_QDRANT_URL: http://qdrant:6333
+      NAS_AI_VECTORS_ON_DISK: ${NAS_AI_VECTORS_ON_DISK:-true}
+    volumes:
+      - ./data:/opt/nas-ai-space/data
+      - ${NAS_LIBRARY_PATH:-./library}:/library:ro
+      - ${NAS_LIBRARY_PATH:-./library}:/maintenance/library
+      - ${NAS_UPLOAD_PATH:-./uploads}:/uploads
+      - ${NAS_RECYCLE_PATH:-./recycle}:/recycle
+    user: "${NAS_UID:-1000}:${NAS_GID:-10}"
+    group_add:
+      - "${NAS_VIDEO_GID:-44}"
+      - "${NAS_RENDER_GID:-105}"
+    devices:
+      - /dev/dri:/dev/dri
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      vision:
+        condition: service_healthy
+      speech:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    shm_size: ${NAS_AI_SHM_SIZE:-2gb}
+
+  qdrant:
+    image: nas-ai-llamacpp:local
+    restart: unless-stopped
+    working_dir: /qdrant
+    entrypoint: ["/opt/qdrant/qdrant"]
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+      QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
+      QDRANT__STORAGE__SNAPSHOTS_PATH: /qdrant/snapshots
+    volumes:
+      - ./runtime/qdrant:/opt/qdrant:ro
+      - qdrant-data:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+
+  vision:
+    build:
+      context: .
+      dockerfile: Dockerfile.llamacpp
+      args:
+        NAS_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
+    image: nas-ai-llamacpp:local
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/${NAS_AI_VISION_GGUF:-Qwen3-VL-2B-Instruct-Q8_0.gguf}
+      - --mmproj
+      - /models/mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf
+      - --alias
+      - qwen3-vl:2b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --image-max-tokens
+      - "${NAS_AI_VISION_IMAGE_MAX_TOKENS:-768}"
+      - --ctx-size
+      - "${NAS_AI_VISION_CTX_SIZE:-8192}"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --parallel
+      - "1"
+      - --no-cont-batching
+      - --no-cache-prompt
+      - --threads
+      - "6"
+      - --threads-batch
+      - "8"
+      - --batch-size
+      - "${NAS_AI_VISION_BATCH_SIZE:-128}"
+      - --ubatch-size
+      - "${NAS_AI_VISION_UBATCH_SIZE:-64}"
+      - --n-gpu-layers
+      - "${NAS_AI_VISION_GPU_LAYERS:-99}"
+      - --flash-attn
+      - "on"
+    environment:
+      GGML_VK_VISIBLE_DEVICES: ${GGML_VK_VISIBLE_DEVICES:-0}
+    volumes:
+      - ./runtime/llama:/opt/llama:ro
+      - ./models:/models:ro
+    devices:
+      - /dev/dri:/dev/dri
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+
+  embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile.llamacpp
+      args:
+        NAS_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
+    image: nas-ai-llamacpp:local
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/Qwen3-Embedding-0.6B-Q8_0.gguf
+      - --alias
+      - qwen3-embedding:0.6b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --parallel
+      - "${NAS_AI_EMBEDDING_PARALLEL:-1}"
+      - --ctx-size
+      - "${NAS_AI_EMBEDDING_CTX_SIZE:-2048}"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --batch-size
+      - "${NAS_AI_EMBEDDING_BATCH_SIZE:-128}"
+      - --ubatch-size
+      - "${NAS_AI_EMBEDDING_UBATCH_SIZE:-64}"
+      - --threads
+      - "6"
+      - --threads-batch
+      - "8"
+      - --embedding
+      - --pooling
+      - last
+      - --n-gpu-layers
+      - "0"
+    volumes:
+      - ./runtime/llama:/opt/llama:ro
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m
+
+  speech:
+    build:
+      context: .
+      dockerfile: Dockerfile.speech
+      args:
+        SPEECH_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
+    image: nas-ai-speech:local
+    restart: unless-stopped
+    environment:
+      SPEECH_MODEL: ${NAS_AI_TRANSCRIPTION_MODEL:-Systran/faster-whisper-tiny}
+      SPEECH_COMPUTE_TYPE: int8
+      SPEECH_CPU_THREADS: "6"
+      SPEECH_LOCAL_FILES_ONLY: "true"
+      SPEECH_IDLE_UNLOAD_SECONDS: ${SPEECH_IDLE_UNLOAD_SECONDS:-600}
+      OMP_NUM_THREADS: "6"
+    volumes:
+      - ${NAS_SPEECH_CACHE_PATH:-./data/speech-models}:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+
+volumes:
+  qdrant-data:
+  qdrant-snapshots:

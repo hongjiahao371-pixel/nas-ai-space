@@ -1,0 +1,138 @@
+name: nas-ai-space
+
+services:
+  app:
+    build:
+      context: .
+    image: nas-ai-space:local
+    restart: unless-stopped
+    ports:
+      - "${NAS_AI_PORT:-8766}:8000"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      NAS_AI_DATA_DIR: /app/data
+      NAS_AI_CACHE_DIR: /app/data/cache
+      NAS_AI_SCAN_ROOT: /library
+      NAS_AI_UPLOAD_ROOT: /uploads
+      NAS_AI_RECYCLE_ROOT: /recycle
+      NAS_AI_MUTATION_ROOTS: /library=/maintenance/library
+      NAS_AI_WATCH_ENABLED: ${NAS_AI_WATCH_ENABLED:-true}
+      NAS_AI_WATCH_DEBOUNCE_SECONDS: ${NAS_AI_WATCH_DEBOUNCE_SECONDS:-5}
+      NAS_AI_WATCH_POLL_SECONDS: ${NAS_AI_WATCH_POLL_SECONDS:-30}
+      NAS_AI_WATCH_FALLBACK_SECONDS: ${NAS_AI_WATCH_FALLBACK_SECONDS:-900}
+      NAS_AI_MAX_UPLOAD_GB: ${NAS_AI_MAX_UPLOAD_GB:-20}
+      NAS_AI_API_TOKEN: ${NAS_AI_API_TOKEN:-}
+      NAS_AI_ALLOW_QUERY_TOKEN: ${NAS_AI_ALLOW_QUERY_TOKEN:-false}
+      NAS_AI_TASK_WORKERS: ${NAS_AI_TASK_WORKERS:-0}
+      NAS_AI_INDEX_WORKERS: ${NAS_AI_INDEX_WORKERS:-0}
+      NAS_AI_INDEX_BATCH_SIZE: ${NAS_AI_INDEX_BATCH_SIZE:-200}
+      NAS_AI_MIN_AVAILABLE_MEMORY_MB: ${NAS_AI_MIN_AVAILABLE_MEMORY_MB:-1024}
+      NAS_AI_MIN_FREE_SWAP_MB: ${NAS_AI_MIN_FREE_SWAP_MB:-512}
+      NAS_AI_INDEX_RETRY_MAX_ATTEMPTS: ${NAS_AI_INDEX_RETRY_MAX_ATTEMPTS:-3}
+      NAS_AI_INDEX_RETRY_BASE_SECONDS: ${NAS_AI_INDEX_RETRY_BASE_SECONDS:-300}
+      NAS_AI_AUTO_INDEX_ENABLED: ${NAS_AI_AUTO_INDEX_ENABLED:-false}
+      NAS_AI_AUTO_INDEX_START_HOUR: ${NAS_AI_AUTO_INDEX_START_HOUR:-0}
+      NAS_AI_AUTO_INDEX_END_HOUR: ${NAS_AI_AUTO_INDEX_END_HOUR:-7}
+      NAS_AI_AUTO_INDEX_BATCH_SIZE: ${NAS_AI_AUTO_INDEX_BATCH_SIZE:-200}
+      NAS_AI_TASK_RETENTION_DAYS: ${NAS_AI_TASK_RETENTION_DAYS:-30}
+      NAS_AI_TASK_RETENTION_COUNT: ${NAS_AI_TASK_RETENTION_COUNT:-2000}
+      NAS_AI_AUTOMATIC_BACKUP_ENABLED: ${NAS_AI_AUTOMATIC_BACKUP_ENABLED:-true}
+      NAS_AI_AUTOMATIC_BACKUP_INTERVAL_HOURS: ${NAS_AI_AUTOMATIC_BACKUP_INTERVAL_HOURS:-24}
+      NAS_AI_AUTOMATIC_BACKUP_RETENTION: ${NAS_AI_AUTOMATIC_BACKUP_RETENTION:-7}
+      NAS_AI_FACE_WORKERS: ${NAS_AI_FACE_WORKERS:-0}
+      NAS_AI_MAX_EXTRACT_MB: ${NAS_AI_MAX_EXTRACT_MB:-16}
+      NAS_AI_LOCAL_AI_URL: http://ollama:11434
+      NAS_AI_EMBEDDING_URL: ${NAS_AI_EMBEDDING_URL:-http://ollama:11434}
+      NAS_AI_VISION_URL: ${NAS_AI_VISION_URL:-http://ollama:11434}
+      NAS_AI_CHAT_URL: ${NAS_AI_CHAT_URL:-http://ollama:11434}
+      NAS_AI_EMBEDDING_MODEL: ${NAS_AI_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+      NAS_AI_VISION_MODEL: ${NAS_AI_VISION_MODEL:-qwen3-vl:2b}
+      NAS_AI_CHAT_MODEL: ${NAS_AI_CHAT_MODEL:-qwen3-vl:2b}
+      NAS_AI_TRANSCRIPTION_URL: ${NAS_AI_TRANSCRIPTION_URL:-http://speaches:8000}
+      NAS_AI_TRANSCRIPTION_MODEL: ${NAS_AI_TRANSCRIPTION_MODEL:-Systran/faster-whisper-small}
+      NAS_AI_QDRANT_URL: http://qdrant:6333
+      NAS_AI_VECTORS_ON_DISK: ${NAS_AI_VECTORS_ON_DISK:-true}
+    volumes:
+      - ./data:/app/data
+      - ${NAS_LIBRARY_PATH:-./library}:/library:ro
+      - ${NAS_LIBRARY_PATH:-./library}:/maintenance/library
+      - ${NAS_UPLOAD_PATH:-./uploads}:/uploads
+      - ${NAS_RECYCLE_PATH:-./recycle}:/recycle
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
+      speaches:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    shm_size: ${NAS_AI_SHM_SIZE:-1gb}
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.2-unprivileged
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+  ollama:
+    image: ollama/ollama:0.30.8
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+  model-init:
+    image: ollama/ollama:0.30.8
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      NAS_AI_EMBEDDING_MODEL: ${NAS_AI_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+      NAS_AI_VISION_MODEL: ${NAS_AI_VISION_MODEL:-qwen3-vl:2b}
+    volumes:
+      - ./docker/pull-models.sh:/pull-models.sh:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/pull-models.sh"]
+
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    restart: unless-stopped
+    volumes:
+      - speech-models:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: "8000"
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  qdrant-data:
+  ollama-models:
+  speech-models:

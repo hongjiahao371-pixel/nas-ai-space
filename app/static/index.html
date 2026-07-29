@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0a0c10">
+  <title>NAS AI Space · AI 媒体资产工作台</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=13">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M8 9.5 16 5l8 4.5v9L16 23l-8-4.5z"/><path d="m8 13.5 8 4.5 8-4.5M16 18v9"/></svg>
+        </span>
+        <span class="brand-copy"><b>NAS AI Space</b><small>AI 媒体资产工作台</small></span>
+      </div>
+
+      <div class="workspace-pill"><span>私有空间</span><i>LOCAL</i></div>
+
+      <nav id="nav" aria-label="主导航">
+        <div class="nav-group">
+          <span class="nav-label">个人空间</span>
+          <button class="nav-item active" data-view="home">
+            <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm10 7h6v-9h-6zm0-16v3h6V4zM4 20h6v-3H4z"/></svg><span>总览</span>
+          </button>
+          <button class="nav-item" data-view="projects">
+            <svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v11H4z"/><path d="M8 12h8m-8 4h5"/></svg><span>项目</span>
+          </button>
+          <button class="nav-item" data-view="reviews">
+            <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="m8 12 2.5 2.5L16 9"/><path d="M8 7h5"/></svg><span>待我审阅</span><i class="nav-count" id="reviewCount">0</i>
+          </button>
+          <button class="nav-item" data-view="deliveries">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16v12H4z"/><path d="M8 4h8v3M9 13h6m-3-3v6"/></svg><span>分享与交付</span>
+          </button>
+          <button class="nav-item" data-view="search">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><span>智能搜索</span><kbd>⌘K</kbd>
+          </button>
+          <button class="nav-item" data-view="ask">
+            <svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z"/></svg><span>问资料</span>
+          </button>
+          <button class="nav-item" data-view="library">
+            <svg viewBox="0 0 24 24"><path d="M4 7.5h16v11H4z"/><path d="M7 4h10l2 3.5H5z"/></svg><span>资料库</span>
+          </button>
+          <button class="nav-item" data-view="albums">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16v13H4z"/><path d="m7 15 3-3 2 2 2-2 3 3M8 9h.01"/></svg><span>相册与发现</span>
+          </button>
+          <button class="nav-item nav-section-toggle" id="systemNavToggle">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3A1.7 1.7 0 0 0 14 21v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9A1.7 1.7 0 0 0 21 10h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span>系统管理</span><b>⌄</b>
+          </button>
+        </div>
+        <div class="nav-group system-nav" id="systemNav" hidden>
+          <button class="nav-item" data-view="libraries">
+            <svg viewBox="0 0 24 24"><path d="M4 7.5h16v11H4z"/><path d="M7 4h10l2 3.5H5z"/></svg><span>媒体库</span>
+          </button>
+          <button class="nav-item" data-view="tasks">
+            <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M21 5v7h-7"/></svg><span>任务中心</span><i class="nav-count" id="taskCount">0</i>
+          </button>
+          <button class="nav-item" data-view="organizer">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/><circle cx="18" cy="12" r="2"/></svg><span>智能整理</span>
+          </button>
+          <button class="nav-item" data-view="people"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v2"/></svg><span>人物整理</span></button>
+          <button class="nav-item" data-view="events"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 2v4m8-4v4M5 9h14"/></svg><span>事件整理</span></button>
+          <button class="nav-item admin-only" data-view="recycle">
+            <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5"/></svg><span>回收站</span>
+          </button>
+          <button class="nav-item" data-view="hardware">
+            <svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3"/></svg><span>算力调度</span>
+          </button>
+          <button class="nav-item admin-only" data-view="users">
+            <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v2M17 8h4m-2-2v4"/></svg><span>用户与权限</span>
+          </button>
+          <button class="nav-item admin-only" data-view="operations">
+            <svg viewBox="0 0 24 24"><path d="M4 5h16v5H4zM4 14h16v5H4z"/><path d="M8 7.5h.01M8 16.5h.01M16 7.5h2m-2 9h2"/></svg><span>运维与备份</span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="service-card">
+          <span class="live-dot"><i></i></span>
+          <span><b id="serviceStatus">正在连接</b><small>所有服务均在本机运行</small></span>
+          <button class="icon-button" id="tokenButton" title="安全设置" aria-label="安全设置">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <button class="menu-button" id="menuButton" aria-label="打开导航">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="page-context"><strong id="pageTitle">数据总览</strong><small id="pageSubtitle">你的私有数据，只在本地流动</small></div>
+        <button class="top-search" data-go="search" aria-label="打开搜索">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+          <span>搜索所有资料</span><kbd>⌘ K</kbd>
+        </button>
+        <div class="top-actions">
+          <span class="privacy-pill"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.8 8.2 7 10 4.2-1.8 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>数据不出 NAS</span>
+          <button class="icon-button notification-button personal-only" id="notificationButton" title="通知" aria-label="通知"><svg viewBox="0 0 24 24"><path d="M6 17h12l-1.5-2.5V10a4.5 4.5 0 0 0-9 0v4.5z"/><path d="M10 20h4"/></svg><i id="notificationCount" hidden>0</i></button>
+          <button class="secondary compact" id="uploadButton"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M5 14v5h14v-5"/></svg>上传</button>
+          <button class="primary compact" id="globalScan"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v6h-6"/></svg>快速扫描</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="view active" id="view-home">
+          <div class="welcome-row">
+            <div>
+              <span class="eyebrow" id="dayGreeting">欢迎回来</span>
+              <h1>在你的私有数据里，<br><em>找到真正需要的内容。</em></h1>
+              <p>搜索照片、视频、录音和文档，或让本地 AI 帮你整理答案。</p>
+            </div>
+            <div class="local-seal"><i></i><span><b>100% 本地处理</b><small>文件与模型均运行在此 NAS</small></span></div>
+          </div>
+
+          <div class="command-card">
+            <form class="hero-search" data-search-form>
+              <span class="search-orb" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/></svg></span>
+              <label><span>搜索你的 NAS</span><input name="q" placeholder="描述画面、人物、文件内容或时间…" autocomplete="off"></label>
+              <button><span>开始搜索</span><svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button>
+            </form>
+            <div class="quick-prompts"><span>试着搜索</span><button data-query="去年夏天的海边照片">去年夏天的海边照片</button><button data-query="包含发票的 PDF">包含发票的 PDF</button><button data-query="视频里提到的待办">视频里提到的待办</button></div>
+          </div>
+
+          <div class="stats-grid" id="dashboardStats"></div>
+
+          <div class="dashboard-grid">
+            <article class="panel libraries-panel">
+              <div class="panel-head">
+                <div><span class="eyebrow">数据源</span><h2>媒体库</h2><p>已授权 AI 建立索引的只读目录</p></div>
+                <button class="text-button" data-go="libraries">查看全部<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+              </div>
+              <div id="homeLibraries" class="library-list"></div>
+              <div class="index-health">
+                <div><span>语义索引覆盖率</span><b id="indexHealthText">读取中</b></div>
+                <div class="progress"><span id="indexHealthBar"></span></div>
+                <small id="indexHealthMeta">正在读取全库实时状态</small>
+              </div>
+            </article>
+
+            <div class="side-stack">
+              <article class="panel compute-panel">
+                <div class="compute-top"><span class="compute-icon"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9"/></svg></span><span class="status-badge" id="accelBadge">检测中</span></div>
+                <span class="eyebrow">算力状态</span><h2 id="accelTitle">正在识别本机算力</h2><p id="accelDescription">检测 GPU、硬件编解码器和推理运行时。</p>
+                <div class="accel-meter"><span id="accelMeter"></span></div><div class="chip-row" id="accelChips"></div>
+                <button class="panel-link" data-go="hardware">查看执行计划<svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button>
+              </article>
+
+              <article class="panel recent-panel">
+                <div class="panel-head compact-head"><div><span class="eyebrow">处理队列</span><h2>最近任务</h2></div><button class="text-button" data-go="tasks">任务中心</button></div>
+                <div id="homeTasks" class="home-task-list"></div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="view-projects">
+          <div class="section-heading"><div><span class="eyebrow">媒体制作工作区</span><h1>项目</h1><p>把素材、版本、审阅意见和最终交付放进同一条工作流。</p></div><button class="primary" id="createProject"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建项目</button></div>
+          <div class="project-overview" id="projectOverview"></div>
+          <div class="project-grid" id="projectGrid"><div class="empty-state"><b>还没有项目</b><p>新建项目后，可以从现有资料库添加素材。</p></div></div>
+        </section>
+
+        <section class="view workspace-view" id="view-project">
+          <div class="workspace-head">
+            <button class="secondary compact" id="backToProjects">← 返回项目</button>
+            <div><span class="eyebrow" id="projectEyebrow">项目工作区</span><h1 id="projectTitle">项目</h1><p id="projectDescription"></p></div>
+            <div class="workspace-actions"><button class="secondary" id="projectInboxButton">NAS 入库箱</button><button class="secondary" id="projectMembersButton">成员</button><button class="secondary" id="projectShareButton">分享交付</button><button class="primary" id="addProjectAsset">添加素材</button></div>
+          </div>
+          <div class="workspace-toolbar">
+            <form id="projectAssetSearch"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input name="q" placeholder="搜索当前项目素材"><button>搜索</button></form>
+            <select id="projectStatusFilter"><option value="">全部状态</option></select>
+            <select id="projectSort"><option value="updated">最近更新</option><option value="name">名称</option></select>
+            <button class="secondary" id="exportReviewCsv">导出 CSV</button>
+            <button class="secondary" id="exportReviewXml">导出剪辑标记</button>
+          </div>
+          <div class="workspace-layout">
+            <aside class="folder-rail">
+              <div class="rail-title"><span>项目文件夹</span><button id="createProjectFolder" aria-label="新建文件夹">＋</button></div>
+              <button class="folder-item active" data-project-folder="">全部素材 <i id="allProjectAssetCount">0</i></button>
+              <div id="projectFolderTree"></div>
+              <div class="workflow-summary" id="workflowSummary"></div>
+            </aside>
+            <section class="asset-board">
+              <div class="asset-board-head"><div><b id="assetBoardTitle">全部素材</b><span id="assetBoardMeta">0 个素材</span></div><div class="asset-view-switch"><button class="active" data-asset-layout="grid">网格</button><button data-asset-layout="list">列表</button></div></div>
+              <div class="asset-grid" id="projectAssets"></div>
+            </section>
+            <aside class="activity-rail">
+              <div class="rail-title"><span>待处理审阅</span><button id="refreshReviewTasks" aria-label="刷新">↻</button></div>
+              <div id="projectReviewTasks" class="review-task-list"></div>
+              <div class="ai-project-callout"><span>AI REVIEW</span><b>素材审阅助手</b><p>打开素材后，可自动汇总版本变化和修改清单。</p></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-reviews">
+          <div class="section-heading"><div><span class="eyebrow">跨项目审阅队列</span><h1>待我审阅</h1><p>集中处理所有项目中尚未解决的时间点、画面和文字意见。</p></div><button class="secondary" id="refreshAllReviews">刷新</button></div>
+          <div class="review-dashboard" id="reviewDashboard"></div>
+          <div class="review-inbox" id="reviewInbox"></div>
+        </section>
+
+        <section class="view" id="view-deliveries">
+          <div class="section-heading"><div><span class="eyebrow">安全外发</span><h1>分享与交付</h1><p>创建带访问码、有效期、下载权限、品牌和水印的外部审阅页面。</p></div></div>
+          <div class="delivery-summary" id="deliverySummary"></div>
+          <div class="delivery-list" id="deliveryList"></div>
+        </section>
+
+        <section class="view" id="view-search">
+          <div class="section-heading simple-heading"><div><span class="eyebrow">混合检索</span><h1>智能搜索</h1><p>全文、路径与向量语义融合排序，每个结果都能回到原文件。</p></div></div>
+          <form class="large-search" data-search-form><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input name="q" id="mainSearchInput" placeholder="输入自然语言，例如“去年在海边拍的日落”…" autocomplete="off"><button>搜索</button></form>
+          <div class="filter-row" id="kindFilters"><button class="active" data-kind="">全部</button><button data-kind="image">图片</button><button data-kind="video">视频</button><button data-kind="audio">音频</button><button data-kind="document">文档</button><label class="precision-toggle"><input id="precisionSearch" type="checkbox" checked><span>精准重排</span></label></div>
+          <div class="advanced-filters">
+            <label>媒体库<select id="searchLibrary"><option value="">全部媒体库</option></select></label>
+            <label>开始日期<input id="searchDateFrom" type="date"></label>
+            <label>结束日期<input id="searchDateTo" type="date"></label>
+            <label>人物<select id="searchPerson"><option value="">全部人物</option></select></label>
+            <label>地点<select id="searchPlace"><option value="">全部地点</option></select></label>
+            <label>事件<select id="searchEvent"><option value="">全部事件</option></select></label>
+            <label>标签<select id="searchTag"><option value="">全部标签</option></select></label>
+            <label class="check-row filter-check"><input id="searchFavorite" type="checkbox"><span>仅收藏</span></label>
+            <button class="secondary" id="clearSearchFilters" type="button">清除筛选</button>
+            <button class="secondary personal-only" id="saveSmartAlbum" type="button">保存为智能相册</button>
+          </div>
+          <div class="result-summary" id="searchSummary"></div>
+          <div class="results-grid" id="searchResults"><div class="empty-state"><span class="empty-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></span><b>开始搜索你的私有空间</b><p>输入一句自然语言，AI 会同时理解文件名和内容。</p></div></div>
+          <button class="secondary load-more" id="searchMore" hidden>加载更多</button>
+        </section>
+
+        <section class="view" id="view-ask">
+          <div class="ask-layout">
+            <div class="section-heading simple-heading"><div><span class="eyebrow">基于资料回答</span><h1>问你的资料</h1><p>先检索本地内容，再给出带页码或时间点的原始来源。</p></div><span class="grounded-badge"><i></i>已启用来源追溯</span></div>
+            <div class="conversation-toolbar personal-only"><select id="conversationSelect"><option value="">新对话</option></select><button class="secondary" id="newConversation">新对话</button><button class="text-danger compact-danger" id="deleteConversation" hidden>删除当前对话</button></div>
+            <div class="suggestions"><button>去年有哪些重要旅行？</button><button>汇总最近的发票内容</button><button>找出视频里提到的待办</button></div>
+            <div class="conversation" id="conversation"><div class="assistant-message"><span class="avatar"><svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/></svg></span><div>你可以直接提问。我会先检索本地资料，再给出带来源的回答。</div></div></div>
+            <form class="ask-box" id="askForm"><textarea name="question" rows="1" placeholder="向你的 NAS 提问…"></textarea><button aria-label="发送"><svg viewBox="0 0 24 24"><path d="m4 4 16 8-16 8 3-8z"/><path d="M7 12h13"/></svg></button></form>
+            <p class="ask-note"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.8 8.2 7 10 4.2-1.8 7-5.5 7-10V6z"/></svg>提问内容和检索结果不会离开本机</p>
+          </div>
+        </section>
+
+        <section class="view" id="view-library">
+          <div class="section-heading"><div><span class="eyebrow">统一浏览</span><h1>资料库</h1><p>集中浏览照片、视频、音频和文档，并查看每个文件的真实索引状态。</p></div><button class="secondary personal-only" id="showFavorites">我的收藏</button></div>
+          <div class="library-browser-filters">
+            <label>类型<select id="libraryKind"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option><option value="document">文档</option><option value="archive">压缩包</option></select></label>
+            <label>索引状态<select id="libraryStatus"><option value="">全部状态</option><option value="ready">完整</option><option value="partial">部分完成</option><option value="pending">待处理</option><option value="error">失败</option></select></label>
+            <label>媒体库<select id="librarySource"><option value="">全部媒体库</option></select></label>
+            <label>标签<select id="libraryTag"><option value="">全部标签</option></select></label>
+            <label>排序<select id="librarySort"><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="largest">最大文件</option><option value="name">按名称</option></select></label>
+            <label class="check-row filter-check personal-only"><input id="libraryFavorite" type="checkbox"><span>仅收藏</span></label>
+          </div>
+          <div class="result-summary" id="librarySummary">正在读取资料库…</div>
+          <div class="results-grid library-results" id="libraryResults"></div>
+          <button class="secondary load-more" id="libraryMore" hidden>加载更多</button>
+        </section>
+
+        <section class="view" id="view-albums">
+          <div class="section-heading"><div><span class="eyebrow">自动发现与个人整理</span><h1>相册与发现</h1><p>按时间、人物、地点和事件浏览，也可以把搜索条件保存成持续更新的智能相册。</p></div></div>
+          <div class="discovery-grid">
+            <button class="discovery-card" data-go="timeline"><span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><b>时间线</b><p>按拍摄日期浏览全部照片和视频</p></button>
+            <button class="discovery-card" data-go="people"><span><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v2"/></svg></span><b>人物</b><p>本地人脸识别与人物相册</p></button>
+            <button class="discovery-card" data-go="places"><span><svg viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-12A7 7 0 0 0 5 9c0 5.8 7 12 7 12Z"/><circle cx="12" cy="9" r="2.5"/></svg></span><b>地点</b><p>基于照片已有 GPS 的离线聚类</p></button>
+            <button class="discovery-card" data-go="events"><span><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 2v4m8-4v4M5 9h14"/></svg></span><b>事件</b><p>按时间和位置整理旅行与活动</p></button>
+          </div>
+          <article class="panel smart-album-panel personal-only">
+            <div class="panel-head"><div><span class="eyebrow">动态结果集</span><h2>我的智能相册</h2><p>保存搜索条件后，新文件完成索引会自动出现在这里。</p></div><button class="secondary" data-go="search">去创建</button></div>
+            <div class="smart-album-list" id="smartAlbumList"></div>
+            <div class="smart-album-detail" id="smartAlbumDetail" hidden></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-timeline">
+          <div class="section-heading"><div><span class="eyebrow">按时间浏览</span><h1>照片与视频时间线</h1><p>优先使用拍摄时间，缺失时自动回退文件修改时间。</p></div><div class="timeline-controls"><select id="timelineYear" aria-label="年份"><option value="">全部年份</option></select><select id="timelineMonth" aria-label="月份"><option value="">全部月份</option><option value="1">1 月</option><option value="2">2 月</option><option value="3">3 月</option><option value="4">4 月</option><option value="5">5 月</option><option value="6">6 月</option><option value="7">7 月</option><option value="8">8 月</option><option value="9">9 月</option><option value="10">10 月</option><option value="11">11 月</option><option value="12">12 月</option></select><select id="timelineKind" aria-label="文件类型"><option value="">全部类型</option><option value="image">照片</option><option value="video">视频</option></select></div></div>
+          <div class="timeline-summary" id="timelineSummary">正在读取时间线…</div>
+          <div class="timeline-list" id="timelineList"></div>
+          <button class="secondary load-more" id="timelineMore" hidden>加载更多</button>
+        </section>
+
+        <section class="view" id="view-people">
+          <div class="section-heading"><div><span class="eyebrow">本地人物识别</span><h1>人物相册</h1><p>使用 NAS 上的 YuNet 与 SFace 检测、聚类，不上传任何面部数据。</p></div><button class="primary admin-only" id="analyzePeople"><svg viewBox="0 0 24 24"><path d="M12 3v4m0 10v4M3 12h4m10 0h4M5.6 5.6l2.8 2.8m7.2 7.2 2.8 2.8m0-12.8-2.8 2.8m-7.2 7.2-2.8 2.8"/></svg>识别新增照片</button></div>
+          <div class="curation-toolbar admin-only" id="peopleToolbar"><span>选中 <b id="peopleSelectedCount">0</b> 个人物</span><button class="secondary" id="mergePeople">合并到第一个</button><button class="danger" id="hidePeople">隐藏所选</button></div>
+          <div class="people-summary" id="peopleSummary"></div>
+          <div class="people-grid" id="peopleGrid"><div class="empty-state"><b>正在读取人物相册…</b></div></div>
+          <button class="secondary load-more" id="peopleMore" hidden>加载更多</button>
+          <div class="person-detail" id="personDetail" hidden></div>
+        </section>
+
+        <section class="view" id="view-places">
+          <div class="section-heading"><div><span class="eyebrow">按拍摄位置聚合</span><h1>地点相册</h1><p>利用照片和视频内已有 GPS 元数据在本机聚类，不调用外部地图服务。</p></div><button class="primary admin-only" id="analyzePlaces"><svg viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-12A7 7 0 0 0 5 9c0 5.8 7 12 7 12Z"/><circle cx="12" cy="9" r="2.5"/></svg>分析地点</button></div>
+          <div class="album-summary" id="placesSummary"></div>
+          <div class="album-grid" id="placesGrid"><div class="empty-state"><b>正在读取地点相册…</b></div></div>
+          <div class="album-detail" id="placeDetail" hidden></div>
+        </section>
+
+        <section class="view" id="view-events">
+          <div class="section-heading"><div><span class="eyebrow">按时间与空间聚合</span><h1>事件相册</h1><p>根据拍摄时间间隔、活动跨度和位置变化，自动整理旅行、聚会与日常片段。</p></div><button class="primary admin-only" id="analyzeEvents"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 2v4m8-4v4M5 9h14"/><path d="m9 14 2 2 4-4"/></svg>分析事件</button></div>
+          <div class="curation-toolbar admin-only" id="eventsToolbar"><span>选中 <b id="eventsSelectedCount">0</b> 个事件</span><button class="secondary" id="mergeEvents">合并到第一个</button><button class="danger" id="hideEvents">隐藏所选</button></div>
+          <div class="album-summary" id="eventsSummary"></div>
+          <div class="album-grid" id="eventsGrid"><div class="empty-state"><b>正在读取事件相册…</b></div></div>
+          <button class="secondary load-more" id="eventsMore" hidden>加载更多</button>
+          <div class="album-detail" id="eventDetail" hidden></div>
+        </section>
+
+        <section class="view" id="view-libraries">
+          <div class="section-heading"><div><span class="eyebrow">索引来源</span><h1>媒体库</h1><p>只读扫描挂载到容器内的目录，不会改动任何原始文件。</p></div><button class="primary" id="addLibrary"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>添加媒体库</button></div>
+          <div class="library-cards" id="libraryCards"></div>
+        </section>
+
+        <section class="view" id="view-tasks">
+          <div class="section-heading simple-heading"><div><span class="eyebrow">处理管线</span><h1>任务中心</h1><p>快速发现文件，分批完成本地 AI 深度索引。</p></div><span class="queue-status"><i></i>资源保护已启用</span></div>
+          <article class="panel index-control admin-only">
+            <div class="panel-head">
+              <div><span class="eyebrow">安全批处理</span><h2>AI 索引调度</h2><p>按批处理待索引文件；内存不足时自动等待，搜索与问答仍享有优先级。</p></div>
+              <span class="status-badge" id="indexPolicyBadge">读取中</span>
+            </div>
+            <div class="index-control-summary" id="indexControlSummary"></div>
+            <div class="repair-callout" id="repairCallout"><div><b>部分索引自动修复</b><span>只重跑缺失或失败的视觉、转写和向量阶段，不重复处理健康文件。</span></div><button class="secondary" id="repairIndex">修复下一批 50 个</button></div>
+            <form class="index-batch-form" id="indexBatchForm">
+              <label>媒体库<select name="library_id" id="indexLibrary"><option value="">全部媒体库</option></select></label>
+              <label>类型<select name="kind"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option><option value="document">文档</option></select></label>
+              <label>每批数量<select name="limit"><option value="100">100</option><option value="200" selected>200</option><option value="500">500</option><option value="1000">1,000</option></select></label>
+              <label>处理顺序<select name="order"><option value="balanced">均衡优先</option><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="smallest">小文件优先</option></select></label>
+              <button class="primary">索引下一批</button>
+            </form>
+            <form class="index-policy-form" id="indexPolicyForm">
+              <label class="check-row"><input name="enabled" type="checkbox"><span>启用夜间自动索引</span></label>
+              <label>开始<select name="start_hour"></select></label>
+              <label>结束<select name="end_hour"></select></label>
+              <label>每批<input name="batch_size" type="number" min="1" max="10000" value="200"></label>
+              <button class="secondary">保存策略</button>
+            </form>
+          </article>
+          <div class="task-list" id="taskList"></div>
+        </section>
+
+        <section class="view" id="view-organizer">
+          <div class="section-heading"><div><span class="eyebrow">安全整理</span><h1>重复与相似照片</h1><p>先验证完整内容指纹；只有确认另有保留副本时，才允许移入可恢复回收站。</p></div><div class="organizer-actions"><button class="secondary" data-analyze="duplicates">分析重复文件</button><button class="primary" data-analyze="similar">分析相似照片</button></div></div>
+          <div class="organizer-overview" id="organizerOverview"></div>
+          <div class="organizer-tabs"><button class="active" data-organizer-mode="duplicates">完全重复</button><button data-organizer-mode="similar">视觉相似</button></div>
+          <div class="curation-toolbar admin-only" id="duplicateBulkToolbar"><span>默认保留推荐副本，选中其余 <b id="duplicateSelectedCount">0</b> 个</span><button class="danger" id="bulkRecycleDuplicates">批量移入回收站</button></div>
+          <div class="organizer-groups" id="organizerGroups"><div class="empty-state"><b>尚未分析</b><p>先运行分析任务，系统会在本机计算轻量指纹。</p></div></div>
+        </section>
+
+        <section class="view admin-only" id="view-recycle">
+          <div class="section-heading"><div><span class="eyebrow">可恢复清理</span><h1>回收站</h1><p>文件已离开原媒体库，但仍保存在 NAS 的独立回收目录，可恢复或永久清除。</p></div><button class="secondary" id="refreshRecycle">刷新</button></div>
+          <div class="album-summary" id="recycleSummary"></div>
+          <div class="recycle-list" id="recycleList"></div>
+        </section>
+
+        <section class="view" id="view-hardware">
+          <div class="section-heading simple-heading"><div><span class="eyebrow">硬件调度器</span><h1>算力调度</h1><p>根据实际设备节点与运行时能力，自动生成最优执行计划。</p></div></div>
+          <div id="hardwareContent" class="hardware-grid"></div>
+        </section>
+
+        <section class="view admin-only" id="view-users">
+          <div class="section-heading"><div><span class="eyebrow">本地访问控制</span><h1>用户与权限</h1><p>为家庭成员创建独立账号，并限制其可见媒体库。</p></div><button class="primary" id="addUser"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>添加用户</button></div>
+          <div class="user-list" id="userList"></div>
+        </section>
+
+        <section class="view admin-only" id="view-operations">
+          <div class="section-heading"><div><span class="eyebrow">运行与恢复</span><h1>运维与备份</h1><p>检查索引数据库、存储空间与审计记录；备份只包含应用元数据。</p></div><button class="primary" id="createBackup"><svg viewBox="0 0 24 24"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 16h8"/></svg>立即备份</button></div>
+          <div class="ops-grid" id="opsStatus"></div>
+          <article class="panel production-panel"><div class="panel-head"><div><span class="eyebrow">生产就绪检查</span><h2>运行基线</h2><p>持续检查数据库、模型、向量库、访问控制、备份、磁盘和任务心跳。</p></div><span class="status-badge" id="productionBadge">检查中</span></div><div class="production-checks" id="productionChecks"></div></article>
+          <article class="panel stage-health-panel"><div class="panel-head"><div><span class="eyebrow">真实覆盖率</span><h2>AI 索引阶段</h2><p>区分视觉、语音和向量是否真正完成，避免把只有元数据的文件算作可搜索。</p></div><button class="secondary" id="repairFromOperations">修复下一批 50 个</button></div><div class="stage-health-grid" id="stageHealthGrid"></div></article>
+          <article class="panel vision-upgrade-panel"><div class="panel-head"><div><span class="eyebrow">识别质量迁移</span><h2>升级旧版图片描述</h2><p>使用新的事实型描述、OCR 和检索词模板重新处理旧索引；每次只运行一小批。</p></div><button class="secondary" id="upgradeCaptions">升级下一批 50 张</button></div><div class="vision-upgrade-status" id="visionUpgradeStatus"></div></article>
+          <article class="panel snapshot-panel"><div class="panel-head"><div><span class="eyebrow">向量灾备</span><h2>Qdrant 快照</h2><p>完整保存语义向量集合；恢复前会自动备份 SQLite 元数据。</p></div><button class="secondary" id="createVectorSnapshot">创建向量快照</button></div><div class="snapshot-list" id="snapshotList"></div></article>
+          <article class="panel audit-panel"><div class="panel-head"><div><span class="eyebrow">安全追踪</span><h2>最近操作</h2><p>账号、上传、媒体库与备份事件</p></div></div><div class="audit-list" id="auditList"></div></article>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="public-share-shell" id="publicShareShell" hidden>
+    <header class="public-share-head"><div><span id="publicBrand">NAS AI Space</span><small>安全素材审阅</small></div><span class="privacy-pill"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.8 8.2 7 10 4.2-1.8 7-5.5 7-10V6z"/></svg>由私有 NAS 提供</span></header>
+    <main class="public-share-main">
+      <div class="public-share-intro"><span class="eyebrow">SHARED REVIEW</span><h1 id="publicShareTitle">素材审阅</h1><p id="publicShareDescription"></p></div>
+      <form class="public-access-form" id="publicAccessForm" hidden><label>请输入访问码<input name="access_code" type="password" autocomplete="current-password" required></label><button class="primary">进入审阅</button></form>
+      <div class="public-assets" id="publicAssets"></div>
+    </main>
+  </div>
+
+  <div class="modal" id="libraryModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="modal-icon"><svg viewBox="0 0 24 24"><path d="M4 7.5h16v11H4z"/><path d="M7 4h10l2 3.5H5z"/></svg></span><span class="eyebrow">新建数据源</span><h2>添加媒体库</h2><p>目录必须位于已挂载的只读扫描目录内。首次只快速发现文件，再由任务中心分批建立 AI 索引。</p><form id="libraryForm"><label>显示名称<input name="name" required placeholder="例如：家庭相册"></label><label>容器内路径<input name="path" required value="/library" placeholder="/library/photos"></label><button class="primary">添加并快速扫描</button></form></div></div>
+  <div class="modal" id="tokenModal"><div class="modal-card"><button class="modal-close" id="authCloseButton" data-close aria-label="关闭">×</button><span class="modal-icon"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span><span class="eyebrow" id="authEyebrow">安全登录</span><h2 id="authTitle">连接私有空间</h2><p id="authDescription">使用管理员创建的本地账号，或输入系统 API Token。</p><form id="bootstrapForm" hidden><label>管理员用户名<input name="username" required maxlength="80" autocomplete="username" autofocus></label><label>显示名称<input name="display_name" required maxlength="80" value="系统管理员"></label><label>设置管理员密码<input name="password" type="password" required minlength="8" maxlength="512" autocomplete="new-password"></label><label>确认管理员密码<input name="password_confirm" type="password" required minlength="8" maxlength="512" autocomplete="new-password"></label><small class="form-hint">至少 8 位。该账号拥有系统、媒体库和用户管理权限。</small><button class="primary">完成设置并进入空间</button></form><form id="loginForm"><label>用户名<input name="username" required autocomplete="username"></label><label>密码<input name="password" type="password" required minlength="8" autocomplete="current-password"></label><button class="primary">登录</button></form><div class="modal-divider" id="tokenDivider"><span>或使用系统令牌</span></div><form id="tokenForm"><label>API Token<input name="token" type="password" autocomplete="current-password"></label><button class="secondary">保存系统令牌</button></form><button class="text-danger" id="logoutButton" hidden>退出当前登录</button></div></div>
+  <div class="modal" id="uploadModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="modal-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M5 14v5h14v-5"/></svg></span><span class="eyebrow">独立写入空间</span><h2>上传到 NAS</h2><p>文件写入“上传空间”，不会改动只读原相册；上传后自动加入本地索引。</p><form id="uploadForm"><label class="file-drop">选择文件<input name="files" type="file" multiple required><span id="uploadSelection">可一次选择多个文件</span></label><div class="upload-progress" id="uploadProgress" hidden><div><span>正在上传</span><b>0%</b></div><div class="progress"><span></span></div></div><button class="primary">开始上传</button></form></div></div>
+  <div class="modal" id="projectModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="modal-icon"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v11H4z"/></svg></span><span class="eyebrow">新建制作空间</span><h2>创建项目</h2><p>项目用于组织素材、版本、成员、审阅与交付，不会移动原始文件。</p><form id="projectForm"><label>项目名称<input name="name" required maxlength="120" placeholder="例如：夏季品牌宣传片"></label><label>项目说明<textarea name="description" rows="4" maxlength="4000" placeholder="目标、交付规格和时间要求"></textarea></label><label>识别颜色<input name="color" type="color" value="#7c8cff"></label><button class="primary">创建项目</button></form></div></div>
+  <div class="modal" id="folderModal"><div class="modal-card compact-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">项目结构</span><h2>新建文件夹</h2><form id="folderForm"><label>文件夹名称<input name="name" required maxlength="120"></label><label>上级文件夹<select name="parent_id"><option value="">项目根目录</option></select></label><button class="primary">创建</button></form></div></div>
+  <div class="modal" id="projectMemberModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">项目访问控制</span><h2>成员与角色</h2><p>经理可管理项目，编辑可维护素材，审阅者可批注，查看者只读。</p><form id="projectMemberForm"><div class="member-add-row"><select name="user_id"></select><select name="role"><option value="manager">项目经理</option><option value="editor">编辑</option><option value="reviewer">审阅者</option><option value="viewer">查看者</option></select><button class="secondary">添加或更新</button></div></form><p class="form-hint" id="projectMemberHint" hidden>暂无其他已启用账号。请先在“用户与权限”中添加协作者。</p><div class="project-member-list" id="projectMemberList"></div></div></div>
+  <div class="modal" id="projectInboxModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">相机与外部制作入库</span><h2>NAS 项目入库箱</h2><p>把 NAS 自带的 FTP、SFTP、SMB 或同步工具投递目录指向下面的项目子目录。点击收集后，文件会自动扫描、建立 AI 索引并加入当前项目。</p><div class="inbox-path"><span>NAS_UPLOAD_PATH 下的目录</span><code id="projectInboxPath">inbox/project-0</code></div><div class="inbox-stats" id="projectInboxStats"></div><button class="primary" id="collectProjectInbox">扫描并收集入库文件</button><small class="inbox-note">应用不开放额外 FTP 端口；传输认证、限速和磁盘配额继续由 NAS 系统统一管理。</small></div></div>
+  <div class="modal" id="addAssetModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">引用现有资料</span><h2>添加素材到项目</h2><p>素材只引用原文件，项目内可以继续叠加版本，不会复制或移动只读媒体。</p><form id="assetPickerForm"><label>目标项目<select name="project_id" id="assetTargetProject"></select></label><label>目标文件夹<select name="folder_id" id="assetTargetFolder"><option value="">项目根目录</option></select></label><label>搜索资料<input name="q" placeholder="输入文件名、路径或内容"></label><button class="secondary">搜索</button></form><div class="asset-picker-results" id="assetPickerResults"></div></div></div>
+  <div class="modal" id="versionModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">版本栈</span><h2>添加新版本</h2><p>从现有资料库选择文件，新版本会保留完整历史与审阅意见。</p><form id="versionForm"><input name="file_id" type="hidden" required><div class="version-picker-search"><input name="file_query" type="search" placeholder="按文件名、路径或内容搜索"><button class="secondary" type="button" id="searchVersionFiles">搜索资料</button></div><div class="version-file-selection" id="versionFileSelection">尚未选择版本文件</div><div class="asset-picker-results compact-results" id="versionPickerResults"></div><label>版本名称<input name="label" maxlength="120" placeholder="例如：客户反馈修改版"></label><label>版本说明<textarea name="notes" rows="4" maxlength="2000"></textarea></label><button class="primary">添加版本</button></form></div></div>
+  <div class="modal" id="lookModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">色彩工作流</span><h2>生成 LUT 审阅预览</h2><p>选择资料库中的 .cube 文件。视频只生成前 30 秒的轻量预览，原始素材不会被修改。</p><form id="lookForm"><input name="lut_file_id" type="hidden" required><div class="version-picker-search"><input name="file_query" type="search" placeholder="搜索 LUT 文件"><button class="secondary" type="button" id="searchLookFiles">搜索 LUT</button></div><div class="version-file-selection" id="lookFileSelection">尚未选择 LUT</div><div class="asset-picker-results compact-results" id="lookPickerResults"></div><button class="primary">生成预览</button></form></div></div>
+  <div class="modal" id="shareModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">外部审阅与交付</span><h2>创建安全分享</h2><form id="shareForm"><label>分享名称<input name="name" required maxlength="120" placeholder="客户第一轮审阅"></label><label>分享范围<select name="asset_id"><option value="">整个项目</option></select></label><label>访问码（可选）<input name="access_code" maxlength="120" autocomplete="new-password"></label><label>有效期<input name="expires_at" type="datetime-local"></label><label>品牌名称<input name="brand_name" value="NAS AI Space"></label><label>画面水印<input name="watermark_text" placeholder="机密 · 仅供审阅"></label><div class="share-permissions"><label class="check-row"><input name="can_comment" type="checkbox" checked>允许评论</label><label class="check-row"><input name="can_view_versions" type="checkbox">允许查看历史版本</label><label class="check-row"><input name="can_download" type="checkbox">允许下载原文件</label></div><button class="primary">创建分享链接</button></form><div class="share-created" id="shareCreated" hidden><label>链接只在本次显示<input readonly></label><button class="secondary" id="copyShareLink">复制链接</button></div></div></div>
+  <div class="modal" id="notificationModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">协作动态</span><h2>通知</h2><div class="notification-list" id="notificationList"></div><button class="secondary" id="readAllNotifications">全部标为已读</button></div></div>
+  <div class="modal" id="userModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="modal-icon"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v2M17 8h4m-2-2v4"/></svg></span><span class="eyebrow">账号与授权</span><h2 id="userModalTitle">添加用户</h2><form id="userForm"><input name="id" type="hidden"><label>用户名<input name="username" required maxlength="80" autocomplete="off"></label><label>显示名称<input name="display_name" required maxlength="80"></label><label>密码<input name="password" type="password" minlength="8" placeholder="至少 8 位"></label><label>角色<select name="role"><option value="owner" hidden>系统所有者</option><option value="member">普通成员</option><option value="admin">管理员</option></select></label><fieldset><legend>可见媒体库</legend><div class="permission-list" id="permissionList"></div></fieldset><label class="check-row"><input name="enabled" type="checkbox" checked>账号已启用</label><button class="primary">保存用户</button></form></div></div>
+  <div class="modal" id="fileModal"><div class="modal-card file-modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><div class="file-viewer-grid"><div class="file-preview" id="filePreview"></div><div class="file-inspector"><span class="eyebrow" id="fileKind">文件详情</span><h2 id="fileName"></h2><p class="file-path" id="filePath"></p><div class="file-facts" id="fileFacts"></div><div class="file-personal-actions personal-only"><button class="secondary" id="favoriteFile">☆ 收藏</button><label>标签<input id="fileTags" placeholder="家庭, 旅行, 重要"></label><button class="secondary" id="saveFileTags">保存标签</button></div><div class="file-caption" id="fileCaption"></div><div class="caption-editor"><label>人工描述<textarea id="manualCaption" rows="4" placeholder="人工描述会覆盖 AI 视觉描述，并重新建立向量索引。"></textarea></label><button class="secondary" id="saveManualCaption">保存并重建索引</button></div><div class="file-feedback"><span>这份结果或描述是否准确？</span><button class="secondary" data-feedback="relevant">相关</button><button class="secondary" data-feedback="irrelevant">不相关</button><button class="secondary" data-feedback="caption_wrong">描述有误</button></div><div class="file-timeline" id="fileTimeline"></div><div class="viewer-actions"><button class="secondary" id="addFileToProject">添加到项目</button><button class="secondary" id="reindexFile">重建 AI 索引</button><button class="primary" id="openOriginal">打开原文件</button></div></div></div></div></div>
+  <div class="modal asset-review-modal" id="assetReviewModal"><div class="asset-review-shell"><header class="review-head"><button class="icon-button" id="closeAssetReview" aria-label="关闭">×</button><div><span id="reviewProjectName">项目</span><b id="reviewAssetTitle">素材</b></div><select id="reviewVersionSelect"></select><span class="review-status" id="reviewAssetStatus"></span><button class="secondary" id="toggleLookPreview" hidden>原片 / LUT</button><button class="secondary" id="applyLook" hidden>LUT 预览</button><button class="secondary" id="requestProxy">生成代理</button><button class="secondary" id="openVersionModal">新版本</button></header><div class="review-body"><section class="review-stage"><div class="review-canvas" id="reviewCanvas"><div class="viewer-loading">正在载入素材…</div><svg id="annotationLayer" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg><span class="review-watermark" id="reviewWatermark" hidden></span></div><div class="filmstrip-panel" id="reviewFilmstrip"></div><div class="review-transport"><button id="stepBack">−1 帧</button><button id="playPause">播放 / 暂停</button><button id="stepForward">+1 帧</button><span id="reviewTimecode">00:00:00:00</span><button id="toggleDraw">画笔批注</button><button id="clearDrawing">清除画笔</button></div></section><aside class="review-sidebar"><div class="review-tabs"><button class="active" data-review-tab="comments">审阅</button><button data-review-tab="details">信息</button><button data-review-tab="ai">AI 助手</button></div><div class="review-tab active" id="review-tab-comments"><div class="review-comment-list" id="reviewComments"></div><form id="reviewCommentForm"><textarea name="body" rows="3" required placeholder="输入审阅意见，视频会自动记录当前时间点"></textarea><div class="comment-tools"><label>开始<input name="time_start" type="number" min="0" step="0.01"></label><label>结束<input name="time_end" type="number" min="0" step="0.01"></label><label class="check-row"><input name="external" type="checkbox">外部可见</label></div><button class="primary">发布意见</button></form></div><div class="review-tab" id="review-tab-details"><form id="assetDetailForm"><label>素材名称<input name="title" required></label><label>状态<select name="status"></select></label><label>负责人<select name="assignee_id"><option value="">未分配</option></select></label><label>评级<select name="rating"><option value="0">未评级</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option></select></label><label>项目文件夹<select name="folder_id"><option value="">项目根目录</option></select></label><label>说明<textarea name="description" rows="5"></textarea></label><button class="primary">保存素材信息</button></form><div class="qc-report" id="assetQc"></div></div><div class="review-tab" id="review-tab-ai"><button class="primary" id="generateReviewBrief">生成审阅摘要</button><div class="ai-review-brief" id="aiReviewBrief"><p>AI 会结合版本描述和审阅意见，生成修改清单。</p></div></div></aside></div></div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/app.js?v=17"></script>
+</body>
+</html>

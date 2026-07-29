@@ -1,0 +1,84 @@
+services:
+  app:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      NAS_AI_INFERENCE_BACKEND: openvino
+      NAS_AI_LOCAL_AI_URL: ""
+      NAS_AI_EMBEDDING_URL: http://ovms-embedding:8000/v3
+      NAS_AI_EMBEDDING_MODEL: ${OPENVINO_EMBEDDING_MODEL:-OpenVINO/Qwen3-Embedding-0.6B-fp16-ov}
+      NAS_AI_VISION_URL: http://ovms-vlm:8000/v3
+      NAS_AI_CHAT_URL: http://ovms-vlm:8000/v3
+      NAS_AI_VISION_MODEL: ${OPENVINO_VLM_NAME:-ovms-model-vl}
+      NAS_AI_CHAT_MODEL: ${OPENVINO_VLM_NAME:-ovms-model-vl}
+    depends_on:
+      ollama:
+        condition: service_started
+        required: false
+      model-init:
+        condition: service_started
+        required: false
+      ovms-embedding:
+        condition: service_started
+      ovms-vlm:
+        condition: service_started
+
+  ollama:
+    profiles: [ollama-disabled]
+
+  model-init:
+    profiles: [ollama-disabled]
+
+  ovms-embedding:
+    image: openvino/model_server:2026.2.1-gpu
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - openvino-embedding-models:/models
+    command:
+      - --rest_port
+      - "8000"
+      - --model_repository_path
+      - /models
+      - --source_model
+      - ${OPENVINO_EMBEDDING_MODEL:-OpenVINO/Qwen3-Embedding-0.6B-fp16-ov}
+      - --model_name
+      - ${OPENVINO_EMBEDDING_MODEL:-OpenVINO/Qwen3-Embedding-0.6B-fp16-ov}
+      - --task
+      - embeddings
+      - --target_device
+      - GPU
+    security_opt:
+      - no-new-privileges:true
+
+  ovms-vlm:
+    image: openvino/model_server:2026.2.1-gpu
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - openvino-vlm-models:/models
+    command:
+      - --rest_port
+      - "8000"
+      - --model_repository_path
+      - /models
+      - --source_model
+      - ${OPENVINO_VLM_MODEL:-OpenVINO/Qwen3-VL-8B-Instruct-int4-ov}
+      - --model_name
+      - ${OPENVINO_VLM_NAME:-ovms-model-vl}
+      - --task
+      - text_generation
+      - --pipeline_type
+      - VLM_CB
+      - --target_device
+      - GPU
+      - --cache_size
+      - ${OPENVINO_CACHE_GB:-2}
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  openvino-embedding-models:
+  openvino-vlm-models:

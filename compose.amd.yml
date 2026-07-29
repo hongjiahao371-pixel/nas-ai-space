@@ -1,0 +1,15 @@
+services:
+  app:
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    environment:
+      NAS_AI_INFERENCE_BACKEND: rocm
+  ollama:
+    image: ollama/ollama:rocm
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    environment:
+      ROCR_VISIBLE_DEVICES: ${ROCR_VISIBLE_DEVICES:-0}
+      HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}

@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+* * * * * root /usr/local/sbin/nas-ai-space-index-orchestrator >> /var/log/nas-ai-space-index.log 2>&1
