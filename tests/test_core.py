@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 import zipfile
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec
@@ -63,6 +64,7 @@ from app.services.proxy import generate_look_preview, generate_proxy
 from app.services.recycle import RecycleBin
 from app.services.scanner import scan_library
 from app.services.search import SearchService, _partial_coverage_cap, _query_groups
+from app.services.watcher import LibraryWatcher
 from app.services.workspaces import WorkspaceService
 
 
@@ -108,6 +110,28 @@ class SemanticAI:
     @staticmethod
     def embedding_query(query):
         return f"Instruct: test\nQuery: {query}"
+
+
+def _make_test_font(path: Path) -> None:
+    # 用 fontTools 现场生成一个最小可用 TTF，避免测试依赖系统字体
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    builder = FontBuilder(1000)
+    builder.setupGlyphOrder([".notdef", "A"])
+    builder.setupCharacterMap({ord("A"): "A"})
+    pen = TTGlyphPen(None)
+    pen.moveTo((50, 0))
+    pen.lineTo((250, 700))
+    pen.lineTo((450, 0))
+    pen.closePath()
+    builder.setupGlyf({".notdef": TTGlyphPen(None).glyph(), "A": pen.glyph()})
+    builder.setupHorizontalMetrics({".notdef": (500, 0), "A": (500, 0)})
+    builder.setupHorizontalHeader(ascent=800, descent=-200)
+    builder.setupNameTable({"familyName": "TestFont", "styleName": "Regular", "fullName": "TestFont Regular"})
+    builder.setupOS2()
+    builder.setupPost()
+    builder.save(path)
 
 
 class CoreTests(unittest.TestCase):
@@ -213,6 +237,95 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(decoder, "libraw")
         with Image.open(destination) as output:
             self.assertEqual(output.size, (160, 120))
+
+    def test_design_files_are_scanned_as_images(self) -> None:
+        for name in ("poster.psd", "big.psb", "vector.ai", "logo.eps", "brand.ttf", "type.otf", "pack.ttc"):
+            (self.library_path / name).write_bytes(b"fake")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        rows = self.database.fetchall("SELECT name, kind FROM files")
+        self.assertEqual(len(rows), 7)
+        self.assertTrue(all(row["kind"] == "image" for row in rows))
+
+    def test_psd_preview_uses_psd_tools(self) -> None:
+        psd_path = self.library_path / "poster.psd"
+        psd_path.write_bytes(b"fake-psd")
+        thumbnail = Path(self.temp.name) / "psd.jpg"
+
+        class FakePsd:
+            @staticmethod
+            def composite():
+                return Image.new("RGB", (800, 400), "#336699")
+
+        with patch("psd_tools.PSDImage.open", return_value=FakePsd()):
+            create_thumbnail(psd_path, thumbnail, "image", 320)
+        with Image.open(thumbnail) as output:
+            self.assertEqual(output.size, (320, 160))
+
+    def test_psd_oversize_is_skipped(self) -> None:
+        psd_path = self.library_path / "huge.psd"
+        psd_path.write_bytes(b"fake-psd")
+        with patch("app.services.extractors.settings", replace(settings, max_psd_bytes=1)):
+            with self.assertRaises(ValueError):
+                create_thumbnail(psd_path, Path(self.temp.name) / "huge.jpg", "image", 320)
+
+    def test_psd_index_falls_back_to_psd_tools(self) -> None:
+        psd_path = self.library_path / "art.psd"
+        psd_path.write_bytes(b"fake-psd")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file = self.database.get_file(self.database.pending_file_ids()[0])
+        self.local_settings.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        class FakePsd:
+            @staticmethod
+            def composite():
+                return Image.new("RGB", (1024, 512), "#7a3bd0")
+
+        with patch("psd_tools.PSDImage.open", return_value=FakePsd()):
+            result, _ = index_file(file, self.local_settings, LocalAIClient(self.local_settings))
+        self.assertEqual((result["width"], result["height"]), (1024, 512))
+        self.assertEqual(result["metadata"]["decoder"], "psd-tools")
+
+    def test_ai_preview_uses_poppler_pdf_path(self) -> None:
+        ai_path = self.library_path / "vector.ai"
+        ai_path.write_bytes(b"%PDF-1.5 fake")
+        thumbnail = Path(self.temp.name) / "ai.jpg"
+
+        def fake_render(path, page, destination):
+            Image.new("RGB", (640, 480), "#cccccc").save(destination)
+            return True
+
+        with patch("app.services.extractors._render_pdf_page", side_effect=fake_render):
+            create_thumbnail(ai_path, thumbnail, "image", 320)
+        with Image.open(thumbnail) as output:
+            self.assertEqual(output.size, (640, 480))
+
+    def test_ai_without_pdf_page_is_rejected(self) -> None:
+        ai_path = self.library_path / "legacy.ai"
+        ai_path.write_bytes(b"fake-ai")
+        with patch("app.services.extractors._render_pdf_page", return_value=False):
+            with self.assertRaises(ValueError):
+                create_thumbnail(ai_path, Path(self.temp.name) / "legacy.jpg", "image", 320)
+
+    def test_eps_without_ghostscript_is_marked_unsupported(self) -> None:
+        eps_path = self.library_path / "logo.eps"
+        eps_path.write_bytes(b"%!PS-Adobe-3.0 EPSF-3.0")
+        with patch("app.services.extractors.shutil.which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "Ghostscript"):
+                create_thumbnail(eps_path, Path(self.temp.name) / "eps.jpg", "image", 320)
+
+    def test_font_preview_renders_sample_sheet(self) -> None:
+        font_path = self.library_path / "brand.ttf"
+        _make_test_font(font_path)
+        thumbnail = Path(self.temp.name) / "font.jpg"
+        create_thumbnail(font_path, thumbnail, "image", 320)
+        with Image.open(thumbnail) as output:
+            self.assertEqual(output.size, (320, 240))
+
+    def test_broken_font_degrades_with_error(self) -> None:
+        font_path = self.library_path / "broken.ttf"
+        font_path.write_bytes(b"not-a-font")
+        with self.assertRaises(ValueError):
+            create_thumbnail(font_path, Path(self.temp.name) / "broken.jpg", "image", 320)
 
     def test_video_frame_extraction_falls_back_to_first_frame(self) -> None:
         video_path = self.library_path / "truncated.mkv"
@@ -1582,6 +1695,198 @@ class APITests(unittest.TestCase):
         finally:
             PUBLIC_ACCESS_FAILURES.clear()
 
+    def test_comment_attachments_visibility_scope_and_notifications(self) -> None:
+        upload = self.client.post(
+            "/api/uploads",
+            content=b"attachment media",
+            headers={"X-Filename": "attachment-media.txt"},
+        )
+        self.assertEqual(upload.status_code, 201)
+        file_id = upload.json()["file"]["id"]
+        project = self.client.post("/api/projects", json={
+            "name": "附件项目",
+            "description": "评论附件测试",
+            "color": "#7c8cff",
+        })
+        self.assertEqual(project.status_code, 201)
+        project_id = project.json()["id"]
+        asset = self.client.post(f"/api/projects/{project_id}/assets", json={
+            "file_id": file_id,
+            "title": "附件素材",
+        })
+        self.assertEqual(asset.status_code, 201)
+        asset_id = asset.json()["id"]
+        internal = self.client.post(f"/api/assets/{asset_id}/comments", json={
+            "body": "团队内部意见",
+            "visibility": "team",
+        })
+        self.assertEqual(internal.status_code, 201)
+        internal_id = internal.json()["id"]
+        external = self.client.post(f"/api/assets/{asset_id}/comments", json={
+            "body": "外部可见意见",
+            "visibility": "external",
+        })
+        self.assertEqual(external.status_code, 201)
+        external_id = external.json()["id"]
+
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+        attachment = self.client.post(
+            f"/api/comments/{external_id}/attachments",
+            content=png,
+            headers={"X-Filename": "%E6%88%AA%E5%9B%BE.png"},
+        )
+        self.assertEqual(attachment.status_code, 201)
+        self.assertEqual(attachment.json()["original_name"], "截图.png")
+        stored = settings.data_dir / "comment-attachments" / attachment.json()["name"]
+        self.assertTrue(stored.is_file())
+        self.assertEqual(stored.read_bytes(), png)
+        self.assertNotIn("/", attachment.json()["name"])
+        bad_type = self.client.post(
+            f"/api/comments/{external_id}/attachments",
+            content=b"payload",
+            headers={"X-Filename": "evil.exe"},
+        )
+        self.assertEqual(bad_type.status_code, 400)
+        traversal = self.client.post(
+            f"/api/comments/{external_id}/attachments",
+            content=png,
+            headers={"X-Filename": "../escape.png"},
+        )
+        self.assertEqual(traversal.status_code, 201)
+        self.assertTrue((settings.data_dir / "comment-attachments" / traversal.json()["name"]).is_file())
+
+        detail = self.client.get(f"/api/assets/{asset_id}")
+        comments = {item["id"]: item for item in detail.json()["comments"]}
+        self.assertEqual(len(comments[external_id]["attachments"]), 2)
+        ticket_url = comments[external_id]["attachments"][0]["url"]
+        downloaded = self.client.get(ticket_url)
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.content, png)
+
+        share = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "asset_id": asset_id,
+            "name": "附件审阅",
+            "can_comment": True,
+        })
+        self.assertEqual(share.status_code, 201)
+        token = share.json()["token"]
+        public = self.client.post(f"/api/public/shares/{token}", json={"access_code": ""})
+        self.assertEqual(public.status_code, 200)
+        public_comments = public.json()["assets"][0]["comments"]
+        self.assertEqual({item["body"] for item in public_comments}, {"外部可见意见"})
+        public_attachment = public_comments[0]["attachments"][0]
+        served = self.client.get(public_attachment["url"])
+        self.assertEqual(served.status_code, 200)
+        self.assertEqual(served.content, png)
+
+        guest = self.client.post(f"/api/public/shares/{token}/comments", json={
+            "asset_id": asset_id,
+            "guest_name": "客户",
+            "body": "外部附件意见",
+            "access_code": "",
+        })
+        self.assertEqual(guest.status_code, 201)
+        guest_attachment = self.client.post(
+            f"/api/public/shares/{token}/comments/{guest.json()['id']}/attachments?access_code=",
+            content=png,
+            headers={"X-Filename": "guest.png"},
+        )
+        self.assertEqual(guest_attachment.status_code, 201)
+        guest_stored = settings.data_dir / "comment-attachments" / guest_attachment.json()["name"]
+        member_comment_attach = self.client.post(
+            f"/api/public/shares/{token}/comments/{external_id}/attachments?access_code=",
+            content=png,
+            headers={"X-Filename": "guest.png"},
+        )
+        self.assertEqual(member_comment_attach.status_code, 404)
+        internal_comment_attach = self.client.post(
+            f"/api/public/shares/{token}/comments/{internal_id}/attachments?access_code=",
+            content=png,
+            headers={"X-Filename": "guest.png"},
+        )
+        self.assertEqual(internal_comment_attach.status_code, 404)
+
+        csv_all = self.client.get(f"/api/projects/{project_id}/review-export?format=csv")
+        self.assertIn("可见范围", csv_all.text)
+        self.assertIn("团队内部意见", csv_all.text)
+        csv_external = self.client.get(f"/api/projects/{project_id}/review-export?format=csv&scope=external")
+        self.assertIn("外部可见意见", csv_external.text)
+        self.assertNotIn("团队内部意见", csv_external.text)
+        xml_team = self.client.get(f"/api/projects/{project_id}/review-export?format=fcpxml&scope=team")
+        self.assertIn("【团队内部】", xml_team.text)
+        self.assertNotIn("外部可见意见", xml_team.text)
+
+        username = f"notify-{time.time_ns()}"
+        created = self.client.post("/api/users", json={
+            "username": username,
+            "display_name": "通知用户",
+            "password": "notify-password-1",
+            "role": "member",
+        })
+        self.assertEqual(created.status_code, 201)
+        user_id = created.json()["id"]
+        membership = self.client.put(f"/api/projects/{project_id}/members", json={
+            "user_id": user_id,
+            "role": "reviewer",
+        })
+        self.assertEqual(membership.status_code, 200)
+        guest_two = self.client.post(f"/api/public/shares/{token}/comments", json={
+            "asset_id": asset_id,
+            "guest_name": "客户",
+            "body": "第二条外部意见",
+            "access_code": "",
+        })
+        self.assertEqual(guest_two.status_code, 201)
+        login = self.client.post("/api/auth/login", json={
+            "username": username,
+            "password": "notify-password-1",
+        })
+        self.assertEqual(login.status_code, 200)
+        headers = {"Authorization": f"Bearer {login.json()['token']}"}
+        notifications = self.client.get("/api/notifications", headers=headers)
+        self.assertEqual(notifications.status_code, 200)
+        self.assertGreaterEqual(notifications.json()["unread"], 1)
+        unread_id = next(
+            item["id"] for item in notifications.json()["items"] if not item["read_at"]
+        )
+        read_one = self.client.post(
+            f"/api/notifications/read?notification_id={unread_id}",
+            headers=headers,
+        )
+        self.assertEqual(read_one.status_code, 200)
+        read_all = self.client.post("/api/notifications/read", headers=headers)
+        self.assertEqual(read_all.status_code, 200)
+        self.assertEqual(
+            self.client.get("/api/notifications", headers=headers).json()["unread"],
+            0,
+        )
+
+        task_id = state.database.create_task("analyze_duplicates", {}, user_id=user_id)
+        state.database.fail_task(task_id, "测试失败")
+        retry = self.client.post(f"/api/tasks/{task_id}/retry")
+        self.assertEqual(retry.status_code, 202)
+        status = "pending"
+        for _ in range(100):
+            status = state.database.get_task(task_id)["status"]
+            if status in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.03)
+        self.assertEqual(status, "completed")
+        task_notifications = state.database.fetchall(
+            "SELECT * FROM notifications WHERE user_id = ? AND type = 'task.finished' AND target_id = ?",
+            (user_id, str(task_id)),
+        )
+        self.assertEqual(len(task_notifications), 1)
+        self.assertIn("完成", task_notifications[0]["title"])
+
+        deleted = self.client.delete(f"/api/comments/{external_id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(stored.exists())
+        self.assertFalse((settings.data_dir / "comment-attachments" / traversal.json()["name"]).exists())
+        removed = self.client.delete(f"/api/projects/{project_id}")
+        self.assertEqual(removed.status_code, 200)
+        self.assertFalse(guest_stored.exists())
+
     def test_project_inbox_collects_and_indexes_dropped_files(self) -> None:
         project = self.client.post("/api/projects", json={
             "name": f"入库项目-{time.time_ns()}",
@@ -1625,5 +1930,964 @@ class APITests(unittest.TestCase):
             self.client.delete(f"/api/projects/{project_id}")
 
 
+class SecurityHardeningTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client_context = TestClient(app)
+        cls.client = cls.client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client_context.__exit__(None, None, None)
+
+    def _shared_asset(self, name: str) -> tuple[int, int]:
+        upload = self.client.post(
+            "/api/uploads",
+            content=f"{name} media".encode(),
+            headers={"X-Filename": f"security-{name}.txt"},
+        )
+        self.assertEqual(upload.status_code, 201)
+        file_id = upload.json()["file"]["id"]
+        project = self.client.post("/api/projects", json={
+            "name": f"{name}-{time.time_ns()}",
+            "color": "#7c8cff",
+        })
+        self.assertEqual(project.status_code, 201)
+        project_id = project.json()["id"]
+        asset = self.client.post(f"/api/projects/{project_id}/assets", json={
+            "file_id": file_id,
+            "title": f"{name}素材",
+        })
+        self.assertEqual(asset.status_code, 201)
+        return project_id, asset.json()["id"]
+
+    def test_public_comment_wrong_access_code_counts_toward_rate_limit(self) -> None:
+        from app.main import PUBLIC_ATTACHMENT_ATTEMPTS, PUBLIC_COMMENT_ATTEMPTS
+
+        project_id, asset_id = self._shared_asset("rate-limit")
+        share = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "asset_id": asset_id,
+            "name": "口令限流分享",
+            "access_code": "correct-code",
+            "can_comment": True,
+        })
+        self.assertEqual(share.status_code, 201)
+        token = share.json()["token"]
+        PUBLIC_ACCESS_FAILURES.clear()
+        PUBLIC_COMMENT_ATTEMPTS.clear()
+        try:
+            missing = self.client.post("/api/public/shares/not-a-real-token/comments", json={
+                "asset_id": asset_id,
+                "guest_name": "访客",
+                "body": "不存在的分享",
+                "access_code": "whatever",
+            })
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(PUBLIC_ACCESS_FAILURES, {})
+            for _ in range(10):
+                rejected = self.client.post(f"/api/public/shares/{token}/comments", json={
+                    "asset_id": asset_id,
+                    "guest_name": "访客",
+                    "body": "爆破尝试",
+                    "access_code": "wrong-code",
+                })
+                self.assertEqual(rejected.status_code, 401)
+            blocked = self.client.post(f"/api/public/shares/{token}", json={"access_code": "correct-code"})
+            self.assertEqual(blocked.status_code, 429)
+            self.assertIn("retry-after", blocked.headers)
+        finally:
+            PUBLIC_ACCESS_FAILURES.clear()
+            PUBLIC_COMMENT_ATTEMPTS.clear()
+            PUBLIC_ATTACHMENT_ATTEMPTS.clear()
+
+    def test_share_access_code_min_length(self) -> None:
+        project_id, _ = self._shared_asset("access-code")
+        short = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "name": "短码分享",
+            "access_code": "12345",
+        })
+        self.assertEqual(short.status_code, 400)
+        empty = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "name": "无码分享",
+            "access_code": "",
+        })
+        self.assertEqual(empty.status_code, 201)
+        valid = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "name": "正常分享",
+            "access_code": "123456",
+        })
+        self.assertEqual(valid.status_code, 201)
+
+    def test_password_change_invalidates_sessions(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="nas-ai-session-")
+        self.addCleanup(temp.cleanup)
+        database = Database(Path(temp.name) / "index.db")
+        database.initialize()
+        user = database.create_user("会话用户", "会话用户", "old-hash", "member", [])
+        user_id = int(user["id"])
+        token_hash = "session-token-hash"
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(timespec="seconds")
+        database.create_session(user_id, token_hash, expires_at)
+        self.assertIsNotNone(database.resolve_session(token_hash))
+        database.set_user(user_id, "会话用户", "member", True, [])
+        self.assertIsNotNone(database.resolve_session(token_hash))
+        database.set_user(user_id, "会话用户", "member", True, [], "new-hash")
+        self.assertIsNone(database.resolve_session(token_hash))
+
+    def test_workspace_tickets_thread_safety(self) -> None:
+        from app.main import WORKSPACE_TICKETS_LOCK, _workspace_ticket
+
+        temp = tempfile.TemporaryDirectory(prefix="nas-ai-tickets-")
+        self.addCleanup(temp.cleanup)
+        source = Path(temp.name) / "ticket-media.txt"
+        source.write_text("ticket media", encoding="utf-8")
+        now = time.monotonic()
+        state.workspace_tickets = {
+            f"seed-{index}": (str(source), "text/plain", "seed.txt", now + 3600, False)
+            for index in range(4096)
+        }
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(50):
+                    url = _workspace_ticket(str(source), "text/plain", "ticket-media.txt")
+                    ticket = url.rsplit("/", 1)[-1]
+                    with WORKSPACE_TICKETS_LOCK:
+                        state.workspace_tickets.pop(ticket, None)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+            self.assertLessEqual(len(state.workspace_tickets), 4096)
+        finally:
+            state.workspace_tickets = {}
+
+
+class _RecordingVectors:
+    def __init__(self):
+        self.filters = []
+
+    def search(self, vector, limit, kind="", library_ids=None, file_ids=None):
+        self.filters.append(None if file_ids is None else list(file_ids))
+        return []
+
+
+class _RecordingConnection:
+    def __init__(self, connection, statements):
+        self._connection = connection
+        self._statements = statements
+
+    def execute(self, sql, parameters=()):
+        self._statements.append(sql)
+        return self._connection.execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        batch = list(seq_of_parameters)
+        self._statements.append(f"{sql} [x{len(batch)}]")
+        return self._connection.executemany(sql, batch)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+class _WatcherDatabase:
+    def __init__(self, path):
+        self.path = path
+
+    def list_libraries(self):
+        return [{"id": 1, "path": str(self.path), "enabled": 1}]
+
+
+class PerformanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="nas-ai-perf-")
+        root = Path(self.temp.name)
+        self.library_path = root / "library"
+        self.library_path.mkdir()
+        self.database = Database(root / "index.db")
+        self.database.initialize()
+        self.library = self.database.create_library("性能资料", str(self.library_path))
+        self.local_settings = replace(
+            settings,
+            data_dir=root / "data",
+            cache_dir=root / "cache",
+            database_path=root / "index.db",
+            scan_root=self.library_path,
+            local_ai_base_url="",
+            embedding_model="",
+            vision_model="",
+            chat_model="",
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _record_statements(self):
+        statements = []
+        original_transaction = self.database.transaction
+
+        @contextmanager
+        def recording_transaction():
+            with original_transaction() as connection:
+                yield _RecordingConnection(connection, statements)
+
+        return statements, patch.object(self.database, "transaction", recording_transaction)
+
+    def test_like_fallback_runs_once_and_scans_only_path_columns(self) -> None:
+        (self.library_path / "无关文件.txt").write_text("没有任何匹配词", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        statements = []
+        original_fetchall = self.database.fetchall
+
+        def recording_fetchall(query, params=()):
+            statements.append(query)
+            return original_fetchall(query, params)
+
+        search = SearchService(self.database, LocalAIClient(self.local_settings), NullVectors())
+        with patch.object(self.database, "fetchall", recording_fetchall):
+            # 词长 >= 3：单次 LIKE 兜底只扫 name/relative_path 两个短列
+            search.search("report summary")
+            like_queries = [sql for sql in statements if " LIKE " in sql]
+            self.assertEqual(len(like_queries), 1)
+            self.assertIn("f.name LIKE ? OR f.relative_path LIKE ?", like_queries[0])
+            self.assertNotIn("extracted_text LIKE", like_queries[0])
+            self.assertNotIn("ai_caption LIKE", like_queries[0])
+            # 词长 < 3（双字中文）超出 trigram 最小匹配长度，单次兜底必须覆盖大文本列，
+            # 但仍然整个搜索只执行一次，不再每组一次
+            statements.clear()
+            search.search("猫咪 花盆")
+            like_queries = [sql for sql in statements if " LIKE " in sql]
+            self.assertEqual(len(like_queries), 1)
+            self.assertIn("extracted_text LIKE", like_queries[0])
+
+    def test_fts_syntax_error_retries_with_cleaned_query(self) -> None:
+        document = self.library_path / "weekly-report.txt"
+        document.write_text("quarterly report summary", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        file = self.database.get_file(file_id)
+        result, chunks = index_file(file, self.local_settings, LocalAIClient(self.local_settings))
+        self.database.finish_file_index(file_id, result, chunks)
+
+        statements = []
+        original_fetchall = self.database.fetchall
+
+        def recording_fetchall(query, params=()):
+            statements.append(query)
+            return original_fetchall(query, params)
+
+        search = SearchService(self.database, LocalAIClient(self.local_settings), NullVectors())
+        with patch.object(self.database, "fetchall", recording_fetchall):
+            response = search.search('report "')
+        # 未闭合引号触发 FTS OperationalError 后，先用清理后的表达式重试命中，不再退 LIKE
+        like_queries = [sql for sql in statements if " LIKE " in sql]
+        self.assertEqual(like_queries, [])
+        self.assertEqual(response["results"][0]["name"], "weekly-report.txt")
+
+    def test_upsert_files_preloads_and_batches_unchanged_updates(self) -> None:
+        for index in range(3):
+            (self.library_path / f"file-{index}.txt").write_text(f"内容 {index}", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        token_before = self.database.fetchone("SELECT scan_token FROM files LIMIT 1")["scan_token"]
+
+        statements, patcher = self._record_statements()
+        with patcher:
+            result = scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        self.assertEqual(result["unchanged"], 3)
+        # 预载按本批 path 一次查询（files.path 全局 UNIQUE，不限 library_id，重叠库命中已有行走 UPDATE），
+        # 既不是每文件一条 SELECT 点查，也不是不带 path 限定的全库 SELECT
+        preload_selects = [sql for sql in statements if sql.startswith("SELECT id, path, size, mtime_ns FROM files")]
+        self.assertTrue(preload_selects)
+        self.assertTrue(all("WHERE path IN" in sql for sql in preload_selects))
+        # 未变文件只刷 scan_token，合并成一次 executemany，没有逐行 UPDATE
+        token_updates = [
+            sql for sql in statements
+            if sql.startswith("UPDATE files SET library_id = ?, relative_path = ?, scan_token")
+        ]
+        self.assertEqual(token_updates, ["UPDATE files SET library_id = ?, relative_path = ?, scan_token = ? WHERE id = ? [x3]"])
+        # similarity_groups 全量重算只在扫描结束时执行一次
+        self.assertEqual(sum(1 for sql in statements if "UPDATE similarity_groups" in sql), 1)
+        tokens = {row["scan_token"] for row in self.database.fetchall("SELECT scan_token FROM files")}
+        self.assertEqual(len(tokens), 1)
+        self.assertNotEqual(tokens.pop(), token_before)
+
+    def test_upsert_files_finalize_controls_group_recompute(self) -> None:
+        (self.library_path / "a.txt").write_text("内容", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        row = self.database.fetchone("SELECT * FROM files LIMIT 1")
+        values = dict(row)
+        values["scan_token"] = "new-token"
+
+        statements, patcher = self._record_statements()
+        with patcher:
+            result = self.database.upsert_files([values], finalize=False)
+            self.assertEqual(result, [(int(row["id"]), False)])
+            self.assertFalse(any("similarity_groups" in sql for sql in statements))
+            statements.clear()
+            self.assertEqual(self.database.upsert_files([], finalize=True), [])
+            self.assertTrue(any("UPDATE similarity_groups" in sql for sql in statements))
+        self.assertEqual(
+            self.database.fetchone("SELECT scan_token FROM files WHERE id = ?", (row["id"],))["scan_token"],
+            "new-token",
+        )
+
+    def test_filter_sql_pushdown_matches_legacy_file_id_results(self) -> None:
+        (self.library_path / "周报甲.txt").write_text("季度报告：甲图书馆的统计数据", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        other_path = Path(self.temp.name) / "other"
+        other_path.mkdir()
+        other_library = self.database.create_library("其他库", str(other_path))
+        (other_path / "周报乙.txt").write_text("季度报告：乙图书馆的统计数据", encoding="utf-8")
+        scan_library(self.database, other_library, lambda *_: None, lambda: False)
+        for file_id in self.database.pending_file_ids():
+            file = self.database.get_file(file_id)
+            result, chunks = index_file(file, self.local_settings, LocalAIClient(self.local_settings))
+            self.database.finish_file_index(file_id, result, chunks)
+
+        search = SearchService(self.database, LocalAIClient(self.local_settings), NullVectors())
+        unfiltered = search.search("季度报告")
+        self.assertEqual(len(unfiltered["results"]), 2)
+        id_other = int(self.database.fetchone("SELECT id FROM files WHERE name = ?", ("周报乙.txt",))["id"])
+        legacy = search.search("季度报告", file_ids=[id_other])
+        pushed = search.search("季度报告", filter_sql=("f.library_id = ?", [int(other_library["id"])]))
+        self.assertEqual([item["id"] for item in legacy["results"]], [id_other])
+        self.assertEqual([item["id"] for item in pushed["results"]], [id_other])
+
+    def test_vector_filter_batches_large_id_sets(self) -> None:
+        vectors = _RecordingVectors()
+        search = SearchService(self.database, SemanticAI(self.local_settings), vectors)
+        search.search("测试", file_ids=list(range(1, 4501)))
+        self.assertEqual([len(chunk) for chunk in vectors.filters], [2000, 2000, 500])
+
+        # filter_sql 路径同样把过滤后的 id 分批传给向量检索，不再静默放弃过滤
+        (self.library_path / "v.txt").write_text("内容", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = int(self.database.fetchone("SELECT id FROM files LIMIT 1")["id"])
+        vectors_sql = _RecordingVectors()
+        search_sql = SearchService(self.database, SemanticAI(self.local_settings), vectors_sql)
+        search_sql.search("测试", filter_sql=("f.library_id = ?", [int(self.library["id"])]))
+        self.assertEqual(vectors_sql.filters, [[file_id]])
+
+    def test_watcher_shallow_probe_skips_unchanged_deep_walk(self) -> None:
+        nested = self.library_path / "dir1"
+        nested.mkdir()
+        (nested / "file1.txt").write_text("一", encoding="utf-8")
+        (self.library_path / "file2.txt").write_text("二", encoding="utf-8")
+        watcher = LibraryWatcher(_WatcherDatabase(self.library_path), self.local_settings, None)
+        watcher.mode = "hybrid"
+        deep_calls = 0
+        original_deep = watcher._deep_signature
+
+        def counting_deep(path):
+            nonlocal deep_calls
+            deep_calls += 1
+            return original_deep(path)
+
+        watcher._deep_signature = counting_deep
+        stamp = time.time_ns() + 5_000_000_000
+
+        first = watcher._signatures()
+        self.assertEqual(deep_calls, 1)
+        second = watcher._signatures()
+        self.assertEqual(deep_calls, 1)
+        self.assertEqual(first, second)
+
+        # 顶层文件直接修改：文件自身 mtime 进入浅层探测 → 深入递归
+        (self.library_path / "file2.txt").write_text("二改", encoding="utf-8")
+        stamp += 5_000_000_000
+        os.utime(self.library_path / "file2.txt", ns=(stamp, stamp))
+        third = watcher._signatures()
+        self.assertEqual(deep_calls, 2)
+        self.assertNotEqual(first, third)
+
+        # 顶层目录内新增文件：目录 mtime 刷新 → 深入递归
+        (nested / "file3.txt").write_text("三", encoding="utf-8")
+        stamp += 5_000_000_000
+        os.utime(nested, ns=(stamp, stamp))
+        watcher._signatures()
+        self.assertEqual(deep_calls, 3)
+
+        # 取舍：更深层已有文件的纯内容修改不刷新顶层 mtime，浅层探测会跳过，
+        # hybrid 模式靠 inotify 实时事件覆盖这类变化（见 watcher._signatures 注释）
+        (nested / "file1.txt").write_text("一改", encoding="utf-8")
+        stamp += 5_000_000_000
+        os.utime(nested / "file1.txt", ns=(stamp, stamp))
+        watcher._signatures()
+        self.assertEqual(deep_calls, 3)
+
+        # polling 模式没有 inotify 兜底，每次都必须全量递归
+        watcher.mode = "polling"
+        watcher._signatures()
+        self.assertEqual(deep_calls, 4)
+
+    def test_watcher_signature_interval_follows_mode(self) -> None:
+        watcher = LibraryWatcher(_WatcherDatabase(self.library_path), self.local_settings, None)
+        watcher.mode = "hybrid"
+        self.assertEqual(watcher._signature_interval(), self.local_settings.watch_signature_seconds)
+        watcher.mode = "polling"
+        self.assertEqual(watcher._signature_interval(), self.local_settings.watch_poll_seconds)
+        self.assertEqual(settings.watch_signature_seconds, 1800)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreviewSecurityTests(unittest.TestCase):
+    """安全修复与预览管线的回归测试（附件/上传/内容服务/分享区域）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client_context = TestClient(app)
+        cls.client = cls.client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client_context.__exit__(None, None, None)
+
+    def _temp_db(self, prefix: str):
+        temp = tempfile.TemporaryDirectory(prefix=prefix)
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        library_path = root / "library"
+        library_path.mkdir()
+        database = Database(root / "index.db")
+        database.initialize()
+        library = database.create_library("测试库", str(library_path))
+        return root, library_path, database, library
+
+    def _shared_asset(self, name: str) -> tuple[int, int]:
+        upload = self.client.post(
+            "/api/uploads",
+            content=f"{name} media".encode(),
+            headers={"X-Filename": f"preview-{name}.txt"},
+        )
+        self.assertEqual(upload.status_code, 201)
+        file_id = upload.json()["file"]["id"]
+        project = self.client.post("/api/projects", json={
+            "name": f"{name}-{time.time_ns()}",
+            "color": "#7c8cff",
+        })
+        self.assertEqual(project.status_code, 201)
+        project_id = project.json()["id"]
+        asset = self.client.post(f"/api/projects/{project_id}/assets", json={
+            "file_id": file_id,
+            "title": f"{name}素材",
+        })
+        self.assertEqual(asset.status_code, 201)
+        return project_id, asset.json()["id"]
+
+    def _session_header(self, username: str) -> tuple[dict[str, str], int]:
+        from app.security import token_digest
+
+        user = state.database.create_user(username, username, "scrypt$16384$8$1$invalid$invalid", "member", [])
+        raw_token = f"token-{username}-{time.time_ns()}"
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="seconds")
+        state.database.create_session(int(user["id"]), token_digest(raw_token), expires_at)
+        return {"Authorization": f"Bearer {raw_token}"}, int(user["id"])
+
+    def test_active_content_forced_to_attachment(self) -> None:
+        upload = self.client.post(
+            "/api/uploads",
+            content=b"<html><script>alert(1)</script></html>",
+            headers={"X-Filename": f"xss-{time.time_ns()}.html"},
+        )
+        self.assertEqual(upload.status_code, 201)
+        file_id = upload.json()["file"]["id"]
+        content = self.client.get(f"/api/files/{file_id}/content")
+        self.assertEqual(content.status_code, 200)
+        self.assertTrue(content.headers["content-disposition"].startswith("attachment"))
+        ticket = self.client.post(f"/api/files/{file_id}/ticket").json()["url"]
+        media = self.client.get(ticket)
+        self.assertEqual(media.status_code, 200)
+        self.assertTrue(media.headers["content-disposition"].startswith("attachment"))
+
+        image = self.client.post(
+            "/api/uploads",
+            content=b"\x89PNG\r\n\x1a\nfake-png",
+            headers={"X-Filename": f"safe-{time.time_ns()}.png"},
+        )
+        self.assertEqual(image.status_code, 201)
+        safe = self.client.get(f"/api/files/{image.json()['file']['id']}/content")
+        self.assertEqual(safe.status_code, 200)
+        self.assertTrue(safe.headers["content-disposition"].startswith("inline"))
+
+    def test_comment_attachment_per_comment_limit(self) -> None:
+        _, asset_id = self._shared_asset("attach-limit")
+        comment = self.client.post(f"/api/assets/{asset_id}/comments", json={"body": "附件上限"})
+        self.assertEqual(comment.status_code, 201)
+        comment_id = comment.json()["id"]
+        for index in range(settings.comment_attachment_max_per_comment):
+            response = self.client.post(
+                f"/api/comments/{comment_id}/attachments",
+                content=b"\x89PNG\r\n\x1a\nfake-png",
+                headers={"X-Filename": f"proof-{index}.png"},
+            )
+            self.assertEqual(response.status_code, 201)
+        overflow = self.client.post(
+            f"/api/comments/{comment_id}/attachments",
+            content=b"\x89PNG\r\n\x1a\nfake-png",
+            headers={"X-Filename": "proof-overflow.png"},
+        )
+        self.assertEqual(overflow.status_code, 409)
+
+    def test_comment_attachment_disk_guard(self) -> None:
+        _, asset_id = self._shared_asset("attach-disk")
+        comment = self.client.post(f"/api/assets/{asset_id}/comments", json={"body": "磁盘余量"})
+        comment_id = comment.json()["id"]
+        usage = type("Usage", (), {"total": 0, "used": 0, "free": 0})
+        with patch("app.main.shutil.disk_usage", lambda *_: usage()):
+            response = self.client.post(
+                f"/api/comments/{comment_id}/attachments",
+                content=b"\x89PNG\r\n\x1a\nfake-png",
+                headers={"X-Filename": "disk-full.png"},
+            )
+        self.assertEqual(response.status_code, 507)
+
+    def test_comment_attachment_ownership_boundary(self) -> None:
+        project_id, asset_id = self._shared_asset("attach-owner")
+        author_headers, author_id = self._session_header(f"author-{time.time_ns()}")
+        peer_headers, peer_id = self._session_header(f"peer-{time.time_ns()}")
+        state.workspaces.set_member(project_id, author_id, "reviewer")
+        state.workspaces.set_member(project_id, peer_id, "reviewer")
+        comment = self.client.post(
+            f"/api/assets/{asset_id}/comments",
+            json={"body": "归属边界"},
+            headers=author_headers,
+        )
+        self.assertEqual(comment.status_code, 201)
+        comment_id = comment.json()["id"]
+        forbidden = self.client.post(
+            f"/api/comments/{comment_id}/attachments",
+            content=b"\x89PNG\r\n\x1a\nfake-png",
+            headers={**peer_headers, "X-Filename": "peer.png"},
+        )
+        self.assertEqual(forbidden.status_code, 403)
+        allowed = self.client.post(
+            f"/api/comments/{comment_id}/attachments",
+            content=b"\x89PNG\r\n\x1a\nfake-png",
+            headers={**author_headers, "X-Filename": "author.png"},
+        )
+        self.assertEqual(allowed.status_code, 201)
+        state.workspaces.set_member(project_id, peer_id, "manager")
+        manager = self.client.post(
+            f"/api/comments/{comment_id}/attachments",
+            content=b"\x89PNG\r\n\x1a\nfake-png",
+            headers={**peer_headers, "X-Filename": "manager.png"},
+        )
+        self.assertEqual(manager.status_code, 201)
+
+    def test_share_ticket_rejected_after_share_disabled(self) -> None:
+        project_id, asset_id = self._shared_asset("ticket-revoke")
+        share = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "asset_id": asset_id,
+            "name": "可撤销分享",
+            "can_download": True,
+        })
+        self.assertEqual(share.status_code, 201)
+        payload = self.client.post(f"/api/public/shares/{share.json()['token']}", json={})
+        self.assertEqual(payload.status_code, 200)
+        media_url = payload.json()["assets"][0]["versions"][0]["media_url"]
+        self.assertTrue(media_url)
+        self.assertEqual(self.client.get(media_url).status_code, 200)
+        disabled = self.client.put(f"/api/shares/{share.json()['id']}/enabled", params={"enabled": "false"})
+        self.assertEqual(disabled.status_code, 200)
+        revoked = self.client.get(media_url)
+        self.assertEqual(revoked.status_code, 403)
+
+    def test_bootstrap_is_rate_limited(self) -> None:
+        from app.main import BOOTSTRAP_ATTEMPTS
+
+        BOOTSTRAP_ATTEMPTS.clear()
+        try:
+            for index in range(5):
+                response = self.client.post("/api/auth/bootstrap", json={
+                    "username": f"bootstrap-{index}",
+                    "display_name": "初始化",
+                    "password": "bootstrap-password",
+                })
+                self.assertNotEqual(response.status_code, 429)
+            blocked = self.client.post("/api/auth/bootstrap", json={
+                "username": "bootstrap-blocked",
+                "display_name": "初始化",
+                "password": "bootstrap-password",
+            })
+            self.assertEqual(blocked.status_code, 429)
+            self.assertIn("retry-after", blocked.headers)
+        finally:
+            BOOTSTRAP_ATTEMPTS.clear()
+
+    def test_delete_library_vector_failure_is_logged(self) -> None:
+        folder = SCAN_ROOT / f"vector-fail-{time.time_ns()}"
+        folder.mkdir()
+        created = self.client.post("/api/libraries", json={"name": folder.name, "path": str(folder)})
+        self.assertEqual(created.status_code, 201)
+        library_id = created.json()["id"]
+        with patch.object(state.vectors, "delete_library", side_effect=RuntimeError("qdrant down")):
+            with self.assertLogs("app.main", level="WARNING") as captured:
+                response = self.client.delete(f"/api/libraries/{library_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any("向量数据失败" in line for line in captured.output))
+
+    def test_recycle_vector_cleanup_failure_is_logged(self) -> None:
+        _, library_path, database, library = self._temp_db("nas-ai-recycle-log-")
+        (library_path / "first.txt").write_text("identical-content", encoding="utf-8")
+        (library_path / "second.txt").write_text("identical-content", encoding="utf-8")
+        scan_library(database, library, lambda *_: None, lambda: False)
+        database.execute("UPDATE files SET content_hash = 'hash-x'")
+        file_ids = database.pending_file_ids()
+        self.assertEqual(len(file_ids), 2)
+
+        class FailingVectors:
+            @staticmethod
+            def delete_files(file_ids):
+                raise RuntimeError("qdrant down")
+
+        recycle = RecycleBin(database, settings, FailingVectors())
+        with self.assertLogs("app.services.recycle", level="WARNING") as captured:
+            result = recycle.move_duplicates([file_ids[0]], "tester")
+        self.assertEqual(result["moved"], 1)
+        self.assertTrue(any("向量清理失败" in line and "1 个文件" in line for line in captured.output))
+
+    def test_scan_vector_cleanup_failure_is_logged(self) -> None:
+        import asyncio
+
+        from app.services.tasks import TaskManager
+
+        _, _, database, library = self._temp_db("nas-ai-scan-log-")
+        task_id = database.create_task("scan_library", {"library_id": int(library["id"])})
+
+        class FailingVectors:
+            @staticmethod
+            def delete_files(file_ids):
+                raise RuntimeError("qdrant down")
+
+        manager = TaskManager(database, settings, LocalAIClient(settings), FailingVectors())
+        with self.assertLogs("app.services.tasks", level="WARNING") as captured:
+            asyncio.run(manager._scan(task_id, int(library["id"])))
+        self.assertTrue(any("向量清理失败" in line for line in captured.output))
+
+    def test_psd_pixel_limit_rejects_bomb(self) -> None:
+        _, library_path, _, _ = self._temp_db("nas-ai-psd-pixels-")
+        psd_path = library_path / "bomb.psd"
+        psd_path.write_bytes(b"fake-psd")
+
+        class FakePsd:
+            width = 20000
+            height = 20000
+
+            @staticmethod
+            def composite():
+                raise AssertionError("像素超限时不应触发合成")
+
+        with patch("psd_tools.PSDImage.open", return_value=FakePsd()):
+            with self.assertRaises(ValueError) as context:
+                create_thumbnail(psd_path, library_path / "bomb.jpg", "image", 320)
+        self.assertIn("像素", str(context.exception))
+
+    def test_font_size_limit(self) -> None:
+        _, library_path, _, _ = self._temp_db("nas-ai-font-limit-")
+        font_path = library_path / "big.ttf"
+        font_path.write_bytes(b"fake-font-bytes")
+        with patch("app.services.extractors.settings", replace(settings, max_font_bytes=1)):
+            with self.assertRaises(ValueError) as context:
+                create_thumbnail(font_path, library_path / "big.jpg", "image", 320)
+        self.assertIn("字体文件超过", str(context.exception))
+
+    def test_eps_failure_cleans_tmp_and_truncates_error(self) -> None:
+        _, library_path, _, _ = self._temp_db("nas-ai-eps-clean-")
+        eps_path = library_path / "figure.eps"
+        eps_path.write_bytes(b"%!PS-Adobe-3.0 fake")
+        destination = library_path / "figure.tmp.jpg"
+        destination.write_bytes(b"partial-output")
+        failure = subprocess.CalledProcessError(3, ["gs"], stderr=b"noise\n" + b"x" * 1000)
+        with (
+            patch("app.services.extractors.shutil.which", return_value="/usr/bin/gs"),
+            patch("app.services.extractors.subprocess.run", side_effect=failure),
+        ):
+            from app.services.extractors import _render_eps_preview
+
+            with self.assertRaises(ValueError) as context:
+                _render_eps_preview(eps_path, destination, 320)
+        message = str(context.exception)
+        self.assertIn("退出码 3", message)
+        self.assertLessEqual(len(message), 300)
+        self.assertFalse(destination.exists())
+
+    def test_psd_index_prefills_thumbnail_cache(self) -> None:
+        import hashlib
+
+        _, library_path, database, library = self._temp_db("nas-ai-psd-cache-")
+        psd_path = library_path / "art.psd"
+        psd_path.write_bytes(b"fake-psd")
+        scan_library(database, library, lambda *_: None, lambda: False)
+        file = database.get_file(database.pending_file_ids()[0])
+
+        class FakePsd:
+            width = 1024
+            height = 512
+
+            @staticmethod
+            def composite():
+                return Image.new("RGB", (1024, 512), "#7a3bd0")
+
+        key = hashlib.sha256(
+            f"{file['path']}:{file['mtime_ns']}:{settings.thumbnail_size}".encode()
+        ).hexdigest()
+        cache_file = settings.cache_dir / "thumbnails" / key[:2] / f"{key}.jpg"
+        cache_file.unlink(missing_ok=True)
+        self.addCleanup(lambda: cache_file.unlink(missing_ok=True))
+        local_settings = replace(settings, cache_dir=Path(tempfile.mkdtemp(prefix="nas-ai-psd-cache-dir-")))
+        with patch("psd_tools.PSDImage.open", return_value=FakePsd()):
+            result, _ = index_file(file, local_settings, LocalAIClient(local_settings))
+        self.assertEqual(result["metadata"]["decoder"], "psd-tools")
+        self.assertTrue(cache_file.is_file())
+        with Image.open(cache_file) as cached:
+            self.assertLessEqual(max(cached.size), settings.thumbnail_size)
+
+
+class BackendRegressionPerfTests(unittest.TestCase):
+    """本轮回归与性能修复的配套测试（见各项修复说明）。"""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="nas-ai-backend-perf-")
+        root = Path(self.temp.name)
+        self.library_path = root / "library"
+        self.library_path.mkdir()
+        self.database = Database(root / "index.db")
+        self.database.initialize()
+        self.library = self.database.create_library("回归资料", str(self.library_path))
+        self.local_settings = replace(
+            settings,
+            data_dir=root / "data",
+            cache_dir=root / "cache",
+            database_path=root / "index.db",
+            scan_root=self.library_path,
+            local_ai_base_url="",
+            embedding_model="",
+            vision_model="",
+            chat_model="",
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _file_values(self, library_id: int, path: str, size: int = 100, mtime_ns: int = 1) -> dict:
+        return {
+            "library_id": library_id,
+            "path": path,
+            "relative_path": Path(path).name,
+            "name": Path(path).name,
+            "extension": Path(path).suffix,
+            "kind": "image",
+            "mime_type": "image/jpeg",
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "inode": 1,
+            "scan_token": "token-1",
+        }
+
+    def test_upsert_files_overlapping_libraries_hit_update_branch(self) -> None:
+        # files.path 全局 UNIQUE：两个库根目录重叠（/photos 与 /photos/2024）时，
+        # 同 path 出现在另一库的批次里应命中已有行走 UPDATE，而不是 INSERT 冲突整批回滚
+        nested_path = self.library_path / "2024"
+        nested_path.mkdir()
+        nested_library = self.database.create_library("嵌套库", str(nested_path))
+        shared = str(nested_path / "photo.jpg")
+
+        first = self.database.upsert_files([self._file_values(int(self.library["id"]), shared)])
+        file_id = first[0][0]
+        second = self.database.upsert_files([self._file_values(int(nested_library["id"]), shared, size=200, mtime_ns=2)])
+        self.assertEqual(second, [(file_id, True)])
+        row = self.database.get_file(file_id)
+        self.assertEqual(int(row["library_id"]), int(nested_library["id"]))
+        self.assertEqual(int(self.database.fetchone("SELECT COUNT(*) AS c FROM files")["c"]), 1)
+        # 内容未变再走一次：命中 unchanged 分支（仅刷 token），同样不报错
+        third = self.database.upsert_files([self._file_values(int(nested_library["id"]), shared, size=200, mtime_ns=2)])
+        self.assertEqual(third, [(file_id, False)])
+        self.assertEqual(int(self.database.fetchone("SELECT COUNT(*) AS c FROM files")["c"]), 1)
+
+    def test_index_stage_summary_single_scan_matches_group_by(self) -> None:
+        for index in range(3):
+            (self.library_path / f"f{index}.txt").write_text(f"内容 {index}", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        ids = self.database.pending_file_ids()
+        self.database.execute(
+            """UPDATE files SET status = 'ready', vision_status = 'ready',
+               transcription_status = 'not_applicable', embedding_status = 'ready',
+               extracted_text = '正文' WHERE id = ?""",
+            (ids[0],),
+        )
+        self.database.execute(
+            "UPDATE files SET status = 'error', vision_status = 'error', terminal_error = 1 WHERE id = ?",
+            (ids[1],),
+        )
+        calls: list[str] = []
+        original_fetchone = self.database.fetchone
+
+        def recording_fetchone(query, params=()):
+            calls.append(query)
+            return original_fetchone(query, params)
+
+        with patch.object(self.database, "fetchone", recording_fetchone):
+            summary = self.database.index_stage_summary()
+        # 三个状态列 + 三个修复计数合并为一次条件聚合单扫
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(summary["terminal_failures"], 1)
+        self.assertEqual(summary["repairable"], 0)
+        self.assertEqual(summary["retry_waiting"], 0)
+        # 数值口径与旧 GROUP BY 实现完全一致（含“不出现的键即 0”）
+        for column, name in (
+            ("vision_status", "vision"),
+            ("transcription_status", "transcription"),
+            ("embedding_status", "embedding"),
+        ):
+            rows = self.database.fetchall(f"SELECT {column} AS s, COUNT(*) AS c FROM files GROUP BY {column}")
+            self.assertEqual(summary[name], {str(row["s"]): int(row["c"]) for row in rows})
+
+    def test_embedding_json_not_written_and_dashboard_coverage_from_stages(self) -> None:
+        (self.library_path / "doc.txt").write_text("一些正文内容", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        self.database.finish_file_index(
+            file_id,
+            {"caption": "", "text": "一些正文内容", "quick_hash": "q", "metadata": {}},
+            [{"content": "一些正文内容", "embedding": [0.1, 0.2]}],
+        )
+        chunk = self.database.fetchone("SELECT embedding_json FROM content_chunks WHERE file_id = ?", (file_id,))
+        # embedding_json 已弃用：索引完成后为 NULL，向量只在 Qdrant
+        self.assertIsNone(chunk["embedding_json"])
+        files = self.database.dashboard()["files"]
+        # 覆盖率统计切换到 files 表口径后仍然正确
+        self.assertEqual(files["semantic_ready"], 1)
+        self.assertEqual(files["content_ready"], 1)
+
+    def test_semantic_hits_are_batch_fetched_without_get_file(self) -> None:
+        video = self.library_path / "meeting.mp4"
+        video.write_bytes(b"not-a-real-video")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        search = SearchService(self.database, SemanticAI(self.local_settings), SemanticVectors(file_id))
+        with patch.object(Database, "get_file", side_effect=AssertionError("语义候选不应逐条 get_file")):
+            response = search.search("关键词")
+        self.assertEqual(response["results"][0]["match_time"], 12.5)
+
+    def test_similar_candidates_are_batch_fetched_without_get_file(self) -> None:
+        for name in ("source.jpg", "near.jpg"):
+            Image.new("RGB", (80, 80), "#777777").save(self.library_path / name)
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        source = self.database.fetchone("SELECT * FROM files WHERE name = 'source.jpg'")
+        near = self.database.fetchone("SELECT * FROM files WHERE name = 'near.jpg'")
+        vectors = SimilarVectors([
+            {"score": 0.91, "payload": {"file_id": near["id"], "content": "相似场景"}},
+        ])
+        search = SearchService(self.database, LocalAIClient(self.local_settings), vectors)
+        with patch.object(Database, "get_file", side_effect=AssertionError("相似候选不应逐条 get_file")):
+            response = search.similar(int(source["id"]))
+        self.assertEqual([item["name"] for item in response["results"]], ["near.jpg"])
+
+    def test_lexical_queries_select_narrow_columns_but_profile_uses_full_text(self) -> None:
+        document = self.library_path / "笔记.txt"
+        document.write_text("猫咪坐在花盆旁边", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        file = self.database.get_file(file_id)
+        result, chunks = index_file(file, self.local_settings, LocalAIClient(self.local_settings))
+        self.database.finish_file_index(file_id, result, chunks)
+
+        statements: list[str] = []
+        original_fetchall = self.database.fetchall
+
+        def recording_fetchall(query, params=()):
+            statements.append(query)
+            return original_fetchall(query, params)
+
+        search = SearchService(self.database, LocalAIClient(self.local_settings), NullVectors())
+        with patch.object(self.database, "fetchall", recording_fetchall):
+            response = search.search("猫咪 花盆", semantic=False)
+        candidate_queries = [sql for sql in statements if "FROM files_fts" in sql or " LIKE " in sql]
+        self.assertTrue(candidate_queries)
+        # 候选查询不再 SELECT f.* 物化整篇 extracted_text
+        self.assertFalse(any("f.*" in sql for sql in candidate_queries))
+        top = response["results"][0]
+        self.assertEqual(top["name"], "笔记.txt")
+        # profile 仍基于回填的完整文本计算，匹配词与 snippet 行为不变
+        self.assertEqual(top["matched_terms"], ["猫咪", "花盆"])
+        self.assertEqual(top["coverage"], 1.0)
+        self.assertIn("猫咪", top["snippet"])
+
+    def test_vector_store_reuses_client_and_writes_wait_false(self) -> None:
+        from app.services.vectors import VectorStore
+
+        store = VectorStore(self.local_settings)
+        self.assertIs(store._http(), store._http())
+        urls: list[str] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class FakeClient:
+            def post(self, url, **_kwargs):
+                urls.append(url)
+                return FakeResponse()
+
+            def put(self, url, **_kwargs):
+                urls.append(url)
+                return FakeResponse()
+
+        store._dimension = 3  # 跳过 _ensure_collection
+        store._client = FakeClient()
+        store.replace_file(
+            {"id": 7, "library_id": 1, "kind": "document", "relative_path": "a.txt"},
+            [{"content": "正文", "embedding": [0.1, 0.2, 0.3]}],
+        )
+        self.assertEqual(len(urls), 2)
+        # 批量索引路径 delete+upsert 均为 wait=false，不再双 wait=true 同步刷盘
+        self.assertTrue(all("wait=false" in url for url in urls))
+        store.delete_files([7])
+        self.assertIn("wait=false", urls[-1])
+
+    def test_local_ai_reuses_http_client(self) -> None:
+        client = LocalAIClient(self.local_settings)
+        self.assertIsNone(client._client)
+        self.assertIs(client._http(), client._http())
+
+    def test_album_refresh_is_throttled_until_queue_drains(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from app.services.tasks import TaskManager
+
+        manager = TaskManager(
+            self.database, self.local_settings, LocalAIClient(self.local_settings), NullVectors()
+        )
+
+        async def scenario() -> None:
+            with patch.object(
+                manager,
+                "submit_unique",
+                new=AsyncMock(side_effect=[(1, False), (2, False), (3, False), (4, False)]),
+            ) as submit:
+                # 首次：允许排队并记录时间
+                await manager._queue_album_refresh()
+                self.assertEqual(submit.await_count, 2)
+                # 距上次不足 1 小时且任务队列未排空：跳过，不重复全库重算
+                manager.queue.put_nowait((0, 999))
+                await manager._queue_album_refresh()
+                self.assertEqual(submit.await_count, 2)
+                # 队列排空后：允许立即补刷一次，相册最终仍会更新
+                manager.queue.get_nowait()
+                await manager._queue_album_refresh()
+                self.assertEqual(submit.await_count, 4)
+
+        asyncio.run(scenario())

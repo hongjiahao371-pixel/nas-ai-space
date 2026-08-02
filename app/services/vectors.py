@@ -16,12 +16,22 @@ class VectorStore:
         self.settings = settings
         self._lock = threading.Lock()
         self._snapshot_lock = threading.Lock()
+        self._client_lock = threading.Lock()
+        self._client: httpx.Client | None = None
         self._dimension: int | None = None
+
+    def _http(self) -> httpx.Client:
+        # 复用同一 httpx.Client（连接池），避免每次操作重建 TCP 连接；
+        # httpx.Client 线程安全，懒初始化；各请求按需传 timeout 覆盖默认值
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0))
+        return self._client
 
     def health(self) -> dict[str, Any]:
         try:
-            with httpx.Client(timeout=2) as client:
-                response = client.get(f"{self.settings.qdrant_url}/readyz")
+            response = self._http().get(f"{self.settings.qdrant_url}/readyz", timeout=2)
             return {"reachable": response.is_success, "status": response.status_code}
         except Exception as exc:
             return {"reachable": False, "error": str(exc)}
@@ -32,31 +42,33 @@ class VectorStore:
         with self._lock:
             if self._dimension == dimension:
                 return
-            with httpx.Client(timeout=10) as client:
-                response = client.get(
-                    f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}"
-                )
-                if response.status_code == 404:
-                    create = client.put(
-                        f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}",
-                        json={
-                            "vectors": {
-                                "size": dimension,
-                                "distance": "Cosine",
-                                "on_disk": self.settings.vectors_on_disk,
-                            },
-                            "hnsw_config": {"m": 16, "ef_construct": 100, "on_disk": self.settings.vectors_on_disk},
-                            "optimizers_config": {"indexing_threshold": 10000},
+            client = self._http()
+            response = client.get(
+                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}",
+                timeout=10,
+            )
+            if response.status_code == 404:
+                create = client.put(
+                    f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}",
+                    json={
+                        "vectors": {
+                            "size": dimension,
+                            "distance": "Cosine",
+                            "on_disk": self.settings.vectors_on_disk,
                         },
+                        "hnsw_config": {"m": 16, "ef_construct": 100, "on_disk": self.settings.vectors_on_disk},
+                        "optimizers_config": {"indexing_threshold": 10000},
+                    },
+                    timeout=10,
+                )
+                create.raise_for_status()
+            else:
+                response.raise_for_status()
+                size = response.json()["result"]["config"]["params"]["vectors"]["size"]
+                if int(size) != dimension:
+                    raise RuntimeError(
+                        f"向量维度由 {size} 变为 {dimension}，请更换 NAS_AI_QDRANT_COLLECTION 后重新索引"
                     )
-                    create.raise_for_status()
-                else:
-                    response.raise_for_status()
-                    size = response.json()["result"]["config"]["params"]["vectors"]["size"]
-                    if int(size) != dimension:
-                        raise RuntimeError(
-                            f"向量维度由 {size} 变为 {dimension}，请更换 NAS_AI_QDRANT_COLLECTION 后重新索引"
-                        )
             self._dimension = dimension
 
     def replace_file(self, file: dict[str, Any], chunks: list[dict[str, Any]]) -> None:
@@ -82,16 +94,20 @@ class VectorStore:
                     "end_time": chunk.get("end_time"),
                 },
             })
-        with httpx.Client(timeout=60) as client:
-            client.post(
-                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=true",
-                json={"filter": {"must": [{"key": "file_id", "match": {"value": int(file["id"])}}]}},
-            )
-            response = client.put(
-                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points?wait=true",
-                json={"points": points},
-            )
-            response.raise_for_status()
+        # 批量索引路径用 wait=false：Qdrant 本地 WAL 足够可靠，避免 delete+upsert
+        # 双 wait=true 逐批同步刷盘拖慢索引
+        client = self._http()
+        client.post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=false",
+            json={"filter": {"must": [{"key": "file_id", "match": {"value": int(file["id"])}}]}},
+            timeout=60,
+        )
+        response = client.put(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points?wait=false",
+            json={"points": points},
+            timeout=60,
+        )
+        response.raise_for_status()
 
     def search(
         self,
@@ -118,28 +134,30 @@ class VectorStore:
             filters.append({"key": "file_id", "match": {"any": file_ids}})
         if filters:
             payload["filter"] = {"must": filters}
-        with httpx.Client(timeout=30) as client:
-            response = client.post(
-                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/query",
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.json().get("result", {}).get("points", [])
+        client = self._http()
+        response = client.post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/query",
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json().get("result", {}).get("points", [])
 
     def representative_vector(self, file_id: int) -> list[float]:
-        with httpx.Client(timeout=30) as client:
-            response = client.post(
-                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/scroll",
-                json={
-                    "filter": {"must": [{"key": "file_id", "match": {"value": file_id}}]},
-                    "limit": 8,
-                    "with_payload": False,
-                    "with_vector": True,
-                },
-            )
-            if response.status_code == 404:
-                return []
-            response.raise_for_status()
+        client = self._http()
+        response = client.post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/scroll",
+            json={
+                "filter": {"must": [{"key": "file_id", "match": {"value": file_id}}]},
+                "limit": 8,
+                "with_payload": False,
+                "with_vector": True,
+            },
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
         points = response.json().get("result", {}).get("points", [])
         vectors = [point.get("vector") for point in points if isinstance(point.get("vector"), list)]
         if not vectors:
@@ -153,22 +171,22 @@ class VectorStore:
     def delete_files(self, file_ids: list[int]) -> None:
         if not file_ids:
             return
-        with httpx.Client(timeout=30) as client:
-            response = client.post(
-                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=true",
-                json={"filter": {"must": [{"key": "file_id", "match": {"any": file_ids}}]}},
-            )
-            if response.status_code not in {200, 404}:
-                response.raise_for_status()
+        response = self._http().post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=false",
+            json={"filter": {"must": [{"key": "file_id", "match": {"any": file_ids}}]}},
+            timeout=30,
+        )
+        if response.status_code not in {200, 404}:
+            response.raise_for_status()
 
     def delete_library(self, library_id: int) -> None:
-        with httpx.Client(timeout=30) as client:
-            response = client.post(
-                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=true",
-                json={"filter": {"must": [{"key": "library_id", "match": {"value": library_id}}]}},
-            )
-            if response.status_code not in {200, 404}:
-                response.raise_for_status()
+        response = self._http().post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=false",
+            json={"filter": {"must": [{"key": "library_id", "match": {"value": library_id}}]}},
+            timeout=30,
+        )
+        if response.status_code not in {200, 404}:
+            response.raise_for_status()
 
     def list_snapshots(self) -> list[dict[str, Any]]:
         directory = self.settings.vector_backup_dir
@@ -187,35 +205,35 @@ class VectorStore:
             directory = self.settings.vector_backup_dir
             directory.mkdir(parents=True, exist_ok=True)
             collection = self.settings.qdrant_collection
-            with httpx.Client(timeout=30) as client:
-                exists = client.get(f"{self.settings.qdrant_url}/collections/{collection}")
-                if exists.status_code == 404:
-                    raise RuntimeError("向量集合尚未建立")
-                exists.raise_for_status()
-                response = client.post(f"{self.settings.qdrant_url}/collections/{collection}/snapshots")
-                response.raise_for_status()
-                result = response.json().get("result") or {}
-                name = Path(str(result.get("name") or "")).name
-                if not name:
-                    raise RuntimeError("Qdrant 未返回快照名称")
+            client = self._http()
+            exists = client.get(f"{self.settings.qdrant_url}/collections/{collection}", timeout=30)
+            if exists.status_code == 404:
+                raise RuntimeError("向量集合尚未建立")
+            exists.raise_for_status()
+            response = client.post(f"{self.settings.qdrant_url}/collections/{collection}/snapshots", timeout=30)
+            response.raise_for_status()
+            result = response.json().get("result") or {}
+            name = Path(str(result.get("name") or "")).name
+            if not name:
+                raise RuntimeError("Qdrant 未返回快照名称")
             destination = directory / name
             try:
-                with httpx.Client(timeout=600) as client:
-                    with client.stream(
-                        "GET",
-                        f"{self.settings.qdrant_url}/collections/{collection}/snapshots/{name}",
-                    ) as download:
-                        download.raise_for_status()
-                        with destination.open("wb") as handle:
-                            for chunk in download.iter_bytes():
-                                handle.write(chunk)
+                with client.stream(
+                    "GET",
+                    f"{self.settings.qdrant_url}/collections/{collection}/snapshots/{name}",
+                    timeout=600,
+                ) as download:
+                    download.raise_for_status()
+                    with destination.open("wb") as handle:
+                        for chunk in download.iter_bytes():
+                            handle.write(chunk)
                 destination.chmod(0o600)
             finally:
                 try:
-                    with httpx.Client(timeout=30) as client:
-                        client.delete(
-                            f"{self.settings.qdrant_url}/collections/{collection}/snapshots/{name}"
-                        )
+                    client.delete(
+                        f"{self.settings.qdrant_url}/collections/{collection}/snapshots/{name}",
+                        timeout=30,
+                    )
                 except Exception:
                     pass
             snapshots = sorted(
@@ -239,11 +257,12 @@ class VectorStore:
         if not source.is_file():
             raise FileNotFoundError("向量快照不存在")
         collection = self.settings.qdrant_collection
-        with self._snapshot_lock, source.open("rb") as handle, httpx.Client(timeout=900) as client:
-            response = client.post(
+        with self._snapshot_lock, source.open("rb") as handle:
+            response = self._http().post(
                 f"{self.settings.qdrant_url}/collections/{collection}/snapshots/upload",
                 params={"priority": "snapshot"},
                 files={"snapshot": (safe_name, handle, "application/octet-stream")},
+                timeout=900,
             )
             response.raise_for_status()
         self._dimension = None

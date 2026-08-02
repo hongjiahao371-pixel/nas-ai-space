@@ -31,6 +31,7 @@ class LibraryWatcher:
         self.wd_libraries: dict[int, int] = {}
         self.pending: dict[int, float] = {}
         self.signatures: dict[int, tuple[int, int, int]] = {}
+        self.shallow: dict[int, tuple[tuple[tuple[Any, ...], ...], tuple[int, int, int]]] = {}
         self.background: list[asyncio.Task] = []
         self.mode = "disabled"
         self.error = ""
@@ -161,9 +162,16 @@ class LibraryWatcher:
                 if library["enabled"]:
                     await self._submit_scan(int(library["id"]), "fallback")
 
+    def _signature_interval(self) -> int:
+        # hybrid 模式下 inotify 已覆盖实时事件，签名轮询只是兜底，默认拉长到 1800 秒；
+        # 纯 polling 模式没有 inotify，仍按 watch_poll_seconds 高频轮询。
+        if self.mode == "hybrid":
+            return self.settings.watch_signature_seconds
+        return self.settings.watch_poll_seconds
+
     async def _poll_loop(self) -> None:
         while True:
-            await asyncio.sleep(self.settings.watch_poll_seconds)
+            await asyncio.sleep(self._signature_interval())
             current = await asyncio.to_thread(self._signatures)
             for library_id, signature in current.items():
                 previous = self.signatures.get(library_id)
@@ -178,40 +186,77 @@ class LibraryWatcher:
             root = Path(library["path"])
             if not library["enabled"] or not root.is_dir():
                 continue
-            count = 0
-            total_bytes = 0
-            fingerprint = 0
-            stack = [root]
-            while stack:
-                directory = stack.pop()
-                try:
-                    iterator = os.scandir(directory)
-                except (PermissionError, OSError):
+            library_id = int(library["id"])
+            if self.mode == "hybrid":
+                # 浅层探测：先只比较顶层目录项（直接增删改文件会刷新所在目录 mtime），
+                # 没变化就复用缓存的深签名，避免每轮全库递归 stat。
+                # 取舍：更深层子目录里纯内容修改不会刷新顶层 mtime，浅层探测可能漏掉，
+                # 这类变化在 hybrid 下由 inotify 实时事件覆盖；顶层 mtime 一旦变化仍走完整递归。
+                shallow = self._shallow_probe(root)
+                cached = self.shallow.get(library_id)
+                if cached is not None and cached[0] == shallow:
+                    result[library_id] = cached[1]
                     continue
-                with iterator:
-                    for entry in iterator:
-                        path = Path(entry.path)
-                        if is_ignored(path):
-                            continue
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                stack.append(path)
-                                continue
-                            if not entry.is_file(follow_symlinks=False):
-                                continue
-                            stat = entry.stat(follow_symlinks=False)
-                        except (PermissionError, FileNotFoundError, OSError):
-                            continue
-                        count += 1
-                        total_bytes += int(stat.st_size)
-                        fingerprint ^= hash((
-                            str(path.relative_to(root)),
-                            int(stat.st_size),
-                            int(stat.st_mtime_ns),
-                            int(getattr(stat, "st_ino", 0)),
-                        ))
-            result[int(library["id"])] = (count, total_bytes, fingerprint)
+                deep = self._deep_signature(root)
+                self.shallow[library_id] = (shallow, deep)
+                result[library_id] = deep
+            else:
+                # polling 模式没有 inotify 兜底，必须每次全量递归，保证不漏任何深层变化
+                result[library_id] = self._deep_signature(root)
         return result
+
+    def _shallow_probe(self, root: Path) -> tuple[tuple[Any, ...], ...]:
+        entries: list[tuple[Any, ...]] = []
+        try:
+            iterator = os.scandir(root)
+        except (PermissionError, OSError):
+            return ()
+        with iterator:
+            for entry in iterator:
+                path = Path(entry.path)
+                if is_ignored(path):
+                    continue
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except (PermissionError, FileNotFoundError, OSError):
+                    continue
+                entries.append((entry.name, entry.is_dir(follow_symlinks=False), int(stat.st_mtime_ns), int(stat.st_size)))
+        return tuple(sorted(entries))
+
+    def _deep_signature(self, root: Path) -> tuple[int, int, int]:
+        count = 0
+        total_bytes = 0
+        fingerprint = 0
+        stack = [root]
+        while stack:
+            directory = stack.pop()
+            try:
+                iterator = os.scandir(directory)
+            except (PermissionError, OSError):
+                continue
+            with iterator:
+                for entry in iterator:
+                    path = Path(entry.path)
+                    if is_ignored(path):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        stat = entry.stat(follow_symlinks=False)
+                    except (PermissionError, FileNotFoundError, OSError):
+                        continue
+                    count += 1
+                    total_bytes += int(stat.st_size)
+                    fingerprint ^= hash((
+                        str(path.relative_to(root)),
+                        int(stat.st_size),
+                        int(stat.st_mtime_ns),
+                        int(getattr(stat, "st_ino", 0)),
+                    ))
+        return (count, total_bytes, fingerprint)
 
     async def _submit_scan(self, library_id: int, source: str) -> None:
         if self.database.active_task_for_library("scan_only", library_id):
@@ -227,6 +272,7 @@ class LibraryWatcher:
             "pending_libraries": len(self.pending),
             "debounce_seconds": self.settings.watch_debounce_seconds,
             "poll_seconds": self.settings.watch_poll_seconds,
+            "signature_seconds": self.settings.watch_signature_seconds,
             "fallback_seconds": self.settings.watch_fallback_seconds,
             "last_event_at": self.last_event_at,
             "last_poll_at": self.last_poll_at,

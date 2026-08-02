@@ -49,6 +49,13 @@ const state = {
   activeStroke: null,
   publicAccessCode: '',
   publicVersionIds: {},
+  // 阶段三（布局重构）：浏览 / 搜索工作台的布局模式（grid|list，localStorage 记忆）与右栏检查器状态
+  browseLayout: localStorage.getItem('nasAiViewLayout') === 'list' ? 'list' : 'grid',
+  inspectorFileId: null,
+  inspectorSeq: 0,
+  // 单击延迟发检查器请求的计时器；双击时取消，快照用于恢复骨架屏前的内容
+  inspectorClickTimer: null,
+  inspectorRestore: null,
 };
 
 const thumbnailQueue = [];
@@ -60,6 +67,29 @@ const THUMBNAIL_CACHE_LIMIT = 160;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+// 外观主题：system（跟随系统）/ light / dark，localStorage 持久化
+const themeMedia = matchMedia('(prefers-color-scheme: light)');
+let themeChoice = localStorage.getItem('nasAiTheme') || 'system';
+function applyTheme(choice) {
+  const theme = choice === 'system' ? (themeMedia.matches ? 'light' : 'dark') : choice;
+  document.documentElement.dataset.theme = theme;
+  $$('#themeSwitch [data-theme-choice]').forEach(button => {
+    const active = button.dataset.themeChoice === choice;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+themeMedia.addEventListener('change', () => { if (themeChoice === 'system') applyTheme('system'); });
+$('#themeSwitch')?.addEventListener('click', event => {
+  const button = event.target.closest('[data-theme-choice]');
+  if (!button) return;
+  themeChoice = button.dataset.themeChoice;
+  localStorage.setItem('nasAiTheme', themeChoice);
+  applyTheme(themeChoice);
+});
+applyTheme(themeChoice);
+
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
 }[character]));
@@ -104,6 +134,15 @@ const fmtBytes = value => {
 };
 
 const fmtCount = value => Number(value || 0).toLocaleString('zh-CN');
+// 后端时间戳统一为 UTC（ISO 带时区，或 SQLite 的 "YYYY-MM-DD HH:MM:SS" 无时区形式），
+// 显示时一律按设备本地时区渲染；无时区后缀的按 UTC 解析。
+const fmtTime = value => {
+  if (!value) return '';
+  const text = String(value);
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text) ? `${text.replace(' ', 'T')}Z` : text;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? text : date.toLocaleString('zh-CN', { hour12: false });
+};
 const fmtPercent = value => {
   const number = Math.max(0, Math.min(100, Number(value || 0)));
   return `${number.toFixed(number >= 99 ? 2 : 1)}%`;
@@ -159,6 +198,113 @@ const toast = (message, error = false) => {
   toast.timer = setTimeout(() => { element.className = 'toast'; }, 3200);
 };
 
+// ===== 阶段二：弹窗焦点管理与通用对话框 =====
+// 打开栈：记录触发元素用于关闭后焦点归位，Escape 只关最上层
+const modalStack = [];
+
+function openModal(modal) {
+  if (!modal || modal.classList.contains('open')) return;
+  modalStack.push({ modal, trigger: document.activeElement });
+  modal.classList.add('open');
+  const target = $$('input:not([type="hidden"]), select, textarea, button, [tabindex]', modal)
+    .find(element => !element.disabled && element.getClientRects().length);
+  target?.focus({ preventScroll: true });
+}
+
+function closeModal(modal) {
+  if (!modal?.classList.contains('open')) return;
+  // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
+  if (modal.id === 'fileModal') {
+    state.currentFile = null;
+    state.currentFileUrl = '';
+    $('#filePreview').innerHTML = '';
+  }
+  if (modal.id === 'assetReviewModal') {
+    reviewMedia()?.pause();
+    disposeReviewViewer();
+    $('#reviewCanvas').innerHTML = '';
+    $('#reviewFilmstrip').innerHTML = '';
+    state.currentAsset = null;
+  }
+  if (modal.id === 'dialogModal' && dialogState) {
+    // Escape / 遮罩点击 = 取消（与原生 confirm/prompt 行为一致）
+    const pending = dialogState;
+    dialogState = null;
+    pending.resolve(pending.cancelValue);
+  }
+  modal.classList.remove('open');
+  const index = modalStack.findIndex(entry => entry.modal === modal);
+  const [entry] = index >= 0 ? modalStack.splice(index, 1) : [];
+  if (entry?.trigger?.isConnected) entry.trigger.focus({ preventScroll: true });
+}
+
+// 当前 3D 预览的释放函数（mountGltfViewer / mountModelViewer 返回）：
+// 关弹窗、切换版本、重新挂载前都要先调用，否则 WebGL 上下文泄漏
+let reviewViewerDispose = null;
+
+function disposeReviewViewer() {
+  reviewViewerDispose?.();
+  reviewViewerDispose = null;
+}
+
+// 审阅弹窗统一关闭入口：按钮、Escape、切换视图都走这里
+function closeReview() {
+  closeModal($('#assetReviewModal'));
+}
+
+// 通用确认 / 输入弹窗，替代原生 confirm/prompt，Promise 化
+let dialogState = null;
+
+function closeDialog(value) {
+  const pending = dialogState;
+  dialogState = null;
+  closeModal($('#dialogModal'));
+  pending?.resolve(value);
+}
+
+function openDialog({ eyebrow = '确认操作', title, body = '', label = '', value = '', danger = false, confirmText = '确定', input = false, cancelValue }) {
+  // 重入保护：上一个对话框还没 settle 时先以其取消值收尾，避免调用方 await 的 Promise 永远悬挂
+  if (dialogState) {
+    const pending = dialogState;
+    dialogState = null;
+    pending.resolve(pending.cancelValue);
+  }
+  $('#dialogEyebrow').textContent = eyebrow;
+  $('#dialogTitle').textContent = title;
+  $('#dialogBody').textContent = body;
+  $('#dialogBody').hidden = !body;
+  const field = $('#dialogField');
+  field.hidden = !input;
+  $('#dialogLabel').textContent = label;
+  const inputElement = $('#dialogInput');
+  inputElement.value = value;
+  const confirmButton = $('#dialogConfirm');
+  confirmButton.textContent = confirmText;
+  confirmButton.className = danger ? 'danger' : 'primary';
+  openModal($('#dialogModal'));
+  if (input) {
+    inputElement.focus();
+    inputElement.select();
+  } else {
+    confirmButton.focus();
+  }
+  return new Promise(resolve => { dialogState = { resolve, cancelValue, input }; });
+}
+
+const confirmDialog = options => openDialog({ ...options, cancelValue: false });
+const promptDialog = options => openDialog({ ...options, input: true, cancelValue: null });
+
+$('#dialogCancel').addEventListener('click', () => closeDialog(dialogState?.cancelValue));
+$('#dialogConfirm').addEventListener('click', () => {
+  closeDialog(dialogState?.input ? $('#dialogInput').value : true);
+});
+$('#dialogInput').addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    closeDialog($('#dialogInput').value);
+  }
+});
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
@@ -177,7 +323,7 @@ async function api(path, options = {}) {
       localStorage.removeItem('nasAiToken');
       $('#tokenForm [name=token]').value = '';
       applyRole();
-      if (!state.publicMode) $('#tokenModal').classList.add('open');
+      if (!state.publicMode) openModal($('#tokenModal'));
     }
   }
   if (!response.ok) {
@@ -192,7 +338,7 @@ const titles = {
   home: ['数据总览', '你的私有数据，只在本地流动'],
   search: ['智能搜索', '全文与语义融合检索'],
   ask: ['问你的资料', '回答均可追溯到原始文件'],
-  library: ['资料库', '统一浏览所有文件与索引状态'],
+  library: ['浏览', '统一浏览所有文件与索引状态'],
   albums: ['相册与发现', '时间、人物、地点、事件与智能相册'],
   timeline: ['时间线', '按拍摄日期浏览照片与视频'],
   people: ['人物相册', '本地识别并聚类照片中的人物'],
@@ -211,11 +357,17 @@ const titles = {
   deliveries: ['分享与交付', '管理安全外部审阅链接'],
 };
 
+// Hash 路由：从 location.hash 解析视图名，非法时返回空串
+function viewFromHash() {
+  const view = location.hash.replace(/^#/, '');
+  return titles[view] ? view : '';
+}
+
 function showView(view) {
   if (!titles[view]) return;
   if (state.publicMode) return;
   if (!state.authReady) {
-    $('#tokenModal').classList.add('open');
+    openModal($('#tokenModal'));
     return;
   }
   const systemViews = new Set(['libraries', 'tasks', 'organizer', 'people', 'events', 'recycle', 'hardware', 'users', 'operations']);
@@ -228,6 +380,7 @@ function showView(view) {
   $('#pageTitle').textContent = titles[view][0];
   $('#pageSubtitle').textContent = titles[view][1];
   $('.sidebar').classList.remove('open');
+  $$('.workbench.rail-open').forEach(workbench => workbench.classList.remove('rail-open'));
   if (view === 'home') {
     loadDashboard(true);
     loadTasks(true);
@@ -254,8 +407,18 @@ function showView(view) {
   if (view === 'deliveries') loadDeliveries();
   if (view === 'ask') loadConversations();
   if (view === 'search') setTimeout(() => $('#mainSearchInput').focus(), 80);
+  // 切换视图时若审阅弹窗仍开着，统一走 closeReview 停掉媒体
+  if ($('#assetReviewModal').classList.contains('open')) closeReview();
+  // 同步 hash；pushState 不触发 hashchange，避免与路由监听互相循环
+  if (location.hash !== `#${view}`) history.pushState(null, '', `#${view}`);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
+
+// 浏览器前进 / 后退 / 直接修改 hash 时恢复对应视图（无 hash 回到默认总览）
+window.addEventListener('hashchange', () => {
+  if (state.publicMode) return;
+  showView(viewFromHash() || 'home');
+});
 
 function statsCard(label, value, note, iconName) {
   return `<article class="stat-card"><span class="stat-icon">${icon(iconName)}</span><div class="stat-copy"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(note)}</span></div></article>`;
@@ -309,13 +472,15 @@ async function loadDashboard(quiet = false) {
 }
 
 function libraryRow(item) {
-  return `<div class="library-row"><span class="library-icon">${icon('library')}</span><div><b>${esc(item.name)}</b><small>${esc(item.path)}</small></div><div class="library-meta"><strong>${fmtCount(item.file_count)} 个文件</strong><span>${fmtBytes(item.total_bytes)}</span></div></div>`;
+  const scanned = Boolean(item.last_scan_at);
+  return `<div class="library-row"><i class="lib-status${scanned ? ' on' : ''}" title="${scanned ? '已完成扫描' : '尚未扫描'}"></i><div><b>${esc(item.name)}</b><small>${esc(item.path)}</small></div><div class="library-meta"><strong>${fmtCount(item.file_count)} 个文件</strong><span>${fmtBytes(item.total_bytes)}</span></div><span class="lib-bar"><i style="width:${scanned ? 100 : 0}%"></i></span></div>`;
 }
 
 async function loadLibraries() {
   try {
     const items = await api('/api/libraries');
     state.libraries = items;
+    renderLibTrees();
     ['#searchLibrary', '#librarySource'].forEach(selector => {
       const select = $(selector);
       if (!select) return;
@@ -390,7 +555,7 @@ async function loadIndexStatus(refreshForm = false, quiet = false) {
       : retryWaiting
         ? `${fmtCount(retryWaiting)} 个文件正在等待下一次退避重试。`
         : terminal
-          ? `${fmtCount(terminal)} 个文件多次失败，已停止自动重试，请在资料库查看后手动重建。`
+          ? `${fmtCount(terminal)} 个文件多次失败，已停止自动重试，请在浏览页查看后手动重建。`
           : '当前没有需要修复的部分索引。';
     $('#repairIndex').disabled = !Number(data.stages.repairable || 0);
     const badge = $('#indexPolicyBadge');
@@ -464,6 +629,12 @@ async function loadSystem() {
     $('#accelTitle').textContent = `${plan.inference_backend.toUpperCase()} · ${plan.media_backend.toUpperCase()}`;
     $('#accelDescription').textContent = plan.reasons.join('；');
     $('#accelMeter').style.width = accelerated ? '88%' : '38%';
+    const serviceRow = (name, online, note) => `<div class="service-row"><i class="${online ? 'on' : 'off'}"></i><span>${esc(name)}</span><b>${esc(note)}</b></div>`;
+    $('#accelServices').innerHTML = [
+      serviceRow('推理模型', Boolean(data.local_ai.configured && data.local_ai.reachable), data.local_ai.configured ? (data.local_ai.reachable ? data.configuration.chat_model || '已连接' : '连接失败') : '未配置'),
+      serviceRow('向量库', Boolean(data.vector_store.reachable), data.vector_store.reachable ? 'Qdrant 运行中' : '不可达'),
+      serviceRow('媒体转写', true, plan.media_backend.toUpperCase()),
+    ].join('');
     $('#accelChips').innerHTML = [
       `${data.hardware.logical_cpus} 线程`,
       `${fmtBytes(data.hardware.memory_bytes)} 内存`,
@@ -494,7 +665,7 @@ async function authenticatedBlobUrl(path) {
     localStorage.removeItem('nasAiToken');
     $('#tokenForm [name=token]').value = '';
     applyRole();
-    if (!state.publicMode) $('#tokenModal').classList.add('open');
+    if (!state.publicMode) openModal($('#tokenModal'));
     const error = new Error('登录已失效，请重新登录');
     error.status = 401;
     throw error;
@@ -610,7 +781,150 @@ function resultCard(item) {
     ? `<span class="card-feedback"><button data-card-feedback="relevant" data-feedback-file="${item.id}" title="相关">✓</button><button data-card-feedback="irrelevant" data-feedback-file="${item.id}" title="不相关">×</button></span>`
     : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
-  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
+  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
+}
+
+// 阶段三（布局重构）：列表行模式，与网格卡片并列；缩略图复用同一条懒加载管线
+function resultRow(item) {
+  const thumb = ['image', 'video'].includes(item.kind)
+    ? `<img loading="lazy" data-thumbnail="/api/files/${item.id}/thumbnail" alt="${esc(item.name)}">`
+    : icon({ document: 'document', audio: 'audio', archive: 'archive' }[item.kind] || 'files');
+  const library = state.libraries.find(entry => entry.id === Number(item.library_id));
+  const moment = item.match_time != null ? ` · 命中 ${fmtDuration(item.match_time)}` : '';
+  const date = item.captured_at || (item.mtime_ns ? new Date(Number(item.mtime_ns) / 1e6).toISOString() : '');
+  const meta = [item.kind, fmtBytes(item.size), date ? fmtDate(date) : '', library ? library.name : '']
+    .filter(Boolean).join(' · ');
+  const favorite = item.favorite != null ? `<button class="card-favorite ${item.favorite ? 'active' : ''}" data-favorite-card="${item.id}" data-enabled="${item.favorite ? '1' : '0'}" aria-label="${item.favorite ? '取消收藏' : '收藏'}">${icon('star')}</button>` : '';
+  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${favorite}</div>`;
+}
+
+// 按当前布局模式渲染结果容器（grid 卡片 / list 行），并恢复选中态
+function renderFileList(container, items) {
+  container.classList.toggle('as-list', state.browseLayout === 'list');
+  container.innerHTML = items.map(state.browseLayout === 'list' ? resultRow : resultCard).join('');
+  markSelectedFile(container);
+  loadResultThumbnails(container);
+}
+
+// 高亮右栏检查器当前选中的文件（重新渲染后调用）
+function markSelectedFile(scope = document) {
+  $$('.workbench [data-file]', scope).forEach(element => {
+    element.classList.toggle('selected', state.inspectorFileId != null && Number(element.dataset.file) === Number(state.inspectorFileId));
+  });
+}
+
+// 切换网格 / 列表：写入 localStorage，重渲染两个工作台已加载的结果
+function applyBrowseLayout() {
+  $$('[data-wb-layout]').forEach(button => button.classList.toggle('active', button.dataset.wbLayout === state.browseLayout));
+  if (state.searchResults.length) renderFileList($('#searchResults'), state.searchResults);
+  if (state.libraryItems.length) renderFileList($('#libraryResults'), state.libraryItems);
+}
+applyBrowseLayout();
+
+// 左栏媒体库树：浏览 / 搜索各实例化一份，点击同步到隐藏的原有 select（复用现有筛选逻辑）
+function renderLibTrees() {
+  [['#searchLibTree', '#searchLibrary'], ['#libraryLibTree', '#librarySource']].forEach(([treeSelector, selectSelector]) => {
+    const tree = $(treeSelector);
+    const select = $(selectSelector);
+    if (!tree || !select) return;
+    const total = state.libraries.reduce((sum, item) => sum + Number(item.file_count || 0), 0);
+    const items = [{ id: '', name: '全部媒体库', file_count: total }, ...state.libraries];
+    tree.innerHTML = items.map(item => `<button class="folder-item rail-lib${String(item.id) === String(select.value) ? ' active' : ''}" data-rail-lib="${item.id}">${esc(item.name)}<i>${fmtCount(item.file_count)}</i></button>`).join('');
+  });
+}
+
+// ===== 阶段三（布局重构）：右栏检查器 =====
+// 数据复用现有 /api/files/{id} 详情接口；完整编辑功能仍保留在 fileModal 中
+function renderInspector(details) {
+  const preview = ['image', 'video'].includes(details.kind)
+    ? `<img data-thumbnail="/api/files/${details.id}/thumbnail" alt="${esc(details.name)}">`
+    : icon({ document: 'document', audio: 'audio', archive: 'archive' }[details.kind] || 'files');
+  const library = state.libraries.find(entry => entry.id === Number(details.library_id));
+  const date = details.captured_at || (details.mtime_ns ? new Date(Number(details.mtime_ns) / 1e6).toISOString() : '');
+  const statusLabel = details.status === 'ready' ? '完整' : details.status === 'partial' ? '部分完成' : taskStatus(details.status);
+  const facts = [
+    ['类型', details.kind],
+    ['大小', fmtBytes(details.size)],
+    details.width ? ['尺寸', `${details.width} × ${details.height}`] : null,
+    details.duration ? ['时长', fmtDuration(details.duration)] : null,
+    ['日期', date ? fmtDate(date) : '时间未知'],
+    ['媒体库', library ? library.name : '—'],
+    ['索引', statusLabel],
+  ].filter(Boolean).map(item => `<span>${esc(item[0])}</span><b>${esc(item[1])}</b>`).join('');
+  const caption = String(details.ai_caption || '').trim();
+  const summary = caption.length > 180 ? `${caption.slice(0, 180)}…` : caption;
+  const favorite = Boolean(details.favorite);
+  const favoriteButton = details.favorite != null
+    ? `<button class="secondary personal-only ${favorite ? 'active' : ''}" data-inspector-favorite="${details.id}" data-enabled="${favorite ? '1' : '0'}">${favorite ? '★ 已收藏' : '☆ 收藏'}</button>`
+    : '';
+  return `<div class="inspector-preview">${preview}</div>
+    <h3 class="inspector-name">${esc(details.name)}</h3>
+    <p class="inspector-path">${esc(details.relative_path || '')}</p>
+    <div class="inspector-facts">${facts}</div>
+    ${summary ? `<p class="inspector-caption">${esc(summary)}</p>` : ''}
+    <div class="inspector-actions">
+      ${favoriteButton}
+      <button class="secondary" data-inspector-detail="${details.id}">打开完整详情</button>
+      <button class="primary" data-inspector-open="${details.id}">打开原文件</button>
+    </div>`;
+}
+
+// 检查器骨架屏：详情接口返回前先给占位
+function inspectorSkeleton() {
+  return '<div class="inspector-preview ins-skel"></div><div class="ins-skel ins-skel-line" style="width:72%"></div><div class="ins-skel ins-skel-line" style="width:46%"></div><div class="ins-skel ins-skel-block"></div><div class="ins-skel ins-skel-block"></div>';
+}
+
+async function openInspector(fileId, aside) {
+  state.inspectorFileId = Number(fileId);
+  const sequence = ++state.inspectorSeq;
+  markSelectedFile();
+  aside.innerHTML = inspectorSkeleton();
+  try {
+    const details = await api(`/api/files/${fileId}`);
+    if (sequence !== state.inspectorSeq) return;
+    aside.innerHTML = renderInspector(details);
+    loadResultThumbnails(aside);
+  } catch (error) {
+    if (sequence !== state.inspectorSeq) return;
+    aside.innerHTML = `<div class="inspector-empty"><b>详情加载失败</b><p>${esc(error.message)}</p></div>`;
+  }
+}
+
+// 工作台内单击文件：宽屏选中并载入右栏检查器；窄屏（右栏隐藏时）直接开模态
+// 选中态 / 骨架屏立即出现，详情请求延迟 250ms：随后发生双击则取消这次请求并恢复原内容，
+// 避免 click×2 + dblclick 对同一接口连发 3 次
+function selectWorkbenchFile(element) {
+  const aside = $('.wb-inspector', element.closest('.workbench'));
+  if (!aside) return;
+  if (!state.inspectorClickTimer) state.inspectorRestore = { aside, html: aside.innerHTML };
+  clearTimeout(state.inspectorClickTimer);
+  state.inspectorFileId = Number(element.dataset.file);
+  markSelectedFile();
+  aside.innerHTML = inspectorSkeleton();
+  state.inspectorClickTimer = setTimeout(() => {
+    state.inspectorClickTimer = null;
+    state.inspectorRestore = null;
+    openInspector(element.dataset.file, aside);
+  }, 250);
+}
+
+// 双击 / 其他需要取消单击延迟请求的场景：停掉计时器并还原检查器内容
+function cancelInspectorClick() {
+  if (!state.inspectorClickTimer) return;
+  clearTimeout(state.inspectorClickTimer);
+  state.inspectorClickTimer = null;
+  if (state.inspectorRestore?.aside?.isConnected) state.inspectorRestore.aside.innerHTML = state.inspectorRestore.html;
+  state.inspectorRestore = null;
+}
+
+// 检查器“打开原文件”：走票据接口拿一次性 URL 后新窗口打开
+async function openOriginalFileById(fileId) {
+  try {
+    const ticket = await api(`/api/files/${fileId}/ticket`, { method: 'POST' });
+    window.open(ticket.url, '_blank', 'noopener');
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 function searchFilterParams() {
@@ -654,11 +968,12 @@ function renderSearchResults(data, append = false, phase = 'fast') {
     ? '全文 + 语义 + 精准重排'
     : data.semantic ? '全文 + 语义' : '全文索引';
   $('#searchSummary').innerHTML = `找到约 ${fmtCount(data.total)} 个候选 · 已显示 ${fmtCount(state.searchResults.length)} 个 · ${label}${phase === 'fast' && state.preciseSearch ? '<span class="refining"><i></i>正在后台精排首屏</span>' : ''}`;
-  $('#searchResults').innerHTML = state.searchResults.length
-    ? state.searchResults.map(resultCard).join('')
-    : '<div class="empty-state"><span class="empty-icon">' + icon('search') + '</span><b>没有找到相关内容</b><p>可以换一种描述、调整筛选，或先修复部分索引。</p></div>';
+  if (state.searchResults.length) {
+    renderFileList($('#searchResults'), state.searchResults);
+  } else {
+    $('#searchResults').innerHTML = '<div class="empty-state"><span class="empty-icon">' + icon('search') + '</span><b>没有找到相关内容</b><p>可以换一种描述、调整筛选，或先修复部分索引。</p></div>';
+  }
   $('#searchMore').hidden = !state.searchHasMore;
-  loadResultThumbnails($('#searchResults'));
 }
 
 async function runSearch(query, append = false) {
@@ -718,11 +1033,12 @@ async function runSimilarSearch(fileId, name) {
     state.searchResults = data.results || [];
     state.searchHasMore = false;
     $('#searchSummary').textContent = `找到 ${fmtCount(state.searchTotal)} 个与“${name}”语义相近的内容`;
-    $('#searchResults').innerHTML = state.searchResults.length
-      ? state.searchResults.map(resultCard).join('')
-      : '<div class="empty-state"><b>暂时没有可比较的相似内容</b><p>该文件可能还没有完成向量索引。</p></div>';
+    if (state.searchResults.length) {
+      renderFileList($('#searchResults'), state.searchResults);
+    } else {
+      $('#searchResults').innerHTML = '<div class="empty-state"><b>暂时没有可比较的相似内容</b><p>该文件可能还没有完成向量索引。</p></div>';
+    }
     $('#searchMore').hidden = true;
-    loadResultThumbnails($('#searchResults'));
   } catch (error) {
     if (sequence !== state.searchSequence) return;
     toast(error.message, true);
@@ -754,21 +1070,22 @@ async function loadLibraryFiles(reset = false) {
     state.libraryItems = [];
     state.libraryOffset = 0;
   }
-  $('#librarySummary').textContent = '正在读取资料库…';
+  $('#librarySummary').textContent = '正在读取资料…';
   try {
     const data = await api(`/api/files?${libraryParams(state.libraryOffset)}`);
     state.libraryItems.push(...data.items);
     state.libraryOffset = state.libraryItems.length;
     state.libraryTotal = Number(data.total || 0);
     $('#librarySummary').textContent = `共 ${fmtCount(data.total)} 个文件 · 已显示 ${fmtCount(state.libraryItems.length)} 个`;
-    $('#libraryResults').innerHTML = state.libraryItems.length
-      ? state.libraryItems.map(resultCard).join('')
-      : '<div class="empty-state"><span class="empty-icon">' + icon('library') + '</span><b>这个筛选下没有文件</b><p>可以调整类型、索引状态或标签。</p></div>';
+    if (state.libraryItems.length) {
+      renderFileList($('#libraryResults'), state.libraryItems);
+    } else {
+      $('#libraryResults').innerHTML = '<div class="empty-state"><span class="empty-icon">' + icon('library') + '</span><b>这个筛选下没有文件</b><p>可以调整类型、索引状态或标签。</p></div>';
+    }
     $('#libraryMore').hidden = state.libraryItems.length >= state.libraryTotal;
-    loadResultThumbnails($('#libraryResults'));
   } catch (error) {
     toast(error.message, true);
-    $('#libraryResults').innerHTML = '<div class="empty-state"><b>资料库加载失败</b></div>';
+    $('#libraryResults').innerHTML = '<div class="empty-state"><b>资料加载失败</b></div>';
   }
 }
 
@@ -859,7 +1176,7 @@ function timelineCard(item) {
     ? `<img loading="lazy" data-thumbnail="/api/files/${item.id}/thumbnail" alt="${esc(item.name)}">`
     : `<span class="timeline-file-icon">${icon({ document: 'document', audio: 'audio' }[item.kind] || 'files')}</span>`;
   const duration = item.duration ? `<span>${fmtDuration(item.duration)}</span>` : '';
-  return `<article class="timeline-card" data-file="${item.id}"><div class="timeline-thumb">${visual}${duration}</div><div><b>${esc(item.name)}</b><small>${esc(item.kind)} · ${fmtBytes(item.size)}</small></div></article>`;
+  return `<article class="timeline-card" data-file="${item.id}" tabindex="0" role="button"><div class="timeline-thumb">${visual}${duration}</div><div><b>${esc(item.name)}</b><small>${esc(item.kind)} · ${fmtBytes(item.size)}</small></div></article>`;
 }
 
 function renderTimeline() {
@@ -1013,7 +1330,7 @@ function curationFileCard(item, mode) {
     ? `<img loading="lazy" data-thumbnail="/api/files/${item.id}/thumbnail" alt="${esc(item.name)}">`
     : icon('files');
   const value = mode === 'person' ? item.face_id : item.id;
-  return `<article class="timeline-card curation-file" data-file="${item.id}"><div class="timeline-thumb">${visual}<label class="card-select admin-only"><input type="checkbox" data-curation-item="${value}"><span></span></label></div><div><b>${esc(item.name)}</b><small>${esc(item.kind)} · ${fmtBytes(item.size)}</small></div></article>`;
+  return `<article class="timeline-card curation-file" data-file="${item.id}" tabindex="0" role="button"><div class="timeline-thumb">${visual}<label class="card-select admin-only"><input type="checkbox" data-curation-item="${value}"><span></span></label></div><div><b>${esc(item.name)}</b><small>${esc(item.kind)} · ${fmtBytes(item.size)}</small></div></article>`;
 }
 
 async function openPerson(personId) {
@@ -1138,7 +1455,7 @@ async function loadRecycle() {
       statsCard('占用空间', fmtBytes(data.bytes), '永久清除后释放', 'storage'),
     ].join('');
     $('#recycleList').innerHTML = data.items.length
-      ? data.items.map(item => `<article class="recycle-row"><span class="card-leading">${icon('recycle')}</span><div><h3>${esc(item.name)}</h3><p>${fmtBytes(item.size)} · ${esc(item.relative_path)}</p><small>移入时间 ${esc(item.trashed_at)} · 操作者 ${esc(item.actor)}</small></div><div class="card-actions"><button class="secondary" data-restore-trash="${item.id}">恢复</button><button class="danger" data-purge-trash="${item.id}">永久清除</button></div></article>`).join('')
+      ? data.items.map(item => `<article class="recycle-row"><span class="card-leading">${icon('recycle')}</span><div><h3>${esc(item.name)}</h3><p>${fmtBytes(item.size)} · ${esc(item.relative_path)}</p><small>移入时间 ${esc(fmtTime(item.trashed_at))} · 操作者 ${esc(item.actor)}</small></div><div class="card-actions"><button class="secondary" data-restore-trash="${item.id}">恢复</button><button class="danger" data-purge-trash="${item.id}">永久清除</button></div></article>`).join('')
       : '<div class="empty-state"><span class="empty-icon">' + icon('recycle') + '</span><b>回收站为空</b><p>从重复文件分析中移入的文件会显示在这里。</p></div>';
   } catch (error) { toast(error.message, true); }
 }
@@ -1181,7 +1498,7 @@ function openUserModal(user = null) {
   form.elements.enabled.disabled = owner;
   $('#userModalTitle').textContent = user ? '编辑用户' : '添加用户';
   $('#permissionList').innerHTML = state.libraries.map(library => `<label><input type="checkbox" name="library_ids" value="${library.id}" ${(owner || user?.library_ids.includes(library.id)) ? 'checked' : ''} ${owner ? 'disabled' : ''}><span>${esc(library.name)}</span><small>${esc(library.path)}</small></label>`).join('');
-  $('#userModal').classList.add('open');
+  openModal($('#userModal'));
 }
 
 async function loadOperations() {
@@ -1220,12 +1537,12 @@ async function loadOperations() {
     ].join('');
     $('#repairFromOperations').disabled = !Number(stages.repairable || 0);
     $('#snapshotList').innerHTML = snapshots.items.length
-      ? snapshots.items.map(item => `<div class="snapshot-row"><span>${icon('vector')}</span><div><b>${esc(item.name)}</b><small>${fmtBytes(item.bytes)} · ${esc(item.created_at)}</small></div><button class="secondary" data-restore-snapshot="${esc(item.name)}">恢复</button><button class="danger" data-delete-snapshot="${esc(item.name)}">删除</button></div>`).join('')
+      ? snapshots.items.map(item => `<div class="snapshot-row"><span>${icon('vector')}</span><div><b>${esc(item.name)}</b><small>${fmtBytes(item.bytes)} · ${esc(fmtTime(item.created_at))}</small></div><button class="secondary" data-restore-snapshot="${esc(item.name)}">恢复</button><button class="danger" data-delete-snapshot="${esc(item.name)}">删除</button></div>`).join('')
       : '<div class="empty-state compact"><b>尚无向量快照</b><p>完成一批索引后创建，可用于 Qdrant 集合灾难恢复。</p></div>';
     $('#snapshotList').dataset.collection = snapshots.collection;
     $('#visionUpgradeStatus').innerHTML = `<span>当前描述版本 v${data.vision_captions.version}</span><b>${fmtCount(data.vision_captions.pending_upgrade)} 张旧版图片等待升级</b>`;
     $('#auditList').innerHTML = audit.length
-      ? audit.map(item => `<div class="audit-row"><span>${esc(item.actor)}</span><b>${esc(item.action)}</b><small>${esc(item.target_type)} ${esc(item.target_id)}</small><time>${esc(item.created_at)}</time></div>`).join('')
+      ? audit.map(item => `<div class="audit-row"><span>${esc(item.actor)}</span><b>${esc(item.action)}</b><small>${esc(item.target_type)} ${esc(item.target_id)}</small><time>${esc(fmtTime(item.created_at))}</time></div>`).join('')
       : '<div class="empty-state compact"><b>暂无操作记录</b></div>';
   } catch (error) {
     toast(error.message, true);
@@ -1253,15 +1570,12 @@ function uploadOne(file, progress) {
 }
 
 function closeFileViewer() {
-  $('#fileModal').classList.remove('open');
-  state.currentFile = null;
-  state.currentFileUrl = '';
-  $('#filePreview').innerHTML = '';
+  closeModal($('#fileModal'));
 }
 
 async function openFileViewer(fileId, matchTime = null) {
   const modal = $('#fileModal');
-  modal.classList.add('open');
+  openModal(modal);
   $('#filePreview').innerHTML = '<div class="viewer-loading">正在安全读取原文件…</div>';
   $('#fileName').textContent = '正在载入';
   $('#filePath').textContent = '';
@@ -1288,7 +1602,7 @@ async function openFileViewer(fileId, matchTime = null) {
       ['语音', stageLabel(details.transcription_status)],
       ['向量', stageLabel(details.embedding_status)],
       Number(details.retry_count) ? ['重试次数', fmtCount(details.retry_count)] : null,
-      details.next_retry_at ? ['下次重试', new Date(details.next_retry_at).toLocaleString('zh-CN')] : null,
+      details.next_retry_at ? ['下次重试', fmtTime(details.next_retry_at)] : null,
       Number(details.terminal_error) ? ['自动重试', '已停止，需人工检查'] : null,
     ].filter(Boolean).map(item => `<div><span>${item[0]}</span><b>${esc(item[1])}</b></div>`).join('');
     $('#fileCaption').innerHTML = details.ai_caption
@@ -1306,7 +1620,12 @@ async function openFileViewer(fileId, matchTime = null) {
       sourced.length ? `<h3>文档来源</h3>${sourced.slice(0, 40).map(chunk => `<div class="source-chunk"><span>${esc(chunk.source_label)}</span><p>${esc(chunk.content)}</p></div>`).join('')}` : '',
     ].join('');
     if (details.kind === 'image') {
-      $('#filePreview').innerHTML = `<img src="${esc(ticket.url)}" alt="${esc(details.name)}">`;
+      // PSD/AI/EPS/字体等设计文件浏览器无法直接渲染，改用后端生成的预览图
+      const designExtensions = ['.psd', '.psb', '.ai', '.eps', '.ttf', '.otf', '.ttc'];
+      const previewUrl = designExtensions.includes(String(details.extension || '').toLowerCase())
+        ? `/api/files/${details.id}/thumbnail`
+        : ticket.url;
+      $('#filePreview').innerHTML = `<img src="${esc(previewUrl)}" alt="${esc(details.name)}">`;
     } else if (details.kind === 'video') {
       $('#filePreview').innerHTML = `<video controls preload="metadata" src="${esc(ticket.url)}"></video>`;
       const video = $('#filePreview video');
@@ -1345,7 +1664,7 @@ async function loadTasks(quiet = false) {
         const heartbeat = task.heartbeat_at && task.status === 'running'
           ? ` · 心跳 ${new Date(task.heartbeat_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
           : '';
-        return `<article class="task-card"><span class="card-leading">${icon('task')}</span><div><h3>${esc(taskTitle(task))}</h3><p>${esc(task.message || task.error || '等待执行')}${esc(work)}${esc(heartbeat)} · ${esc(task.created_at)}</p><div class="progress"><span style="width:${Math.round(task.progress * 100)}%"></span></div></div><div class="card-actions"><span class="task-status ${esc(task.status)}">${esc(taskStatus(task.status))}</span>${['pending', 'running'].includes(task.status) ? `<button class="danger" data-cancel="${task.id}">取消</button>` : ''}${['failed', 'cancelled'].includes(task.status) ? `<button class="secondary" data-retry="${task.id}">重试</button>` : ''}</div></article>`;
+        return `<article class="task-card"><span class="card-leading">${icon('task')}</span><div><h3>${esc(taskTitle(task))}</h3><p>${esc(task.message || task.error || '等待执行')}${esc(work)}${esc(heartbeat)} · ${esc(fmtTime(task.created_at))}</p><div class="progress"><span style="width:${Math.round(task.progress * 100)}%"></span></div></div><div class="card-actions"><span class="task-status ${esc(task.status)}">${esc(taskStatus(task.status))}</span>${['pending', 'running'].includes(task.status) ? `<button class="danger" data-cancel="${task.id}">取消</button>` : ''}${['failed', 'cancelled'].includes(task.status) ? `<button class="secondary" data-retry="${task.id}">重试</button>` : ''}</div></article>`;
       }).join('')
       : '<div class="empty-state"><span class="empty-icon">' + icon('task') + '</span><b>暂无处理任务</b><p>扫描媒体库时，实时进度会显示在这里。</p></div>';
   } catch (error) {
@@ -1540,7 +1859,7 @@ function renderProjectAssets(items, total) {
         <div class="asset-card-preview">${assetCardPreview(item)}<span class="asset-kind">${esc(item.kind)}</span><span class="asset-version">V${fmtCount(item.version_number)}</span>${item.duration ? `<span class="asset-duration">${fmtDuration(item.duration)}</span>` : ''}</div>
         <div class="asset-card-body"><h3>${esc(item.title)}</h3><p>${esc(item.caption || item.file_name || '暂无内容描述')}</p><div class="asset-card-meta"><span class="asset-status-dot" style="--status-color:${assetStatusColor(item.status)}">${esc(assetStatusName(item.status))}</span><span>${item.open_comment_count ? `${fmtCount(item.open_comment_count)} 条待处理` : `${'★'.repeat(Number(item.rating || 0)) || '未评级'}`}</span></div></div>
       </article>`).join('')
-    : '<div class="empty-state"><b>当前文件夹没有素材</b><p>从资料库添加素材，或切换筛选条件。</p></div>';
+    : '<div class="empty-state"><b>当前文件夹没有素材</b><p>从浏览页添加素材，或切换筛选条件。</p></div>';
   loadResultThumbnails(grid);
 }
 
@@ -1602,14 +1921,25 @@ async function loadDeliveries() {
   } catch (error) { toast(error.message, true); }
 }
 
+// HTML5 video 拿不到精确帧率，逐帧步进统一按 25fps，需要调整时改这里
+const REVIEW_FPS = 25;
+const FRAME_STEP_SECONDS = 1 / REVIEW_FPS;
+
 function reviewMedia() {
   return $('#reviewCanvas video, #reviewCanvas audio');
+}
+
+function stepReviewFrame(direction) {
+  const media = reviewMedia();
+  if (!media) return;
+  media.pause();
+  media.currentTime = Math.max(0, Math.min(media.duration || Infinity, media.currentTime + direction * FRAME_STEP_SECONDS));
 }
 
 function updateReviewTimecode() {
   const media = reviewMedia();
   const seconds = Number(media?.currentTime || 0);
-  const frames = Math.floor(seconds * 25) % 25;
+  const frames = Math.floor(seconds * REVIEW_FPS) % REVIEW_FPS;
   const totalSeconds = Math.floor(seconds);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor(totalSeconds / 60) % 60;
@@ -1631,11 +1961,35 @@ function renderAnnotations() {
   }).join('');
 }
 
+function commentAttachmentHtml(file) {
+  if (!file?.url) return '';
+  const label = esc(file.original_name || file.name);
+  if ((file.mime || '').startsWith('image/')) return `<a href="${esc(file.url)}" target="_blank" rel="noopener"><img class="comment-attachment-image" src="${esc(file.url)}" alt="${label}" loading="lazy"></a>`;
+  if ((file.mime || '').startsWith('video/')) return `<video class="comment-attachment-video" controls preload="metadata" src="${esc(file.url)}"></video>`;
+  return `<a class="comment-attachment-link" href="${esc(file.url)}" target="_blank" rel="noopener">${label}</a>`;
+}
+
+async function uploadCommentAttachment(url, file) {
+  const headers = { 'X-Filename': encodeURIComponent(file.name) };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const response = await fetch(url, { method: 'POST', headers, body: file });
+  if (!response.ok) {
+    let detail = `附件上传失败 (${response.status})`;
+    try { detail = (await response.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
 function renderReviewComments() {
   const comments = state.currentAsset.comments.filter(item => item.version_id == null || Number(item.version_id) === Number(state.currentVersionId));
   const canComment = ['owner', 'manager', 'editor', 'reviewer'].includes(state.currentAsset.access_role);
   $('#reviewComments').innerHTML = comments.length
-    ? comments.map(item => `<article class="review-comment ${item.resolved ? 'resolved' : ''}" data-comment-time="${item.time_start ?? ''}"><div class="review-comment-head"><b>${esc(item.display_name || item.guest_name || '成员')}</b><span>${item.time_start != null ? fmtDuration(item.time_start) : '整条素材'}</span></div><p>${esc(item.body)}</p><div class="review-comment-foot"><span>${esc(item.visibility === 'external' ? '外部可见' : '团队内部')} · ${esc(item.created_at)}</span>${canComment ? `<button data-resolve-comment="${item.id}" data-resolved="${item.resolved ? '1' : '0'}">${item.resolved ? '重新打开' : '标记解决'}</button>` : ''}</div></article>`).join('')
+    ? comments.map(item => {
+      const attachments = (item.attachments || []).map(commentAttachmentHtml).join('');
+      const canDelete = canComment && (['owner', 'manager'].includes(state.currentAsset.access_role) || (state.user?.username && item.username === state.user.username));
+      return `<article class="review-comment ${item.resolved ? 'resolved' : ''}" data-comment-time="${item.time_start ?? ''}"><div class="review-comment-head"><b>${esc(item.display_name || item.guest_name || '成员')}</b><span>${item.time_start != null ? fmtDuration(item.time_start) : '整条素材'}</span></div><p>${esc(item.body)}</p>${attachments ? `<div class="comment-attachments">${attachments}</div>` : ''}<div class="review-comment-foot"><span>${esc(item.visibility === 'external' ? '外部可见' : '团队内部')} · ${esc(fmtTime(item.created_at))}</span><span>${canComment ? `<button data-resolve-comment="${item.id}" data-resolved="${item.resolved ? '1' : '0'}">${item.resolved ? '重新打开' : '标记解决'}</button>` : ''}${canDelete ? `<button data-delete-comment="${item.id}">删除</button>` : ''}</span></div></article>`;
+    }).join('')
     : '<div class="empty-state compact"><b>这个版本还没有审阅意见</b><p>播放视频或在画面上标注后发布第一条意见。</p></div>';
   renderAnnotations();
 }
@@ -1665,14 +2019,24 @@ async function loadReviewVersion(versionId, seekTime = null) {
   if (!version.look_path) state.lookPreviewEnabled = false;
   state.annotationStrokes = [];
   $('#reviewVersionSelect').value = String(version.id);
+  // 切换版本 / 素材前先释放上一个 3D 查看器的 WebGL 上下文
+  disposeReviewViewer();
   $('#reviewCanvas').innerHTML = '<div class="viewer-loading">正在安全读取素材…</div><svg id="annotationLayer" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg><span class="review-watermark" id="reviewWatermark" hidden></span>';
   try {
     const variant = state.lookPreviewEnabled && version.look_path ? 'look' : 'best';
     const ticket = await api(`/api/asset-versions/${version.id}/ticket?variant=${variant}`, { method: 'POST' });
-    if (/\.(obj|ply)$/i.test(version.file_name || '') && Number(version.size || 0) <= 80 * 1024 * 1024) {
-      $('#reviewCanvas').insertAdjacentHTML('afterbegin', '<canvas class="model-review-canvas" aria-label="3D 模型预览"></canvas><span class="model-review-help">拖动旋转 · 滚轮缩放 · 本地 WebGL 渲染</span>');
-      const { mountModelViewer } = await import('/assets/model-viewer.js?v=2');
-      await mountModelViewer($('.model-review-canvas', $('#reviewCanvas')), ticket.url, version.file_name);
+    if (/\.(obj|ply|glb|gltf)$/i.test(version.file_name || '') && Number(version.size || 0) <= 80 * 1024 * 1024) {
+      const isGltf = /\.(glb|gltf)$/i.test(version.file_name || '');
+      const help = isGltf ? '拖动旋转 · 右键平移 · 滚轮缩放 · 本地 WebGL 渲染' : '拖动旋转 · 滚轮缩放 · 本地 WebGL 渲染';
+      $('#reviewCanvas').insertAdjacentHTML('afterbegin', `<canvas class="model-review-canvas" aria-label="3D 模型预览"></canvas><span class="model-review-help">${help}</span>`);
+      const mountViewer = isGltf
+        ? (await import('/assets/gltf-viewer.js?v=1')).mountGltfViewer
+        : (await import('/assets/model-viewer.js?v=2')).mountModelViewer;
+      const modelCanvas = $('.model-review-canvas', $('#reviewCanvas'));
+      const disposeViewer = await mountViewer(modelCanvas, ticket.url, version.file_name);
+      // 挂载期间弹窗可能已关闭或又切了版本：画布已不在 DOM 时立即释放，不占用上下文
+      if (modelCanvas.isConnected) reviewViewerDispose = disposeViewer;
+      else disposeViewer();
     } else if (version.kind === 'image') {
       $('#reviewCanvas').insertAdjacentHTML('afterbegin', `<img src="${esc(ticket.url)}" alt="${esc(version.file_name)}">`);
     } else if (version.kind === 'video') {
@@ -1705,6 +2069,7 @@ async function loadReviewVersion(versionId, seekTime = null) {
     }
     $('#reviewFilmstrip').innerHTML = artifactUrl ? `<img src="${esc(artifactUrl)}" alt="媒体概览">` : '';
   } catch (error) {
+    disposeReviewViewer();
     $('#reviewCanvas').innerHTML = `<div class="empty-state"><b>素材暂时无法预览</b><p>${esc(error.message)}</p></div><svg id="annotationLayer" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>`;
   }
   $('#toggleLookPreview').hidden = !version.look_path;
@@ -1713,7 +2078,7 @@ async function loadReviewVersion(versionId, seekTime = null) {
 }
 
 async function openAssetReview(assetId, seekTime = null) {
-  $('#assetReviewModal').classList.add('open');
+  openModal($('#assetReviewModal'));
   try {
     const asset = await api(`/api/assets/${assetId}`);
     if (!state.projectDetails || Number(state.projectDetails.project.id) !== Number(asset.project_id)) {
@@ -1749,7 +2114,7 @@ async function openAssetReview(assetId, seekTime = null) {
     $('#assetQc').innerHTML = qc.checks.map(item => `<div class="qc-check ${esc(item.level)}"><i></i><div><b>${esc(item.name)}</b><span>${esc(item.detail)}</span></div></div>`).join('');
   } catch (error) {
     toast(error.message, true);
-    $('#assetReviewModal').classList.remove('open');
+    closeModal($('#assetReviewModal'));
   }
 }
 
@@ -1757,13 +2122,13 @@ async function openAssetPicker(fileId = null) {
   const projects = state.projects.length ? state.projects : await loadProjects(true);
   if (!projects.length) {
     toast('请先创建项目', true);
-    return $('#projectModal').classList.add('open');
+    return openModal($('#projectModal'));
   }
   $('#assetTargetProject').value = state.currentProjectId && projects.some(item => item.id === state.currentProjectId)
     ? String(state.currentProjectId)
     : String(projects[0].id);
   await refreshAssetTargetFolders();
-  $('#addAssetModal').classList.add('open');
+  openModal($('#addAssetModal'));
   if (fileId) {
     const file = await api(`/api/files/${fileId}`);
     renderAssetPickerResults([file]);
@@ -1830,7 +2195,7 @@ async function openShareCreator(assetId = '') {
   select.innerHTML = '<option value="">整个项目</option>' + state.projectAssets.map(item => `<option value="${item.id}">${esc(item.title)}</option>`).join('');
   select.value = assetId ? String(assetId) : '';
   $('#shareCreated').hidden = true;
-  $('#shareModal').classList.add('open');
+  openModal($('#shareModal'));
 }
 
 async function openProjectInbox() {
@@ -1845,7 +2210,7 @@ async function openProjectInbox() {
     ].join('');
     $('#collectProjectInbox').disabled = Boolean(data.active_task);
     $('#collectProjectInbox').textContent = data.active_task ? '入库任务正在运行' : '扫描并收集入库文件';
-    $('#projectInboxModal').classList.add('open');
+    openModal($('#projectInboxModal'));
   } catch (error) { toast(error.message, true); }
 }
 
@@ -1856,7 +2221,7 @@ async function loadNotifications() {
     $('#notificationCount').hidden = !data.unread;
     $('#notificationCount').textContent = data.unread;
     $('#notificationList').innerHTML = data.items.length
-      ? data.items.map(item => `<article class="notification-row ${item.read_at ? '' : 'unread'}" data-notification="${item.id}" data-notification-target="${esc(item.target_type)}" data-notification-target-id="${esc(item.target_id)}"><b>${esc(item.title)}</b><span>${esc(item.body)}</span><small>${esc(item.created_at)}</small></article>`).join('')
+      ? data.items.map(item => `<article class="notification-row ${item.read_at ? '' : 'unread'}" data-notification="${item.id}" data-notification-target="${esc(item.target_type)}" data-notification-target-id="${esc(item.target_id)}"><b>${esc(item.title)}</b><span>${esc(item.body)}</span><small>${esc(fmtTime(item.created_at))}</small></article>`).join('')
       : '<div class="empty-state compact"><b>暂无协作通知</b></div>';
   } catch {}
 }
@@ -1881,7 +2246,7 @@ function renderPublicShare(data) {
     const comments = asset.comments || [];
     return `<article class="public-asset" data-public-asset="${asset.id}">
       <div class="public-asset-stage">${publicStage(current, asset.id)}${data.share.watermark_text ? `<span class="review-watermark">${esc(data.share.watermark_text)}</span>` : ''}</div>
-      <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p></article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><button class="primary">发布意见</button></form>` : ''}</div></div>
+      <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p>${(comment.attachments || []).length ? `<div class="comment-attachments">${comment.attachments.map(commentAttachmentHtml).join('')}</div>` : ''}</article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><input name="attachments" type="file" accept="image/*,video/*" multiple><button class="primary">发布意见</button></form>` : ''}</div></div>
     </article>`;
   }).join('');
   state.publicShareData = data;
@@ -1929,12 +2294,24 @@ document.addEventListener('click', async event => {
   const go = event.target.closest('[data-go]');
   if (go) return showView(go.dataset.go);
   if (event.target.closest('#menuButton')) return $('.sidebar').classList.toggle('open');
+  // 移动端抽屉：点击 ::after 遮罩（事件目标是 .sidebar 本体）时收起
+  if (event.target.classList?.contains('sidebar') && event.target.classList.contains('open')) {
+    event.target.classList.remove('open');
+    return;
+  }
+  if (event.target.closest('#settingsButton')) {
+    // 齿轮 = 系统设置入口：展开系统管理分组并进入设置视图
+    return showView(isAdmin() ? 'operations' : 'libraries');
+  }
   if (event.target.closest('#tokenButton')) {
     $('#tokenForm [name=token]').value = state.user?.auth_type === 'api_token' ? state.token : '';
     applyRole();
-    return $('#tokenModal').classList.add('open');
+    // 未登录时点开安全设置：登录成功后重新打开账号面板，而不是默默回到首页
+    state.reopenAuthAfterLogin = !state.user;
+    $('#authTitle').textContent = state.user ? '账号与安全' : '连接私有空间';
+    return openModal($('#tokenModal'));
   }
-  if (event.target.closest('#uploadButton')) return $('#uploadModal').classList.add('open');
+  if (event.target.closest('#uploadButton')) return openModal($('#uploadModal'));
   if (event.target.closest('#showFavorites')) {
     $('#libraryFavorite').checked = true;
     return loadLibraryFiles(true);
@@ -1947,7 +2324,7 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('#saveSmartAlbum')) {
     if (!state.searchQuery) return toast('请先执行一次搜索', true);
-    const name = prompt('智能相册名称', state.searchQuery.slice(0, 30));
+    const name = await promptDialog({ title: '保存为智能相册', label: '相册名称', value: state.searchQuery.slice(0, 30) });
     if (!name?.trim()) return;
     try {
       await api('/api/smart-albums', {
@@ -1967,7 +2344,7 @@ document.addEventListener('click', async event => {
   const deleteSmartAlbum = event.target.closest('[data-delete-smart-album]');
   if (deleteSmartAlbum) {
     event.stopPropagation();
-    if (!confirm('删除这个智能相册？不会删除任何原文件。')) return;
+    if (!(await confirmDialog({ title: '删除智能相册', body: '删除后不会影响任何原文件。', danger: true, confirmText: '删除' }))) return;
     try {
       await api(`/api/smart-albums/${deleteSmartAlbum.dataset.deleteSmartAlbum}`, { method: 'DELETE' });
       toast('智能相册已删除');
@@ -2004,7 +2381,7 @@ document.addEventListener('click', async event => {
     return;
   }
   if (event.target.closest('#deleteConversation') && state.currentConversationId) {
-    if (!confirm('删除当前对话记录？')) return;
+    if (!(await confirmDialog({ title: '删除当前对话', body: '对话记录删除后不可恢复。', danger: true, confirmText: '删除' }))) return;
     try {
       await api(`/api/conversations/${state.currentConversationId}`, { method: 'DELETE' });
       resetConversation();
@@ -2014,9 +2391,11 @@ document.addEventListener('click', async event => {
     return;
   }
   if (event.target.closest('#repairIndex') || event.target.closest('#repairFromOperations')) {
+    const button = event.target.closest('#repairIndex, #repairFromOperations');
+    const limit = Number(button.closest('.repair-callout, .panel-head')?.querySelector('.repair-limit')?.value || 50);
     try {
-      const result = await api('/api/index/repair', { method: 'POST', body: JSON.stringify({ limit: 50 }) });
-      toast(result.existing ? '已有自动修复任务在运行' : '已加入 50 个部分索引修复任务');
+      const result = await api('/api/index/repair', { method: 'POST', body: JSON.stringify({ limit }) });
+      toast(result.existing ? '已有自动修复任务在运行' : limit >= 100000 ? '已加入全部部分索引文件的修复任务' : `已加入 ${limit} 个部分索引修复任务`);
       showView('tasks');
     } catch (error) { toast(error.message, true); }
     return;
@@ -2037,7 +2416,8 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('#hidePeople')) {
     const ids = $$('[data-select-person]:checked').map(input => Number(input.dataset.selectPerson));
-    if (!ids.length || !confirm(`隐藏选中的 ${ids.length} 个人物？`)) return;
+    if (!ids.length) return;
+    if (!(await confirmDialog({ title: '隐藏所选人物', body: `将隐藏选中的 ${ids.length} 个人物分组，照片本身不受影响。` }))) return;
     try {
       await Promise.all(ids.map(id => api(`/api/people/${id}`, { method: 'DELETE' })));
       toast('所选人物已隐藏');
@@ -2062,7 +2442,8 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('#hideEvents')) {
     const ids = $$('[data-select-event]:checked').map(input => Number(input.dataset.selectEvent));
-    if (!ids.length || !confirm(`隐藏选中的 ${ids.length} 个事件？`)) return;
+    if (!ids.length) return;
+    if (!(await confirmDialog({ title: '隐藏所选事件', body: `将隐藏选中的 ${ids.length} 个事件相册，文件本身不受影响。` }))) return;
     try {
       await Promise.all(ids.map(id => api(`/api/events/${id}`, { method: 'DELETE' })));
       toast('所选事件已隐藏');
@@ -2086,7 +2467,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#personSplit')) {
     const ids = $$('[data-curation-item]:checked', $('#personDetail')).map(input => Number(input.dataset.curationItem));
     if (!ids.length) return toast('请选择要拆分的人脸', true);
-    const name = prompt('新人物名称', '待命名人物');
+    const name = await promptDialog({ title: '拆分人物', label: '新人物名称', value: '待命名人物' });
     if (name == null) return;
     try {
       await api(`/api/people/${$('#personDetail').dataset.personId}/split`, {
@@ -2114,7 +2495,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#eventSplit')) {
     const ids = $$('[data-curation-item]:checked', $('#eventDetail')).map(input => Number(input.dataset.curationItem));
     if (!ids.length) return toast('请选择要拆分的文件', true);
-    const name = prompt('新事件名称', '新事件');
+    const name = await promptDialog({ title: '拆分事件', label: '新事件名称', value: '新事件' });
     if (!name?.trim()) return;
     try {
       await api(`/api/events/${$('#eventDetail').dataset.eventId}/split`, {
@@ -2130,7 +2511,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#bulkRecycleDuplicates')) {
     const ids = $$('[data-duplicate-file]:checked').map(input => Number(input.dataset.duplicateFile));
     if (!ids.length) return toast('没有选中可清理副本', true);
-    if (!confirm(`将选中的 ${ids.length} 个重复副本移入可恢复回收站？`)) return;
+    if (!(await confirmDialog({ title: '批量移入回收站', body: `将选中的 ${ids.length} 个重复副本移入可恢复回收站。`, danger: true, confirmText: '移入回收站' }))) return;
     try {
       await api('/api/recycle', { method: 'POST', body: JSON.stringify({ file_ids: ids }) });
       toast(`${ids.length} 个重复副本已移入回收站`);
@@ -2167,7 +2548,7 @@ document.addEventListener('click', async event => {
   if (person) return openPerson(person.dataset.person);
   const rename = event.target.closest('[data-person-rename]');
   if (rename) {
-    const name = prompt('人物名称', rename.dataset.personName);
+    const name = await promptDialog({ title: '重命名人物', label: '人物名称', value: rename.dataset.personName });
     if (name?.trim()) {
       try {
         await api(`/api/people/${rename.dataset.personRename}`, { method: 'PUT', body: JSON.stringify({ name: name.trim() }) });
@@ -2182,7 +2563,7 @@ document.addEventListener('click', async event => {
   if (place) return openPlace(place.dataset.place);
   const renamePlace = event.target.closest('[data-place-rename]');
   if (renamePlace) {
-    const name = prompt('地点名称', renamePlace.dataset.albumName);
+    const name = await promptDialog({ title: '重命名地点', label: '地点名称', value: renamePlace.dataset.albumName });
     if (name?.trim()) {
       try {
         await api(`/api/places/${renamePlace.dataset.placeRename}`, { method: 'PUT', body: JSON.stringify({ name: name.trim() }) });
@@ -2197,7 +2578,7 @@ document.addEventListener('click', async event => {
   if (albumEvent) return openEvent(albumEvent.dataset.event);
   const renameEvent = event.target.closest('[data-event-rename]');
   if (renameEvent) {
-    const name = prompt('事件名称', renameEvent.dataset.albumName);
+    const name = await promptDialog({ title: '重命名事件', label: '事件名称', value: renameEvent.dataset.albumName });
     if (name?.trim()) {
       try {
         await api(`/api/events/${renameEvent.dataset.eventRename}`, { method: 'PUT', body: JSON.stringify({ name: name.trim() }) });
@@ -2218,12 +2599,11 @@ document.addEventListener('click', async event => {
     } catch (error) { toast(error.message, true); }
     return;
   }
-  if (event.target.closest('#addLibrary')) return $('#libraryModal').classList.add('open');
+  if (event.target.closest('#addLibrary')) return openModal($('#libraryModal'));
   if (event.target.matches('[data-close]') || event.target.classList.contains('modal')) {
     const modal = event.target.closest('.modal');
     if (modal?.id === 'tokenModal' && state.bootstrapRequired) return;
-    if (modal?.id === 'fileModal') closeFileViewer();
-    else modal?.classList.remove('open');
+    if (modal) closeModal(modal);
     return;
   }
   const quickQuery = event.target.closest('[data-query]');
@@ -2248,8 +2628,10 @@ document.addEventListener('click', async event => {
   const cancel = event.target.closest('[data-cancel]');
   if (cancel) {
     try {
+      // 运行中的任务只能在批次检查点停止，等待中的会立即取消
+      const running = Boolean(cancel.closest('.task-card')?.querySelector('.task-status.running'));
       await api(`/api/tasks/${cancel.dataset.cancel}/cancel`, { method: 'POST' });
-      toast('已请求取消');
+      toast(running ? '已请求取消，将在当前批次结束后停止' : '任务已取消');
       loadTasks();
     } catch (error) { toast(error.message, true); }
     return;
@@ -2280,7 +2662,8 @@ document.addEventListener('click', async event => {
     return;
   }
   const remove = event.target.closest('[data-delete-library]');
-  if (remove && confirm('删除媒体库索引？不会删除原文件。')) {
+  if (remove) {
+    if (!(await confirmDialog({ title: '删除媒体库', body: '只删除索引数据，不会删除原文件。', danger: true, confirmText: '删除' }))) return;
     try {
       await api(`/api/libraries/${remove.dataset.deleteLibrary}`, { method: 'DELETE' });
       toast('媒体库已删除');
@@ -2326,7 +2709,7 @@ document.addEventListener('click', async event => {
   const restoreSnapshot = event.target.closest('[data-restore-snapshot]');
   if (restoreSnapshot) {
     const collection = $('#snapshotList').dataset.collection;
-    const confirmation = prompt(`恢复会覆盖当前向量集合。请输入 ${collection} 确认：`);
+    const confirmation = await promptDialog({ title: '恢复向量快照', body: `恢复会覆盖当前向量集合，且不可撤销。请输入 ${collection} 确认。`, label: '集合名称', danger: true, confirmText: '恢复' });
     if (confirmation !== collection) return;
     try {
       await api(`/api/operations/vector-snapshots/${encodeURIComponent(restoreSnapshot.dataset.restoreSnapshot)}/restore`, {
@@ -2339,7 +2722,8 @@ document.addEventListener('click', async event => {
     return;
   }
   const deleteSnapshot = event.target.closest('[data-delete-snapshot]');
-  if (deleteSnapshot && confirm('删除这个本地向量快照？')) {
+  if (deleteSnapshot) {
+    if (!(await confirmDialog({ title: '删除向量快照', body: '删除这个本地向量快照？', danger: true, confirmText: '删除' }))) return;
     try {
       await api(`/api/operations/vector-snapshots/${encodeURIComponent(deleteSnapshot.dataset.deleteSnapshot)}`, { method: 'DELETE' });
       toast('向量快照已删除');
@@ -2350,7 +2734,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#refreshRecycle')) return loadRecycle();
   const recycleFile = event.target.closest('[data-recycle-file]');
   if (recycleFile) {
-    if (!confirm('将这个重复副本移入可恢复回收站？系统会再次确认仍有保留副本。')) return;
+    if (!(await confirmDialog({ title: '移入回收站', body: '将这个重复副本移入可恢复回收站？系统会再次确认仍有保留副本。', danger: true, confirmText: '移入回收站' }))) return;
     try {
       await api('/api/recycle', {
         method: 'POST',
@@ -2371,7 +2755,8 @@ document.addEventListener('click', async event => {
     return;
   }
   const purgeTrash = event.target.closest('[data-purge-trash]');
-  if (purgeTrash && confirm('永久清除后无法恢复，确定继续？')) {
+  if (purgeTrash) {
+    if (!(await confirmDialog({ title: '永久清除文件', body: '永久清除后无法恢复，确定继续？', danger: true, confirmText: '永久清除' }))) return;
     try {
       await api(`/api/recycle/${purgeTrash.dataset.purgeTrash}`, { method: 'DELETE' });
       toast('文件已永久清除');
@@ -2478,14 +2863,83 @@ document.addEventListener('click', async event => {
     window.open(state.currentFileUrl, '_blank', 'noopener');
     return;
   }
+  // ===== 阶段三（布局重构）：工作台布局切换、左栏抽屉、媒体库树与检查器操作 =====
+  const wbLayout = event.target.closest('[data-wb-layout]');
+  if (wbLayout) {
+    state.browseLayout = wbLayout.dataset.wbLayout;
+    localStorage.setItem('nasAiViewLayout', state.browseLayout);
+    applyBrowseLayout();
+    return;
+  }
+  const railToggle = event.target.closest('[data-rail-toggle]');
+  if (railToggle) {
+    railToggle.closest('.workbench')?.classList.toggle('rail-open');
+    return;
+  }
+  // 移动端抽屉：点击遮罩（事件目标是 .workbench 本体）时收起左栏
+  if (event.target.classList?.contains('workbench') && event.target.classList.contains('rail-open')
+    && matchMedia('(max-width: 820px)').matches) {
+    event.target.classList.remove('rail-open');
+    return;
+  }
+  const railLib = event.target.closest('[data-rail-lib]');
+  if (railLib) {
+    const workbench = railLib.closest('.workbench');
+    const select = workbench.id === 'searchWorkbench' ? $('#searchLibrary') : $('#librarySource');
+    select.value = railLib.dataset.railLib;
+    $$('.rail-lib', workbench).forEach(item => item.classList.toggle('active', item === railLib));
+    select.dispatchEvent(new Event('change'));
+    workbench.classList.remove('rail-open');
+    return;
+  }
+  const inspectorDetail = event.target.closest('[data-inspector-detail]');
+  if (inspectorDetail) return openFileViewer(inspectorDetail.dataset.inspectorDetail);
+  const inspectorOpen = event.target.closest('[data-inspector-open]');
+  if (inspectorOpen) return openOriginalFileById(inspectorOpen.dataset.inspectorOpen);
+  const inspectorFavorite = event.target.closest('[data-inspector-favorite]');
+  if (inspectorFavorite) {
+    try {
+      const fileId = inspectorFavorite.dataset.inspectorFavorite;
+      const enabled = inspectorFavorite.dataset.enabled !== '1';
+      await api(`/api/files/${fileId}/favorite?enabled=${enabled}`, { method: 'PUT' });
+      inspectorFavorite.dataset.enabled = enabled ? '1' : '0';
+      inspectorFavorite.classList.toggle('active', enabled);
+      inspectorFavorite.textContent = enabled ? '★ 已收藏' : '☆ 收藏';
+      // 同步网格 / 列表中的收藏星标与缓存数据
+      const cardStar = $(`[data-favorite-card="${fileId}"]`);
+      if (cardStar) {
+        cardStar.dataset.enabled = enabled ? '1' : '0';
+        cardStar.classList.toggle('active', enabled);
+      }
+      [...state.searchResults, ...state.libraryItems].forEach(item => {
+        if (Number(item.id) === Number(fileId) && item.favorite != null) item.favorite = enabled;
+      });
+      toast(enabled ? '已加入收藏' : '已取消收藏');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
   const file = event.target.closest('[data-file]');
   if (file) {
-    openFileViewer(file.dataset.file, file.dataset.time === '' ? null : Number(file.dataset.time));
+    // 工作台视图且右栏可见（宽屏）：单击进入检查器；其余场景维持原有“单击开模态”
+    if (file.closest('.workbench') && !matchMedia('(max-width: 1180px)').matches) {
+      selectWorkbenchFile(file);
+    } else {
+      openFileViewer(file.dataset.file, file.dataset.time === '' ? null : Number(file.dataset.time));
+    }
   }
 });
 
+// 工作台内双击卡片 / 列表行：直接打开完整详情模态
+// 双击前先取消单击延迟的检查器请求，详情由 openFileViewer 统一拉取，同一接口只发 1 次
+document.addEventListener('dblclick', event => {
+  const file = event.target.closest('.workbench [data-file]');
+  if (!file) return;
+  cancelInspectorClick();
+  openFileViewer(file.dataset.file, file.dataset.time === '' ? null : Number(file.dataset.time));
+});
+
 document.addEventListener('click', async event => {
-  if (event.target.closest('#createProject')) return $('#projectModal').classList.add('open');
+  if (event.target.closest('#createProject')) return openModal($('#projectModal'));
   const project = event.target.closest('[data-project]');
   if (project) return openProject(project.dataset.project);
   if (event.target.closest('#backToProjects')) return showView('projects');
@@ -2500,7 +2954,7 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('#createProjectFolder')) {
     fillFolderSelect('#folderForm [name=parent_id]', state.projectDetails?.folders || []);
-    return $('#folderModal').classList.add('open');
+    return openModal($('#folderModal'));
   }
   if (event.target.closest('#projectInboxButton')) return openProjectInbox();
   if (event.target.closest('#collectProjectInbox')) {
@@ -2525,15 +2979,15 @@ document.addEventListener('click', async event => {
       const role = owner ? 'owner' : item.role;
       return `<article class="project-member-row"><span>${esc(item.display_name.slice(0, 1))}</span><div><b>${esc(item.display_name)}</b><small>${esc(item.username)} · ${esc(projectRoleLabel(role))}</small></div>${owner ? '<span class="project-state">所有者</span>' : `<button class="danger" data-remove-project-member="${item.id}">移除</button>`}</article>`;
     }).join('');
-    return $('#projectMemberModal').classList.add('open');
+    return openModal($('#projectMemberModal'));
   }
   const removeMember = event.target.closest('[data-remove-project-member]');
   if (removeMember) {
-    if (!confirm('从当前项目移除该成员？')) return;
+    if (!(await confirmDialog({ title: '移除项目成员', body: '从当前项目移除该成员？', danger: true, confirmText: '移除' }))) return;
     try {
       await api(`/api/projects/${state.currentProjectId}/members/${removeMember.dataset.removeProjectMember}`, { method: 'DELETE' });
       await loadProjectWorkspace(state.currentProjectId);
-      $('#projectMemberModal').classList.remove('open');
+      closeModal($('#projectMemberModal'));
       toast('项目成员已移除');
     } catch (error) { toast(error.message, true); }
     return;
@@ -2570,17 +3024,13 @@ document.addEventListener('click', async event => {
   }
   const review = event.target.closest('[data-review-asset]');
   if (review) return openAssetReview(review.dataset.reviewAsset, review.dataset.reviewTime === '' ? null : Number(review.dataset.reviewTime));
-  if (event.target.closest('#closeAssetReview')) {
-    $('#assetReviewModal').classList.remove('open');
-    state.currentAsset = null;
-    return;
-  }
+  if (event.target.closest('#closeAssetReview')) return closeReview();
   if (event.target.closest('#openVersionModal')) {
     const form = $('#versionForm');
     form.reset();
     form.elements.file_id.value = '';
     $('#versionFileSelection').textContent = '尚未选择版本文件';
-    $('#versionModal').classList.add('open');
+    openModal($('#versionModal'));
     return loadVersionPickerResults('');
   }
   if (event.target.closest('#applyLook')) {
@@ -2588,7 +3038,7 @@ document.addEventListener('click', async event => {
     form.reset();
     form.elements.lut_file_id.value = '';
     $('#lookFileSelection').textContent = '尚未选择 LUT';
-    $('#lookModal').classList.add('open');
+    openModal($('#lookModal'));
     return loadLookPickerResults('');
   }
   if (event.target.closest('#toggleLookPreview') && state.currentVersionId) {
@@ -2657,19 +3107,28 @@ document.addEventListener('click', async event => {
     } catch (error) { toast(error.message, true); }
     return;
   }
+  const deleteComment = event.target.closest('[data-delete-comment]');
+  if (deleteComment) {
+    try {
+      await api(`/api/comments/${deleteComment.dataset.deleteComment}`, { method: 'DELETE' });
+      state.currentAsset = await api(`/api/assets/${state.currentAsset.id}`);
+      renderReviewComments();
+      loadCurrentProjectReviewTasks();
+      toast('审阅意见已删除');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
   if (event.target.closest('#playPause')) {
     const media = reviewMedia();
     if (media) media.paused ? media.play().catch(() => {}) : media.pause();
     return;
   }
   if (event.target.closest('#stepBack')) {
-    const media = reviewMedia();
-    if (media) media.currentTime = Math.max(0, media.currentTime - 1 / 25);
+    stepReviewFrame(-1);
     return;
   }
   if (event.target.closest('#stepForward')) {
-    const media = reviewMedia();
-    if (media) media.currentTime = Math.min(media.duration || Infinity, media.currentTime + 1 / 25);
+    stepReviewFrame(1);
     return;
   }
   if (event.target.closest('#toggleDraw')) {
@@ -2713,7 +3172,7 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('#notificationButton')) {
     await loadNotifications();
-    return $('#notificationModal').classList.add('open');
+    return openModal($('#notificationModal'));
   }
   if (event.target.closest('#readAllNotifications')) {
     try {
@@ -2727,9 +3186,13 @@ document.addEventListener('click', async event => {
     try {
       await api(`/api/notifications/read?notification_id=${notification.dataset.notification}`, { method: 'POST' });
       if (notification.dataset.notificationTarget === 'asset') {
-        $('#notificationModal').classList.remove('open');
+        closeModal($('#notificationModal'));
         openAssetReview(notification.dataset.notificationTargetId);
+      } else if (notification.dataset.notificationTarget === 'task') {
+        closeModal($('#notificationModal'));
+        showView('tasks');
       }
+      await loadNotifications();
     } catch (error) { toast(error.message, true); }
     return;
   }
@@ -2848,7 +3311,7 @@ $('#indexBatchForm').addEventListener('submit', async event => {
   button.disabled = true;
   try {
     const result = await api('/api/index', { method: 'POST', body: JSON.stringify(payload) });
-    toast(result.existing ? '已有索引任务在运行' : `已加入 ${fmtCount(payload.limit)} 个文件的索引批次`);
+    toast(result.existing ? '已有索引任务在运行' : payload.limit >= 100000 ? '已加入全部未索引文件的索引任务' : `已加入 ${fmtCount(payload.limit)} 个文件的索引批次`);
     await Promise.all([loadTasks(), loadIndexStatus()]);
   } catch (error) {
     toast(error.message, true);
@@ -2888,7 +3351,7 @@ $('#libraryForm').addEventListener('submit', async event => {
   try {
     const library = await api('/api/libraries', { method: 'POST', body: JSON.stringify(data) });
     await api(`/api/libraries/${library.id}/discover`, { method: 'POST' });
-    $('#libraryModal').classList.remove('open');
+    closeModal($('#libraryModal'));
     form.reset();
     toast('媒体库已添加，开始快速扫描');
     showView('tasks');
@@ -2902,7 +3365,7 @@ $('#tokenForm').addEventListener('submit', event => {
   state.token = new FormData(event.currentTarget).get('token').trim();
   state.authReady = false;
   localStorage.setItem('nasAiToken', state.token);
-  $('#tokenModal').classList.remove('open');
+  closeModal($('#tokenModal'));
   toast('令牌已保存');
   boot();
 });
@@ -2925,7 +3388,7 @@ $('#bootstrapForm').addEventListener('submit', async event => {
     state.authReady = true;
     localStorage.setItem('nasAiToken', state.token);
     form.reset();
-    $('#tokenModal').classList.remove('open');
+    closeModal($('#tokenModal'));
     toast(`设置完成，欢迎 ${response.user.display_name}`);
     boot();
   } catch (error) { toast(error.message, true); }
@@ -2942,9 +3405,16 @@ $('#loginForm').addEventListener('submit', async event => {
     state.authReady = true;
     localStorage.setItem('nasAiToken', state.token);
     form.reset();
-    $('#tokenModal').classList.remove('open');
+    closeModal($('#tokenModal'));
     toast(`欢迎，${response.user.display_name}`);
-    boot();
+    await boot();
+    // 从“安全设置”齿轮进入的登录：登录完成后回到账号与安全面板
+    if (state.reopenAuthAfterLogin) {
+      state.reopenAuthAfterLogin = false;
+      $('#tokenForm [name=token]').value = state.user?.auth_type === 'api_token' ? state.token : '';
+      $('#authTitle').textContent = '账号与安全';
+      openModal($('#tokenModal'));
+    }
   } catch (error) { toast(error.message, true); }
 });
 
@@ -2956,7 +3426,7 @@ $('#logoutButton').addEventListener('click', async () => {
   localStorage.removeItem('nasAiToken');
   $('#tokenForm [name=token]').value = '';
   applyRole();
-  $('#tokenModal').classList.add('open');
+  openModal($('#tokenModal'));
 });
 
 $('#uploadForm [name=files]').addEventListener('change', event => {
@@ -2986,7 +3456,7 @@ $('#uploadForm').addEventListener('submit', async event => {
     progressBar.style.width = '100%';
     progressText.textContent = '100%';
     toast(`已上传 ${files.length} 个文件，正在本地索引`);
-    $('#uploadModal').classList.remove('open');
+    closeModal($('#uploadModal'));
     form.reset();
     $('#uploadSelection').textContent = '可一次选择多个文件';
     showView('tasks');
@@ -3017,7 +3487,7 @@ $('#userForm').addEventListener('submit', async event => {
   if (id) delete data.username;
   try {
     await api(id ? `/api/users/${id}` : '/api/users', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) });
-    $('#userModal').classList.remove('open');
+    closeModal($('#userModal'));
     toast(id ? '用户权限已更新' : '用户已创建');
     loadUsers();
   } catch (error) { toast(error.message, true); }
@@ -3029,7 +3499,7 @@ $('#projectForm').addEventListener('submit', async event => {
   const values = Object.fromEntries(new FormData(form));
   try {
     const project = await api('/api/projects', { method: 'POST', body: JSON.stringify(values) });
-    $('#projectModal').classList.remove('open');
+    closeModal($('#projectModal'));
     form.reset();
     form.elements.color.value = '#7c8cff';
     toast('项目已创建');
@@ -3047,7 +3517,7 @@ $('#folderForm').addEventListener('submit', async event => {
       method: 'POST',
       body: JSON.stringify({ name: values.name, parent_id: values.parent_id ? Number(values.parent_id) : null }),
     });
-    $('#folderModal').classList.remove('open');
+    closeModal($('#folderModal'));
     form.reset();
     toast('项目文件夹已创建');
     await loadProjectWorkspace(state.currentProjectId);
@@ -3064,7 +3534,7 @@ $('#projectMemberForm').addEventListener('submit', async event => {
     });
     toast('项目角色已更新');
     await loadProjectWorkspace(state.currentProjectId);
-    $('#projectMemberModal').classList.remove('open');
+    closeModal($('#projectMemberModal'));
   } catch (error) { toast(error.message, true); }
 });
 
@@ -3096,7 +3566,7 @@ $('#reviewCommentForm').addEventListener('submit', async event => {
   const timeEnd = values.time_end !== '' ? Number(values.time_end) : null;
   const drawing = [...state.annotationStrokes];
   try {
-    await api(`/api/assets/${state.currentAsset.id}/comments`, {
+    const comment = await api(`/api/assets/${state.currentAsset.id}/comments`, {
       method: 'POST',
       body: JSON.stringify({
         version_id: state.currentVersionId,
@@ -3108,6 +3578,10 @@ $('#reviewCommentForm').addEventListener('submit', async event => {
         visibility: form.elements.external.checked ? 'external' : 'team',
       }),
     });
+    const files = [...(form.elements.attachments?.files || [])];
+    for (const file of files) {
+      await uploadCommentAttachment(`/api/comments/${comment.id}/attachments`, file);
+    }
     form.reset();
     state.annotationStrokes = [];
     state.currentAsset = await api(`/api/assets/${state.currentAsset.id}`);
@@ -3151,7 +3625,7 @@ $('#versionForm').addEventListener('submit', async event => {
       method: 'POST',
       body: JSON.stringify({ file_id: Number(values.file_id), label: values.label, notes: values.notes }),
     });
-    $('#versionModal').classList.remove('open');
+    closeModal($('#versionModal'));
     form.reset();
     toast(`V${version.version_number} 已添加`);
     await openAssetReview(form.dataset.assetId);
@@ -3175,7 +3649,7 @@ $('#lookForm').addEventListener('submit', async event => {
       method: 'POST',
       body: JSON.stringify({ lut_file_id: Number(form.elements.lut_file_id.value) }),
     });
-    $('#lookModal').classList.remove('open');
+    closeModal($('#lookModal'));
     toast(result.existing ? '该版本的 LUT 任务正在运行' : 'LUT 预览已加入硬件加速队列');
     const version = state.currentAsset.versions.find(item => Number(item.id) === Number(state.currentVersionId));
     if (version) {
@@ -3242,6 +3716,14 @@ document.addEventListener('submit', async event => {
       const payload = await response.json();
       throw new Error(payload.detail || '评论发布失败');
     }
+    const comment = await response.json();
+    const files = [...(form.elements.attachments?.files || [])];
+    for (const file of files) {
+      await uploadCommentAttachment(
+        `/api/public/shares/${encodeURIComponent(token)}/comments/${comment.id}/attachments?access_code=${encodeURIComponent(state.publicAccessCode)}`,
+        file,
+      );
+    }
     form.reset();
     toast('审阅意见已发布');
     await loadPublicShare(state.publicAccessCode);
@@ -3268,11 +3750,42 @@ document.addEventListener('keydown', event => {
     event.preventDefault();
     showView('search');
   }
-  if (event.key === 'Escape') {
-    if ($('#fileModal').classList.contains('open')) closeFileViewer();
-    $$('.modal.open').forEach(modal => {
-      if (modal.id !== 'tokenModal' || !state.bootstrapRequired) modal.classList.remove('open');
-    });
+  // 网格卡片 / 列表行键盘可达：聚焦时 Enter/Space 触发与点击相同的打开逻辑
+  if ((event.key === 'Enter' || event.key === ' ') && event.target instanceof Element
+    && event.target.matches('.result-card[data-file], .result-row[data-file], .timeline-card[data-file]')) {
+    event.preventDefault();
+    event.target.click();
+    return;
+  }
+  // Escape 只关闭最上层弹窗；文件详情 / 审阅的媒体清理由 closeModal 统一处理
+  if (event.key === 'Escape' && modalStack.length) {
+    const top = modalStack[modalStack.length - 1].modal;
+    if (!(top.id === 'tokenModal' && state.bootstrapRequired)) closeModal(top);
+    return;
+  }
+  // 焦点圈定在最上层弹窗内循环（focus trap）
+  if (event.key === 'Tab' && modalStack.length) {
+    const top = modalStack[modalStack.length - 1].modal;
+    const focusables = $$('button, input, select, textarea, a[href], [tabindex]', top)
+      .filter(element => !element.disabled && element.getClientRects().length);
+    if (focusables.length) {
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !top.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !top.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
+  // 审阅弹窗内按 , / . 逐帧步进（输入框聚焦时不拦截）
+  if ((event.key === ',' || event.key === '.') && $('#assetReviewModal').classList.contains('open')
+    && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]'))) {
+    event.preventDefault();
+    stepReviewFrame(event.key === '.' ? 1 : -1);
   }
 });
 
@@ -3298,8 +3811,13 @@ setInterval(() => {
   if (state.authReady && !state.publicMode && !document.hidden && $('#view-operations').classList.contains('active')) loadOperations();
 }, 60000);
 
+setInterval(() => {
+  if (state.authReady && !state.publicMode && !document.hidden) loadNotifications();
+}, 30000);
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden || !state.authReady || state.publicMode) return;
+  loadNotifications();
   if ($('#view-home').classList.contains('active')) {
     loadDashboard(true);
     loadTasks(true);
@@ -3334,7 +3852,7 @@ async function boot() {
       $('#authEyebrow').textContent = '首次启动';
       $('#authTitle').textContent = '设置你的管理员账号';
       $('#authDescription').textContent = '用户名和密码由你自行设置，只保存在这台 NAS。完成后会直接进入空间。';
-      $('#tokenModal').classList.add('open');
+      openModal($('#tokenModal'));
       return;
     }
     $('#bootstrapForm').hidden = true;
@@ -3346,7 +3864,7 @@ async function boot() {
     if (health.auth_enabled && !state.token) {
       state.user = null;
       applyRole();
-      $('#tokenModal').classList.add('open');
+      openModal($('#tokenModal'));
       return;
     }
     state.user = await api('/api/auth/me');
@@ -3363,6 +3881,9 @@ async function boot() {
       state.user?.id ? loadConversations() : Promise.resolve(),
       isAdmin() ? loadIndexStatus(true) : Promise.resolve(),
     ]);
+    // Hash 路由：刷新或收藏链接进入时恢复对应视图（默认仍是数据总览）
+    const initialView = viewFromHash();
+    if (initialView) showView(initialView);
   } catch (error) {
     if (error.status === 401) return;
     $('.service-card').classList.remove('ok');

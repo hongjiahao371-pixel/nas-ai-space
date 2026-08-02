@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import shutil
@@ -10,6 +11,9 @@ from typing import Any
 from app.config import Settings
 from app.database import Database
 from app.services.vectors import VectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class RecycleBin:
@@ -91,8 +95,8 @@ class RecycleBin:
 
         try:
             self.vectors.delete_files([int(item["file"]["id"]) for item in moved])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("回收站向量清理失败（%d 个文件）：%s", len(moved), exc)
         for library_id in {int(item["file"]["library_id"]) for item in moved}:
             self.database.update_library_stats(library_id)
         return {

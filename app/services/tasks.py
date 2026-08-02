@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from app.config import Settings
-from app.database import Database
+from app.database import Database, utc_now
 from app.services.extractors import index_file
 from app.services.faces import analyze_people
 from app.services.hardware import detect_hardware, memory_runtime
@@ -39,6 +39,7 @@ class TaskManager:
         self.scan_locks: dict[int, asyncio.Lock] = {}
         self.stopping = False
         self.completed_since_prune = 0
+        self._last_album_refresh_at = 0.0
         self.maintenance_state: dict[str, Any] = {
             "last_run_at": None,
             "last_backup": "",
@@ -100,6 +101,19 @@ class TaskManager:
         task = self.database.get_task(task_id)
         if task:
             await self.queue.put((-int(task["priority"]), task_id))
+
+    def _notify_user(self, task: dict[str, Any], title: str, body: str) -> None:
+        user_id = task.get("user_id")
+        if user_id is None:
+            return
+        try:
+            self.database.execute(
+                """INSERT INTO notifications(user_id, type, title, body, target_type, target_id, created_at)
+                   VALUES (?, 'task.finished', ?, ?, 'task', ?, ?)""",
+                (int(user_id), title, body[:240], str(task["id"]), utc_now()),
+            )
+        except Exception:
+            logger.exception("Failed to record task notification")
 
     async def _worker(self, _: int) -> None:
         while not self.stopping:
@@ -222,12 +236,14 @@ class TaskManager:
                     self.database.mark_task_cancelled(task_id)
                 else:
                     self.database.finish_task(task_id, message)
+                    self._notify_user(task, "后台任务已完成", message)
             except InterruptedError:
                 self.database.mark_task_cancelled(task_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.database.fail_task(task_id, f"{type(exc).__name__}: {exc}")
+                self._notify_user(task, "后台任务失败", f"{type(exc).__name__}: {exc}")
             finally:
                 self.completed_since_prune += 1
                 if self.completed_since_prune >= 100:
@@ -282,8 +298,12 @@ class TaskManager:
             )
             try:
                 await asyncio.to_thread(self.vectors.delete_files, result.get("removed_file_ids", []))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "扫描后向量清理失败（%d 个文件）：%s",
+                    len(result.get("removed_file_ids", [])),
+                    exc,
+                )
             return result
 
     async def _index_pending(
@@ -439,8 +459,19 @@ class TaskManager:
         )
 
     async def _queue_album_refresh(self) -> None:
-        await self.submit_unique("analyze_places", {"source": "automatic"}, priority=0)
-        await self.submit_unique("analyze_events", {"source": "automatic"}, priority=0)
+        # 相册分析是全库重算，每批索引完成都刷代价太高：距上次排队不足
+        # album_refresh_interval_seconds 且任务队列未排空时跳过（submit_unique 本身已保证
+        # 队列中已有刷新任务时不重复排队）；队列排空后允许立即补刷，保证相册最终仍会更新。
+        now = time.monotonic()
+        if (
+            now - self._last_album_refresh_at < self.settings.album_refresh_interval_seconds
+            and not self.queue.empty()
+        ):
+            return
+        _, places_existed = await self.submit_unique("analyze_places", {"source": "automatic"}, priority=0)
+        _, events_existed = await self.submit_unique("analyze_events", {"source": "automatic"}, priority=0)
+        if not (places_existed and events_existed):
+            self._last_album_refresh_at = now
 
     def index_policy(self) -> dict[str, Any]:
         defaults = {

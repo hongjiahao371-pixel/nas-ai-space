@@ -9,11 +9,13 @@ from typing import Any, Callable
 from app.database import Database
 
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif", ".raw", ".dng", ".cr2", ".cr3", ".nef", ".arw"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif", ".raw", ".dng", ".cr2", ".cr3", ".nef", ".arw", ".psd", ".psb", ".ai", ".eps", ".ttf", ".otf", ".ttc"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts", ".mts", ".m2ts", ".flv", ".wmv"}
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".ape"}
 DOCUMENT_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".tsv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".epub", ".log", ".srt", ".vtt"}
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
+# 3D 模型归 other：不生成缩略图、不抽取文本，预览由前端审阅页按扩展名处理
+MODEL_EXTENSIONS = {".obj", ".ply", ".glb", ".gltf"}
 IGNORED_NAMES = {"@eaDir", ".snapshot", ".recycle", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", ".AppleDouble"}
 
 
@@ -28,6 +30,8 @@ def file_kind(extension: str) -> str:
         return "document"
     if extension in ARCHIVE_EXTENSIONS:
         return "archive"
+    if extension in MODEL_EXTENSIONS:
+        return "other"
     return "other"
 
 
@@ -57,9 +61,9 @@ def scan_library(
     scanned = 0
     stack = [root]
 
-    def flush_batch() -> None:
+    def flush_batch(finalize: bool = False) -> None:
         nonlocal changed, unchanged, scanned
-        results = database.upsert_files(values_batch)
+        results = database.upsert_files(values_batch, finalize=finalize)
         changed += sum(int(was_changed) for _, was_changed in results)
         unchanged += sum(int(not was_changed) for _, was_changed in results)
         scanned += len(results)
@@ -109,7 +113,8 @@ def scan_library(
                 if len(values_batch) >= 500:
                     flush_batch()
 
-    flush_batch()
+    # 最后一次 flush 传 finalize=True：即使本批为空也会触发 similarity_groups 的一次性重算
+    flush_batch(finalize=True)
     removed_ids = database.mark_missing_files(int(library["id"]), scan_token)
     database.update_library_stats(int(library["id"]))
     progress(0.1, f"扫描完成，新增或变化 {changed:,} 个文件")

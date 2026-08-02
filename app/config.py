@@ -42,7 +42,12 @@ class Settings:
     vector_backup_dir: Path
     mutation_roots: tuple[tuple[Path, Path], ...]
     max_upload_bytes: int
+    comment_attachment_max_bytes: int
+    comment_attachment_max_per_comment: int
     max_extract_bytes: int
+    max_psd_bytes: int
+    max_psd_pixels: int
+    max_font_bytes: int
     pdf_ocr_pages: int
     thumbnail_size: int
     task_workers: int
@@ -58,12 +63,14 @@ class Settings:
     auto_index_batch_size: int
     task_retention_days: int
     task_retention_count: int
+    album_refresh_interval_seconds: int
     automatic_backup_enabled: bool
     automatic_backup_interval_hours: int
     automatic_backup_retention: int
     watch_enabled: bool
     watch_debounce_seconds: int
     watch_poll_seconds: int
+    watch_signature_seconds: int
     watch_fallback_seconds: int
     face_workers: int
     local_ai_base_url: str
@@ -128,7 +135,12 @@ class Settings:
             ).expanduser().resolve(),
             mutation_roots=tuple(mutation_roots),
             max_upload_bytes=_int_env("NAS_AI_MAX_UPLOAD_GB", 20, 1, 1024) * 1024 * 1024 * 1024,
+            comment_attachment_max_bytes=_int_env("NAS_AI_COMMENT_ATTACHMENT_MB", 200, 1, 2048) * 1024 * 1024,
+            comment_attachment_max_per_comment=_int_env("NAS_AI_COMMENT_ATTACHMENT_MAX_PER_COMMENT", 10, 1, 1000),
             max_extract_bytes=_int_env("NAS_AI_MAX_EXTRACT_MB", 16, 1, 256) * 1024 * 1024,
+            max_psd_bytes=_int_env("NAS_AI_MAX_PSD_MB", 500, 1, 10240) * 1024 * 1024,
+            max_psd_pixels=_int_env("NAS_AI_MAX_PSD_PIXELS", 100_000_000, 1_000_000, 10_000_000_000),
+            max_font_bytes=_int_env("NAS_AI_MAX_FONT_MB", 100, 1, 2048) * 1024 * 1024,
             pdf_ocr_pages=_int_env("NAS_AI_PDF_OCR_PAGES", 20, 0, 200),
             thumbnail_size=_int_env("NAS_AI_THUMBNAIL_SIZE", 640, 160, 2048),
             task_workers=_int_env("NAS_AI_TASK_WORKERS", 0, 0, 32),
@@ -144,12 +156,14 @@ class Settings:
             auto_index_batch_size=_int_env("NAS_AI_AUTO_INDEX_BATCH_SIZE", 200, 1, 10000),
             task_retention_days=_int_env("NAS_AI_TASK_RETENTION_DAYS", 30, 1, 3650),
             task_retention_count=_int_env("NAS_AI_TASK_RETENTION_COUNT", 2000, 100, 100000),
+            album_refresh_interval_seconds=_int_env("NAS_AI_ALBUM_REFRESH_INTERVAL_SECONDS", 3600, 0, 86400),
             automatic_backup_enabled=_bool_env("NAS_AI_AUTOMATIC_BACKUP_ENABLED", True),
             automatic_backup_interval_hours=_int_env("NAS_AI_AUTOMATIC_BACKUP_INTERVAL_HOURS", 24, 1, 720),
             automatic_backup_retention=_int_env("NAS_AI_AUTOMATIC_BACKUP_RETENTION", 7, 1, 100),
             watch_enabled=_bool_env("NAS_AI_WATCH_ENABLED", True),
             watch_debounce_seconds=_int_env("NAS_AI_WATCH_DEBOUNCE_SECONDS", 5, 1, 120),
             watch_poll_seconds=_int_env("NAS_AI_WATCH_POLL_SECONDS", 30, 5, 3600),
+            watch_signature_seconds=_int_env("NAS_AI_WATCH_SIGNATURE_SECONDS", 1800, 30, 86400),
             watch_fallback_seconds=_int_env("NAS_AI_WATCH_FALLBACK_SECONDS", 900, 60, 86400),
             face_workers=_int_env("NAS_AI_FACE_WORKERS", 0, 0, 16),
             local_ai_base_url=local_ai_base_url,
@@ -185,6 +199,7 @@ class Settings:
         (self.cache_dir / "faces").mkdir(parents=True, exist_ok=True)
         (self.cache_dir / "proxies").mkdir(parents=True, exist_ok=True)
         self.upload_root.mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "comment-attachments").mkdir(parents=True, exist_ok=True)
         self.ingest_root.mkdir(parents=True, exist_ok=True)
         self.recycle_root.mkdir(parents=True, exist_ok=True)
         self.vector_backup_dir.mkdir(parents=True, exist_ok=True)

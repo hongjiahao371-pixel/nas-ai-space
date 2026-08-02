@@ -95,22 +95,55 @@ def _query_groups(query: str) -> list[tuple[str, ...]]:
     return groups
 
 
-def _match_profile(row: dict[str, Any], groups: list[tuple[str, ...]], query: str) -> dict[str, Any]:
+def _fts_expression(query: str) -> str:
+    # 复用 _query_groups 的停用词清理与同义词展开，把任意用户输入转成合法的 FTS5 表达式，
+    # 供 MATCH 抛 OperationalError（未闭合引号、纯停用词等）时重试，而不是直接退到 LIKE 全表扫。
+    terms = [alias for group in _query_groups(query) for alias in group]
+    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+
+
+# search() 结果构造实际使用的列（见 results 组装）。extracted_text 体积大（整篇文本），
+# 不再随候选行物化，仅对进入最终排序页的候选单独补取（见 search() 中的回填逻辑）。
+FILE_COLUMNS = "id, library_id, name, relative_path, kind, mime_type, size, mtime_ns, width, height, duration, ai_caption"
+FILE_COLUMNS_F = ", ".join(f"f.{column}" for column in FILE_COLUMNS.split(", "))
+
+# profile 对单条候选得分的最大影响：+0.28 覆盖 +0.18 精确 +0.08 文件名 +0.14 全覆盖奖励，
+# 反向最多 -0.08 零覆盖 -0.06 截图惩罚；两者之和即任意候选相对截断线的最大可逆转分差。
+PROFILE_MAX_SWING = 0.28 + 0.18 + 0.08 + 0.14 + 0.08 + 0.06
+
+
+def _match_profile(
+    row: dict[str, Any],
+    groups: list[tuple[str, ...]],
+    query: str,
+    compact_groups: list[list[tuple[str, str]]] | None = None,
+) -> dict[str, Any]:
     name = str(row.get("name") or "")
     path = str(row.get("relative_path") or "")
     caption = str(row.get("ai_caption") or "")
     content = str(row.get("extracted_text") or "")
     combined = _compact("\n".join((name, path, caption, content)))
+    # 别名的 _compact 结果是查询级常量，由 search() 入口预算一次传入，
+    # 避免在每行×每组×每别名上重复跑正则
+    if compact_groups is None:
+        compact_groups = [[(alias, _compact(alias)) for alias in group] for group in groups]
     matched_aliases: list[str] = []
-    for aliases in groups:
-        match = next((alias for alias in aliases if _compact(alias) and _compact(alias) in combined), "")
+    for compact_aliases in compact_groups:
+        match = next(
+            (alias for alias, compact in compact_aliases if compact and compact in combined),
+            "",
+        )
         if match:
             matched_aliases.append(match)
     coverage = len(matched_aliases) / len(groups) if groups else 0.0
     compact_query = _compact(query)
     exact = bool(compact_query and compact_query in combined)
     compact_name = _compact(name)
-    name_match = any(_compact(alias) in compact_name for group in groups for alias in group if _compact(alias))
+    name_match = any(
+        compact and compact in compact_name
+        for compact_aliases in compact_groups
+        for _, compact in compact_aliases
+    )
     return {
         "coverage": coverage,
         "matched": matched_aliases,
@@ -127,6 +160,18 @@ class SearchService:
         self.ai = ai
         self.vectors = vectors
 
+    def _files_by_ids(self, file_ids: list[int], columns: str = FILE_COLUMNS) -> dict[int, dict[str, Any]]:
+        # 按 id 批量取回文件行建 dict，替代逐条 get_file（每条新开连接）的 N+1；
+        # SQLite 单条语句变量上限 999，按 900 分批
+        result: dict[int, dict[str, Any]] = {}
+        unique = list(dict.fromkeys(int(file_id) for file_id in file_ids))
+        for start in range(0, len(unique), 900):
+            batch = unique[start:start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            for row in self.database.fetchall(f"SELECT {columns} FROM files WHERE id IN ({placeholders})", batch):
+                result[int(row["id"])] = row
+        return result
+
     def _lexical(
         self,
         match_query: str,
@@ -135,6 +180,8 @@ class SearchService:
         library_ids: list[int] | None = None,
         like_terms: list[str] | None = None,
         file_ids: list[int] | None = None,
+        filter_sql: tuple[str, list[Any]] | None = None,
+        allow_like: bool = True,
     ) -> list[dict[str, Any]]:
         filters = " AND f.kind = ?" if kind else ""
         params: list[Any] = [match_query]
@@ -150,37 +197,59 @@ class SearchService:
                 return []
             filters += f" AND f.id IN ({','.join('?' for _ in file_ids)})"
             params.extend(file_ids)
+        if filter_sql is not None:
+            clause, clause_params = filter_sql
+            filters += f" AND ({clause})"
+            params.extend(clause_params)
         params.append(limit)
-        try:
-            rows = self.database.fetchall(
-                f"""SELECT f.*, bm25(files_fts, 7.0, 3.0, 1.0, 3.5) AS rank
+        fts_sql = (
+            f"""SELECT {FILE_COLUMNS_F}, bm25(files_fts, 7.0, 3.0, 1.0, 3.5) AS rank
                     FROM files_fts JOIN files f ON f.id = files_fts.rowid
-                    WHERE files_fts MATCH ? {filters} ORDER BY rank LIMIT ?""",
-                params,
-            )
+                    WHERE files_fts MATCH ? {filters} ORDER BY rank LIMIT ?"""
+        )
+        try:
+            rows = self.database.fetchall(fts_sql, params)
         except sqlite3.OperationalError:
             rows = []
+            cleaned = _fts_expression(match_query)
+            if cleaned and cleaned != match_query:
+                try:
+                    rows = self.database.fetchall(fts_sql, [cleaned, *params[1:]])
+                except sqlite3.OperationalError:
+                    rows = []
         if rows:
             return rows
+        if not allow_like:
+            return []
 
-        terms = [term for term in (like_terms or [match_query]) if term]
+        # LIKE 兜底成本极高（模糊扫描整表），整个搜索过程只允许第一组执行一次。
+        # 长度 >= 3 的词 FTS5 本身能覆盖内容列，兜底只扫 name/relative_path 两个短列；
+        # 长度 < 3 的词（如双字中文）超出 trigram 的最小匹配长度，FTS 结构性无法命中，
+        # 这些词的兜底必须保留 extracted_text/ai_caption，否则短词搜索会整体漏结果。
+        terms = list(dict.fromkeys(term for term in (like_terms or [match_query]) if term))
         if not terms:
             return []
         clauses = []
         like_params: list[Any] = []
         for term in terms:
-            clauses.append("(f.name LIKE ? OR f.relative_path LIKE ? OR f.extracted_text LIKE ? OR f.ai_caption LIKE ?)")
             pattern = f"%{term}%"
-            like_params.extend([pattern, pattern, pattern, pattern])
+            if len(term) < 3:
+                clauses.append("(f.name LIKE ? OR f.relative_path LIKE ? OR f.extracted_text LIKE ? OR f.ai_caption LIKE ?)")
+                like_params.extend([pattern, pattern, pattern, pattern])
+            else:
+                clauses.append("(f.name LIKE ? OR f.relative_path LIKE ?)")
+                like_params.extend([pattern, pattern])
         if kind:
             like_params.append(kind)
         if library_ids is not None:
             like_params.extend(library_ids)
         if file_ids is not None:
             like_params.extend(file_ids)
+        if filter_sql is not None:
+            like_params.extend(filter_sql[1])
         like_params.append(limit)
         return self.database.fetchall(
-            f"""SELECT f.*, 1.0 AS rank FROM files f WHERE ({' OR '.join(clauses)})
+            f"""SELECT {FILE_COLUMNS_F}, 1.0 AS rank FROM files f WHERE ({' OR '.join(clauses)})
                 {filters} ORDER BY f.mtime_ns DESC LIMIT ?""",
             like_params,
         )
@@ -195,11 +264,15 @@ class SearchService:
         file_ids: list[int] | None = None,
         offset: int = 0,
         semantic: bool = True,
+        filter_sql: tuple[str, list[Any]] | None = None,
     ) -> dict[str, Any]:
         page_size = max(1, limit)
         offset = max(0, offset)
         candidate_limit = max(80, min(1000, (page_size + offset) * 5))
         groups = _query_groups(query)
+        # 别名集是查询级常量，_compact 结果预算一次传入 _match_profile，
+        # 避免每行×每组×每别名重复正则
+        compact_groups = [[(alias, _compact(alias)) for alias in group] for group in groups]
         screenshot_intent = any(marker in query.lower() for marker in SCREENSHOT_QUERY_MARKERS)
         rows: dict[int, dict[str, Any]] = {}
         allowed_file_ids = set(file_ids) if file_ids is not None else None
@@ -207,12 +280,20 @@ class SearchService:
         snippets: dict[int, str] = {}
         match_times: dict[int, float] = {}
         sources: dict[int, set[str]] = {}
-        lexical_batches = [self._lexical(query, kind, candidate_limit, library_ids, file_ids=file_ids)]
+        # 唯一的 LIKE 兜底挂在第一组上：词取原始查询 + 全部组的别名，
+        # 后续各组（allow_like=False）不再各自触发全表模糊扫描。
+        fallback_terms = [query, *(alias for group in groups for alias in group)]
+        lexical_batches = [
+            self._lexical(
+                query, kind, candidate_limit, library_ids, fallback_terms, file_ids, filter_sql=filter_sql
+            )
+        ]
         for aliases in groups:
             expression = " OR ".join(f'"{alias.replace(chr(34), chr(34) * 2)}"' for alias in aliases)
             lexical_batches.append(
                 self._lexical(
-                    expression, kind, max(20, (limit + offset) * 2), library_ids, list(aliases), file_ids
+                    expression, kind, max(20, (limit + offset) * 2), library_ids, list(aliases), file_ids,
+                    filter_sql=filter_sql, allow_like=False,
                 )
             )
 
@@ -224,9 +305,12 @@ class SearchService:
                 scores[file_id] = scores.get(file_id, 0.0) + weight / (24 + position)
                 sources.setdefault(file_id, set()).add("全文")
                 if file_id not in snippets:
+                    # extracted_text 已不随候选物化，此处先按 caption 生成；
+                    # 进入最终排序页的候选会在回填文本后按原公式重算（见下方 profiled 循环）
+                    text = row.get("extracted_text") or ""
                     snippets[file_id] = _highlight(
-                        row["ai_caption"] or row["extracted_text"],
-                        next((alias for group in groups for alias in group if alias in (row["ai_caption"] or row["extracted_text"])), query),
+                        row["ai_caption"] or text,
+                        next((alias for group in groups for alias in group if alias in (row["ai_caption"] or text)), query),
                     )
 
         semantic_used = False
@@ -235,8 +319,25 @@ class SearchService:
             try:
                 embedding_query = self.ai.embedding_query(query) if hasattr(self.ai, "embedding_query") else query
                 embedding = self.ai.embeddings([embedding_query], interactive=True)[0]
-                vector_filter_ids = file_ids if file_ids is not None and len(file_ids) <= 2000 else None
-                hits = self.vectors.search(embedding, candidate_limit, kind, library_ids, vector_filter_ids)
+                # 过滤条件下推：SQL 过滤（filter_sql）只在这里物化一次 id 列表供向量过滤用，
+                # 不再拼进词法查询的 IN；超过 Qdrant 单批上限时按 2000 分批原生 filter，
+                # 避免旧逻辑超过 2000 个 id 就静默放弃过滤导致的召回丢失。
+                vector_id_filter: list[int] | None = None
+                if file_ids is not None:
+                    vector_id_filter = sorted({int(file_id) for file_id in file_ids})
+                elif filter_sql is not None:
+                    clause, clause_params = filter_sql
+                    id_rows = self.database.fetchall(f"SELECT f.id FROM files f WHERE {clause}", clause_params)
+                    allowed_file_ids = {int(row["id"]) for row in id_rows}
+                    vector_id_filter = sorted(allowed_file_ids)
+                hits: list[dict[str, Any]] = []
+                if vector_id_filter is not None:
+                    for start in range(0, len(vector_id_filter), 2000):
+                        chunk = vector_id_filter[start:start + 2000]
+                        if chunk:
+                            hits.extend(self.vectors.search(embedding, candidate_limit, kind, library_ids, chunk))
+                else:
+                    hits = self.vectors.search(embedding, candidate_limit, kind, library_ids, None)
                 best_hits: dict[int, dict[str, Any]] = {}
                 for hit in hits:
                     payload = hit.get("payload", {})
@@ -247,11 +348,15 @@ class SearchService:
                         best_hits[file_id] = hit
                 semantic = sorted(best_hits.values(), key=lambda hit: float(hit.get("score") or 0), reverse=True)
                 semantic_used = True
+                # 语义候选未命中词法结果时一次批量取回，替代逐条 get_file 的 N+1
+                prefetched = self._files_by_ids(
+                    [int(hit.get("payload", {})["file_id"]) for hit in semantic]
+                )
                 for position, hit in enumerate(semantic):
                     payload = hit.get("payload", {})
                     file_id = int(payload["file_id"])
                     if file_id not in rows:
-                        row = self.database.get_file(file_id)
+                        row = prefetched.get(file_id)
                         if not row:
                             continue
                         if library_ids is not None and int(row["library_id"]) not in library_ids:
@@ -280,8 +385,34 @@ class SearchService:
             file_id = int(item["file_id"])
             direction = 1 if item["verdict"] == "relevant" else -1 if item["verdict"] == "irrelevant" else 0
             feedback[file_id] = feedback.get(file_id, 0.0) + direction * min(0.2, 0.06 * int(item["count"]))
-        for file_id, row in rows.items():
-            profile = _match_profile(row, groups, query)
+        # 先加与 profile 无关的分（多来源奖励、反馈），得到基础分排序
+        for file_id in rows:
+            score = scores.get(file_id, 0.0)
+            if len(sources.get(file_id, set())) > 1:
+                score += 0.03
+            scores[file_id] = score + feedback.get(file_id, 0.0)
+        # profile 只对可能进入最终排序页（含重排前 8 名）的候选计算：按基础分排序后，
+        # 截断线为第 K 名基础分减去 profile 最大可逆转分差，线外候选无论如何进不了页面，
+        # 跳过计算且不影响排序结果
+        base_ordered = sorted(rows.values(), key=lambda row: scores.get(int(row["id"]), -math.inf), reverse=True)
+        cutoff = max(offset + page_size, 8)
+        threshold = (
+            scores.get(int(base_ordered[cutoff - 1]["id"]), 0.0) - PROFILE_MAX_SWING
+            if len(base_ordered) > cutoff else -math.inf
+        )
+        profiled_ids = {
+            int(row["id"]) for row in base_ordered
+            if scores.get(int(row["id"]), -math.inf) >= threshold
+        }
+        # 只为这些候选回填 extracted_text（profile 内容匹配与 snippet/evidence 需要），
+        # 避免随全部候选物化整篇文本
+        missing_text = [file_id for file_id in profiled_ids if "extracted_text" not in rows[file_id]]
+        for file_id, row in self._files_by_ids(missing_text, "id, extracted_text").items():
+            if file_id in rows:
+                rows[file_id]["extracted_text"] = row["extracted_text"]
+        for file_id in profiled_ids:
+            row = rows[file_id]
+            profile = _match_profile(row, groups, query, compact_groups)
             profiles[file_id] = profile
             score = scores.get(file_id, 0.0)
             score += profile["coverage"] * 0.28
@@ -292,12 +423,17 @@ class SearchService:
                     score += 0.14
                 elif profile["coverage"] == 0:
                     score -= 0.08
-            if len(sources.get(file_id, set())) > 1:
-                score += 0.03
             if profile["screenshot"] and not screenshot_intent:
                 score -= 0.06
-            score += feedback.get(file_id, 0.0)
             scores[file_id] = score
+            if file_id not in semantic_scores:
+                # 纯词法行的 snippet 在合并阶段缺少 extracted_text，这里按原公式用完整文本重算；
+                # 语义行的 snippet 来自向量 payload，不依赖 extracted_text
+                text = row.get("extracted_text") or ""
+                snippets[file_id] = _highlight(
+                    row["ai_caption"] or text,
+                    next((alias for group in groups for alias in group if alias in (row["ai_caption"] or text)), query),
+                )
 
         ordered = sorted(rows.values(), key=lambda row: scores.get(int(row["id"]), -math.inf), reverse=True)
         rerank_scores: dict[int, float] = {}
@@ -312,7 +448,7 @@ class SearchService:
                     "name": row["name"],
                     "path": row["relative_path"],
                     "kind": row["kind"],
-                    "content": snippets.get(file_id) or row["ai_caption"] or row["extracted_text"],
+                    "content": snippets.get(file_id) or row["ai_caption"] or row.get("extracted_text") or "",
                 })
             try:
                 reranked = self.ai.rerank(query, candidates)
@@ -372,7 +508,7 @@ class SearchService:
                 "duration": row["duration"],
                 "caption": row["ai_caption"],
                 "snippet": snippets.get(file_id, ""),
-                "evidence": snippets.get(file_id) or row["ai_caption"] or row["extracted_text"],
+                "evidence": snippets.get(file_id) or row["ai_caption"] or row.get("extracted_text") or "",
                 "match_time": match_times.get(file_id),
                 "source_label": next(
                     (value for value in sources.get(file_id, set()) if value not in {"全文", "语义", "精准重排"}),
@@ -409,6 +545,15 @@ class SearchService:
         if not vector:
             return {"file_id": file_id, "semantic": False, "total": 0, "results": []}
         hits = self.vectors.search(vector, max(80, limit * 5), kind, library_ids)
+        # 候选一次批量取回（SELECT * 保持原有完整字段），替代逐条 get_file 的 N+1
+        prefetched = self._files_by_ids(
+            [
+                candidate_id
+                for hit in hits
+                if (candidate_id := int((hit.get("payload") or {}).get("file_id") or 0)) and candidate_id != file_id
+            ],
+            "*",
+        )
         rows: list[tuple[dict[str, Any], float, dict[str, Any]]] = []
         seen = {file_id}
         for hit in hits:
@@ -416,7 +561,7 @@ class SearchService:
             candidate_id = int(payload.get("file_id") or 0)
             if not candidate_id or candidate_id in seen:
                 continue
-            row = self.database.get_file(candidate_id)
+            row = prefetched.get(candidate_id)
             if not row:
                 continue
             seen.add(candidate_id)

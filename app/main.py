@@ -5,6 +5,7 @@ import hmac
 import html
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -38,6 +39,9 @@ from app.services.tasks import TaskManager
 from app.services.vectors import VectorStore
 from app.services.scanner import file_kind
 from app.services.workspaces import COMMENT_ROLES, EDIT_ROLES, MANAGE_ROLES, WorkspaceService
+
+
+logger = logging.getLogger(__name__)
 
 
 class LibraryCreate(BaseModel):
@@ -95,7 +99,7 @@ class SnapshotRestoreRequest(BaseModel):
 
 
 class CaptionUpgradeRequest(BaseModel):
-    limit: int = Field(default=50, ge=1, le=500)
+    limit: int = Field(default=50, ge=1, le=100000)
 
 
 class CaptionUpdate(BaseModel):
@@ -144,7 +148,7 @@ class EventSplit(BaseModel):
 
 
 class IndexRequest(BaseModel):
-    limit: int = Field(default=200, ge=1, le=10000)
+    limit: int = Field(default=200, ge=1, le=100000)
     library_id: Optional[int] = None
     kind: str = ""
     order: str = "balanced"
@@ -279,17 +283,31 @@ class AppState:
     recycle: RecycleBin
     workspaces: WorkspaceService
     media_tickets: dict[str, tuple[int, float]]
-    workspace_tickets: dict[str, tuple[str, str, str, float, bool]]
+    workspace_tickets: dict[str, tuple[str, str, str, float, bool, str]]
 
 
 state = AppState()
 INDEX_KINDS = {"", "image", "video", "audio", "document", "archive", "other"}
 INDEX_ORDERS = {"balanced", "newest", "oldest", "smallest"}
+COMMENT_ATTACHMENT_MIMES = {
+    "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif",
+    "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
+}
+# 可在同源执行脚本的活跃内容类型，下载/预览一律强制 attachment
+ACTIVE_CONTENT_MIMES = {
+    "text/html", "image/svg+xml", "text/javascript", "application/javascript",
+    "text/xml", "application/xhtml+xml",
+}
 LOGIN_FAILURES: dict[str, list[float]] = {}
 PUBLIC_ACCESS_FAILURES: dict[str, list[float]] = {}
 PUBLIC_COMMENT_ATTEMPTS: dict[str, list[float]] = {}
+PUBLIC_ATTACHMENT_ATTEMPTS: dict[str, list[float]] = {}
+AUTH_ATTACHMENT_ATTEMPTS: dict[str, list[float]] = {}
+BOOTSTRAP_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_FAILURES_LOCK = threading.Lock()
 PUBLIC_RATE_LIMIT_LOCK = threading.Lock()
+MEDIA_TICKETS_LOCK = threading.Lock()
+WORKSPACE_TICKETS_LOCK = threading.Lock()
 RATE_LIMIT_BUCKETS = 4096
 
 
@@ -319,7 +337,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.0.6",
+    version="1.1.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -495,32 +513,128 @@ def _version_context(
     return version, asset, role
 
 
+def _is_active_content(mime_type: Any) -> bool:
+    return str(mime_type or "").split(";")[0].strip().lower() in ACTIVE_CONTENT_MIMES
+
+
 def _workspace_ticket(
     path: str,
     mime_type: str,
     filename: str,
     download: bool = False,
     lifetime: int = 3600,
+    share_token: str = "",
 ) -> str:
     source = Path(path)
     if not source.is_file():
         raise HTTPException(status_code=404, detail="媒体文件不存在")
     now = time.monotonic()
-    state.workspace_tickets = {
-        key: value for key, value in state.workspace_tickets.items() if value[3] > now
-    }
-    if len(state.workspace_tickets) >= 4096:
-        oldest = min(state.workspace_tickets, key=lambda key: state.workspace_tickets[key][3])
-        state.workspace_tickets.pop(oldest, None)
     ticket = secrets.token_urlsafe(32)
-    state.workspace_tickets[ticket] = (
-        str(source),
-        mime_type or "application/octet-stream",
-        filename,
-        now + max(60, min(86400, lifetime)),
-        download,
-    )
+    with WORKSPACE_TICKETS_LOCK:
+        state.workspace_tickets = {
+            key: value for key, value in state.workspace_tickets.items() if value[3] > now
+        }
+        if len(state.workspace_tickets) >= 4096:
+            oldest = min(state.workspace_tickets, key=lambda key: state.workspace_tickets[key][3])
+            state.workspace_tickets.pop(oldest, None)
+        state.workspace_tickets[ticket] = (
+            str(source),
+            mime_type or "application/octet-stream",
+            filename,
+            now + max(60, min(86400, lifetime)),
+            download,
+            share_token,
+        )
     return f"/api/workspace-media/{ticket}"
+
+
+def _comment_attachment_path(name: str) -> Path:
+    safe_name = Path(str(name)).name
+    if not safe_name or safe_name != str(name):
+        raise HTTPException(status_code=404, detail="评论附件不存在")
+    return settings.data_dir / "comment-attachments" / safe_name
+
+
+def _comment_attachment_payload(attachment: dict[str, Any], share_token: str = "") -> dict[str, Any] | None:
+    try:
+        path = _comment_attachment_path(attachment["name"])
+    except HTTPException:
+        return None
+    if not path.is_file():
+        return None
+    return {
+        "name": attachment["name"],
+        "original_name": attachment["original_name"],
+        "mime": attachment["mime"],
+        "size_bytes": attachment["size_bytes"],
+        "url": _workspace_ticket(
+            str(path),
+            str(attachment["mime"] or ""),
+            str(attachment["original_name"] or attachment["name"]),
+            share_token=share_token,
+        ),
+    }
+
+
+def _remove_comment_attachment_files(names: list[str]) -> None:
+    for name in names:
+        try:
+            _comment_attachment_path(name).unlink(missing_ok=True)
+        except (HTTPException, OSError):
+            continue
+
+
+async def _save_comment_attachment(request: Request, comment_id: int, x_filename: str) -> dict[str, Any]:
+    filename = Path(unquote((x_filename or "").replace("\x00", ""))).name.strip()
+    if not filename or filename in {".", ".."}:
+        raise HTTPException(status_code=400, detail="缺少有效文件名")
+    mime = mimetypes.guess_type(filename)[0] or ""
+    if mime not in COMMENT_ATTACHMENT_MIMES:
+        raise HTTPException(status_code=400, detail="仅支持常见图片或视频附件")
+    content_length = request.headers.get("content-length")
+    try:
+        declared_bytes = int(content_length) if content_length else 0
+    except ValueError:
+        declared_bytes = 0
+    if declared_bytes > settings.comment_attachment_max_bytes:
+        raise HTTPException(status_code=413, detail="附件超过大小限制")
+    directory = settings.data_dir / "comment-attachments"
+    directory.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(directory).free
+    if declared_bytes and declared_bytes + 256 * 1024 * 1024 > free_bytes:
+        raise HTTPException(status_code=507, detail="NAS 可用空间不足")
+    stored_name = f"{secrets.token_hex(8)}{Path(filename).suffix.lower()}"
+    destination = directory / stored_name
+    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.part")
+    written = 0
+    last_space_check = 0
+    try:
+        with temporary.open("xb") as handle:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > settings.comment_attachment_max_bytes:
+                    raise HTTPException(status_code=413, detail="附件超过大小限制")
+                if written - last_space_check >= 64 * 1024 * 1024:
+                    last_space_check = written
+                    if shutil.disk_usage(directory).free < 256 * 1024 * 1024:
+                        raise HTTPException(status_code=507, detail="NAS 可用空间不足")
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not written:
+            raise HTTPException(status_code=400, detail="不能上传空文件")
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    try:
+        return state.workspaces.add_comment_attachment(comment_id, stored_name, filename, mime, written)
+    except ValueError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def _share_context(token: str, access_code: str = "") -> dict[str, Any]:
@@ -529,6 +643,8 @@ def _share_context(token: str, access_code: str = "") -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="分享不存在、已关闭或已过期")
     if share.get("access_code_hash") and not verify_password(access_code, str(share["access_code_hash"])):
         raise HTTPException(status_code=401, detail="访问码错误")
+    # 记下来源 token，后续签发的 workspace ticket 消费时回查分享仍有效
+    share["token"] = token
     return share
 
 
@@ -543,6 +659,7 @@ def _public_asset_payload(asset_id: int, share: dict[str, Any]) -> dict[str, Any
         )
     ]
     public_versions = []
+    share_token = str(share.get("token") or "")
     for version in (item for item in versions if item):
         media_path = str(version.get("proxy_path") or "")
         media_type = "video/mp4" if version["kind"] == "video" else (
@@ -552,7 +669,10 @@ def _public_asset_payload(asset_id: int, share: dict[str, Any]) -> dict[str, Any
             file = state.database.get_file(int(version["file_id"])) if version.get("file_id") else None
             media_path = str(file.get("path") or "") if file else ""
             media_type = str(file.get("mime_type") or version.get("mime_type") or "") if file else media_type
-        media_url = _workspace_ticket(media_path, media_type, str(version["file_name"])) if media_path else ""
+        media_url = (
+            _workspace_ticket(media_path, media_type, str(version["file_name"]), share_token=share_token)
+            if media_path else ""
+        )
         download_url = ""
         if share["can_download"] and version.get("file_id"):
             file = state.database.get_file(int(version["file_id"]))
@@ -562,6 +682,7 @@ def _public_asset_payload(asset_id: int, share: dict[str, Any]) -> dict[str, Any
                     str(file.get("mime_type") or version.get("mime_type") or ""),
                     str(file["name"]),
                     True,
+                    share_token=share_token,
                 )
         public_versions.append({
             key: version.get(key)
@@ -577,6 +698,12 @@ def _public_asset_payload(asset_id: int, share: dict[str, Any]) -> dict[str, Any
                 "id", "version_id", "guest_name", "display_name", "body", "comment_type",
                 "time_start", "time_end", "x", "y", "drawing", "resolved", "created_at",
             )
+        } | {
+            "attachments": [
+                payload
+                for attachment in comment.get("attachments", [])
+                if (payload := _comment_attachment_payload(attachment, share_token))
+            ]
         }
         for comment in asset["comments"]
         if comment.get("visibility") == "external"
@@ -740,12 +867,13 @@ def _controller_status() -> dict[str, Any]:
     return {**report, "stale": age is None or age > 180, "age_seconds": age}
 
 
-def _index_overview(files: dict[str, Any] | None = None) -> dict[str, Any]:
+def _index_overview(files: dict[str, Any] | None = None, stages: dict[str, Any] | None = None) -> dict[str, Any]:
     values = files or state.database.dashboard()["files"]
     total = int(values.get("total") or 0)
     semantic_ready = int(values.get("semantic_ready") or 0)
     ready = int(values.get("ready") or 0)
-    stages = state.database.index_stage_summary()
+    # stages 可由调用方预算一次传入（如 /api/index/status），避免同一请求内重复聚合
+    stages = stages or state.database.index_stage_summary()
     pending = int(values.get("pending") or 0)
     repairable = int(stages.get("repairable") or 0)
     retry_waiting = int(stages.get("retry_waiting") or 0)
@@ -907,7 +1035,16 @@ def bootstrap_status() -> dict[str, bool]:
 
 
 @app.post("/api/auth/bootstrap", status_code=201)
-def bootstrap_owner(payload: BootstrapRequest) -> dict[str, Any]:
+def bootstrap_owner(payload: BootstrapRequest, request: Request) -> dict[str, Any]:
+    rate_key = _public_rate_key(request, "bootstrap")
+    retry_after = _rate_retry_after(BOOTSTRAP_ATTEMPTS, PUBLIC_RATE_LIMIT_LOCK, rate_key, 5, 600)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"初始化尝试过于频繁，请在 {retry_after} 秒后重试",
+            headers={"Retry-After": str(retry_after)},
+        )
+    _record_rate_attempt(BOOTSTRAP_ATTEMPTS, PUBLIC_RATE_LIMIT_LOCK, rate_key, 5, 600)
     username = payload.username.strip()
     if not username or any(character.isspace() for character in username):
         raise HTTPException(status_code=400, detail="用户名不能包含空格")
@@ -1166,7 +1303,9 @@ def update_project(project_id: int, payload: ProjectUpdate, principal: Auth) -> 
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: int, principal: Auth) -> dict[str, bool]:
     _project_context(project_id, principal, {"owner"})
+    attachment_names = state.workspaces.project_attachment_names(project_id)
     state.workspaces.delete_project(project_id)
+    _remove_comment_attachment_files(attachment_names)
     _audit(principal, "project.delete", "project", str(project_id))
     return {"ok": True}
 
@@ -1351,6 +1490,12 @@ def create_project_asset(
 @app.get("/api/assets/{asset_id}")
 def asset_details(asset_id: int, principal: Auth) -> dict[str, Any]:
     asset, role = _asset_context(asset_id, principal)
+    for comment in asset["comments"]:
+        comment["attachments"] = [
+            payload
+            for attachment in comment.get("attachments", [])
+            if (payload := _comment_attachment_payload(attachment))
+        ]
     asset["access_role"] = role
     asset["statuses"] = state.workspaces.list_statuses(int(asset["project_id"]))
     asset["members"] = state.workspaces.list_members(int(asset["project_id"]))
@@ -1375,8 +1520,14 @@ def update_asset(asset_id: int, payload: AssetUpdate, principal: Auth) -> dict[s
 
 @app.delete("/api/assets/{asset_id}")
 def delete_asset(asset_id: int, principal: Auth) -> dict[str, bool]:
-    _asset_context(asset_id, principal, EDIT_ROLES)
+    asset, _ = _asset_context(asset_id, principal, EDIT_ROLES)
+    attachment_names = [
+        str(attachment["name"])
+        for comment in asset["comments"]
+        for attachment in comment.get("attachments", [])
+    ]
     state.workspaces.delete_asset(asset_id)
+    _remove_comment_attachment_files(attachment_names)
     _audit(principal, "asset.delete", "asset", str(asset_id))
     return {"ok": True}
 
@@ -1564,6 +1715,55 @@ def resolve_review_comment(
     return resolved
 
 
+@app.post("/api/comments/{comment_id}/attachments", status_code=201)
+async def upload_comment_attachment(
+    comment_id: int,
+    request: Request,
+    principal: Auth,
+    x_filename: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    comment = state.workspaces.comment(comment_id)
+    if not comment:
+        raise HTTPException(status_code=404, detail="审阅意见不存在")
+    _, role = _asset_context(int(comment["asset_id"]), principal, COMMENT_ROLES)
+    user_id = int(principal["user_id"]) if principal.get("user_id") is not None else None
+    if role not in MANAGE_ROLES and (user_id is None or comment.get("user_id") != user_id):
+        raise HTTPException(status_code=403, detail="只能为自己发表的审阅意见添加附件")
+    rate_key = f"attachment:{user_id if user_id is not None else _actor(principal)}"
+    retry_after = _rate_retry_after(AUTH_ATTACHMENT_ATTEMPTS, PUBLIC_RATE_LIMIT_LOCK, rate_key, 120, 3600)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"附件上传过于频繁，请在 {retry_after} 秒后重试",
+            headers={"Retry-After": str(retry_after)},
+        )
+    _record_rate_attempt(AUTH_ATTACHMENT_ATTEMPTS, PUBLIC_RATE_LIMIT_LOCK, rate_key, 120, 3600)
+    attachment = await _save_comment_attachment(request, comment_id, x_filename or "")
+    _audit(
+        principal,
+        "review.comment.attachment",
+        "comment",
+        str(comment_id),
+        {"name": attachment["original_name"], "size": attachment["size_bytes"]},
+    )
+    return attachment
+
+
+@app.delete("/api/comments/{comment_id}")
+def delete_review_comment(comment_id: int, principal: Auth) -> dict[str, bool]:
+    comment = state.workspaces.comment(comment_id)
+    if not comment:
+        raise HTTPException(status_code=404, detail="审阅意见不存在")
+    _, role = _asset_context(int(comment["asset_id"]), principal, COMMENT_ROLES)
+    user_id = int(principal["user_id"]) if principal.get("user_id") is not None else None
+    if role not in MANAGE_ROLES and (user_id is None or comment.get("user_id") != user_id):
+        raise HTTPException(status_code=403, detail="只能删除自己发表的审阅意见")
+    attachment_names = state.workspaces.delete_comment(comment_id)
+    _remove_comment_attachment_files(attachment_names)
+    _audit(principal, "review.comment.delete", "comment", str(comment_id))
+    return {"ok": True}
+
+
 @app.get("/api/projects/{project_id}/review-tasks")
 def project_review_tasks(project_id: int, principal: Auth) -> dict[str, Any]:
     _project_context(project_id, principal)
@@ -1703,28 +1903,36 @@ def export_project_review(
     project_id: int,
     principal: Auth,
     format: str = Query(default="csv", pattern=r"^(csv|fcpxml)$"),
+    scope: str = Query(default="all", pattern=r"^(all|external|team)$"),
 ) -> Response:
     project, _ = _project_context(project_id, principal)
+    clauses = ["a.project_id = ?"]
+    params: list[Any] = [project_id]
+    if scope != "all":
+        clauses.append("rc.visibility = ?")
+        params.append(scope)
     rows = state.database.fetchall(
-        """SELECT a.title, av.file_name, av.version_number, rc.body, rc.time_start, rc.time_end,
-           rc.resolved, COALESCE(u.display_name, rc.guest_name, '访客') AS author, rc.created_at
+        f"""SELECT a.title, av.file_name, av.version_number, rc.body, rc.time_start, rc.time_end,
+           rc.resolved, rc.visibility, COALESCE(u.display_name, rc.guest_name, '访客') AS author, rc.created_at
            FROM review_comments rc JOIN assets a ON a.id = rc.asset_id
            LEFT JOIN asset_versions av ON av.id = rc.version_id
            LEFT JOIN users u ON u.id = rc.user_id
-           WHERE a.project_id = ? ORDER BY a.id, rc.time_start, rc.id""",
-        (project_id,),
+           WHERE {" AND ".join(clauses)} ORDER BY a.id, rc.time_start, rc.id""",
+        params,
     )
     safe_name = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", str(project["name"])).strip("-") or "project"
     if format == "csv":
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["素材", "文件", "版本", "开始秒", "结束秒", "意见", "作者", "已解决", "创建时间"])
+        writer.writerow(["素材", "文件", "版本", "开始秒", "结束秒", "意见", "作者", "可见范围", "已解决", "创建时间"])
         for row in rows:
             writer.writerow([
                 row["title"], row["file_name"] or "", row["version_number"] or "",
                 row["time_start"] if row["time_start"] is not None else "",
                 row["time_end"] if row["time_end"] is not None else "",
-                row["body"], row["author"], "是" if row["resolved"] else "否", row["created_at"],
+                row["body"], row["author"],
+                "外部可见" if row["visibility"] == "external" else "团队内部",
+                "是" if row["resolved"] else "否", row["created_at"],
             ])
         return Response(
             "\ufeff" + output.getvalue(),
@@ -1740,7 +1948,8 @@ def export_project_review(
     for row in rows:
         start = max(0.0, float(row["time_start"] or 0))
         duration = max(0.04, float(row["time_end"] or start) - start)
-        value = html.escape(f"{row['title']} · {row['author']}：{row['body']}", quote=True)
+        prefix = "" if row["visibility"] == "external" else "【团队内部】"
+        value = html.escape(f"{prefix}{row['title']} · {row['author']}：{row['body']}", quote=True)
         markers.append(f'<marker start="{start:.3f}s" duration="{duration:.3f}s" value="{value}"/>')
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1769,6 +1978,8 @@ def create_share_link(
     principal: Auth,
 ) -> dict[str, Any]:
     _project_context(project_id, principal, MANAGE_ROLES)
+    if payload.access_code and len(payload.access_code) < 6:
+        raise HTTPException(status_code=400, detail="访问码至少 6 位，留空则不启用访问码")
     expires_at = payload.expires_at
     if expires_at:
         try:
@@ -1876,7 +2087,18 @@ def public_share_comment(
             detail=f"外部评论提交过于频繁，请在 {retry_after} 秒后重试",
             headers={"Retry-After": str(retry_after)},
         )
-    share = _share_context(token, payload.access_code)
+    try:
+        share = _share_context(token, payload.access_code)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            _record_rate_attempt(
+                PUBLIC_ACCESS_FAILURES,
+                PUBLIC_RATE_LIMIT_LOCK,
+                rate_key,
+                10,
+                900,
+            )
+        raise
     if not share["can_comment"]:
         raise HTTPException(status_code=403, detail="该分享不允许评论")
     if share.get("asset_id") and int(share["asset_id"]) != payload.asset_id:
@@ -1910,6 +2132,68 @@ def public_share_comment(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/api/public/shares/{token}/comments/{comment_id}/attachments", status_code=201)
+async def public_share_comment_attachment(
+    token: str,
+    comment_id: int,
+    request: Request,
+    access_code: str = Query(default="", max_length=120),
+    x_filename: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    rate_key = _public_rate_key(request, token)
+    retry_after = _rate_retry_after(
+        PUBLIC_ATTACHMENT_ATTEMPTS,
+        PUBLIC_RATE_LIMIT_LOCK,
+        rate_key,
+        60,
+        3600,
+    )
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"附件上传过于频繁，请在 {retry_after} 秒后重试",
+            headers={"Retry-After": str(retry_after)},
+        )
+    try:
+        share = _share_context(token, access_code)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            _record_rate_attempt(
+                PUBLIC_ACCESS_FAILURES,
+                PUBLIC_RATE_LIMIT_LOCK,
+                rate_key,
+                10,
+                900,
+            )
+        raise
+    if not share["can_comment"]:
+        raise HTTPException(status_code=403, detail="该分享不允许评论")
+    comment = state.workspaces.comment(comment_id)
+    if (
+        not comment
+        or comment.get("visibility") != "external"
+        or comment.get("user_id") is not None
+        or not str(comment.get("guest_name") or "").strip()
+    ):
+        raise HTTPException(status_code=404, detail="审阅意见不存在")
+    asset = state.database.fetchone(
+        "SELECT project_id FROM assets WHERE id = ?",
+        (int(comment["asset_id"]),),
+    )
+    if not asset or int(asset["project_id"]) != int(share["project_id"]):
+        raise HTTPException(status_code=404, detail="审阅意见不存在")
+    if share.get("asset_id") and int(share["asset_id"]) != int(comment["asset_id"]):
+        raise HTTPException(status_code=404, detail="审阅意见不存在")
+    _record_rate_attempt(
+        PUBLIC_ATTACHMENT_ATTEMPTS,
+        PUBLIC_RATE_LIMIT_LOCK,
+        rate_key,
+        60,
+        3600,
+    )
+    return await _save_comment_attachment(request, comment_id, x_filename or "")
+
+
 @app.get("/api/notifications")
 def list_notifications(
     principal: Auth,
@@ -1917,7 +2201,7 @@ def list_notifications(
 ) -> dict[str, Any]:
     user_id = _personal_user_id(principal)
     items = state.workspaces.list_notifications(user_id, limit)
-    return {"unread": sum(1 for item in items if not item["read_at"]), "items": items}
+    return {"unread": state.workspaces.unread_notifications(user_id), "items": items}
 
 
 @app.post("/api/notifications/read")
@@ -1931,11 +2215,18 @@ def read_notifications(
 
 @app.get("/api/workspace-media/{ticket}")
 def workspace_media(ticket: str) -> FileResponse:
-    entry = state.workspace_tickets.get(ticket)
-    if not entry or entry[3] <= time.monotonic():
-        state.workspace_tickets.pop(ticket, None)
+    with WORKSPACE_TICKETS_LOCK:
+        entry = state.workspace_tickets.get(ticket)
+        if not entry or entry[3] <= time.monotonic():
+            state.workspace_tickets.pop(ticket, None)
+            entry = None
+    if not entry:
         raise HTTPException(status_code=404, detail="媒体访问链接已失效")
-    path, mime_type, filename, _, download = entry
+    # 兼容旧的 5 元组（无分享来源），新票据为 6 元组
+    path, mime_type, filename, _, download = entry[:5]
+    share_token = str(entry[5]) if len(entry) > 5 else ""
+    if share_token and not state.workspaces.share_by_token(share_token):
+        raise HTTPException(status_code=403, detail="分享已关闭或过期")
     if not Path(path).is_file():
         raise HTTPException(status_code=404, detail="媒体文件不存在")
     return FileResponse(
@@ -1975,8 +2266,8 @@ def delete_library(library_id: int, principal: Auth) -> dict[str, bool]:
         raise HTTPException(status_code=409, detail="上传空间不能删除")
     try:
         state.vectors.delete_library(library_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("删除媒体库 %s 的向量数据失败：%s", library_id, exc)
     state.database.execute("DELETE FROM libraries WHERE id = ?", (library_id,))
     state.watcher.refresh()
     _audit(principal, "library.delete", "library", str(library_id))
@@ -2009,13 +2300,15 @@ async def discover_library(library_id: int, principal: Auth) -> dict[str, int]:
 def index_status(principal: Auth) -> dict[str, Any]:
     _require_admin(principal)
     memory = memory_runtime()
-    overview = _index_overview()
+    # stages 与 caption_pending 复用 overview 已算结果，同一请求不再重复聚合
+    stages = state.database.index_stage_summary()
+    overview = _index_overview(stages=stages)
     return {
         "pending": state.database.pending_summary(),
-        "stages": state.database.index_stage_summary(),
+        "stages": stages,
         "caption_upgrades": {
             "version": 3,
-            "pending": state.database.caption_upgrade_count(),
+            "pending": overview["caption_pending"],
         },
         "policy": state.tasks.index_policy(),
         "active": overview["active"],
@@ -2750,7 +3043,7 @@ def smart_album_items(
     if not album:
         raise HTTPException(status_code=404, detail="智能相册不存在")
     filters = album.get("filters") or {}
-    file_ids = _search_filter_file_ids(
+    filter_sql = _search_filter_sql(
         principal,
         filters.get("library_id"),
         str(filters.get("date_from") or ""),
@@ -2762,7 +3055,8 @@ def smart_album_items(
         str(filters.get("tag") or ""),
     )
     result = state.search.search(
-        str(album["query"]), str(album["kind"]), limit, _library_ids(principal), False, file_ids, offset
+        str(album["query"]), str(album["kind"]), limit, _library_ids(principal), False, None, offset,
+        filter_sql=filter_sql,
     )
     result["album"] = album
     return result
@@ -2779,7 +3073,13 @@ def file_content(file_id: int, principal: Auth) -> FileResponse:
     row = _visible_file(file_id, principal)
     if not Path(row["path"]).is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(row["path"], media_type=row["mime_type"], filename=row["name"])
+    disposition = "attachment" if _is_active_content(row["mime_type"]) else "inline"
+    return FileResponse(
+        row["path"],
+        media_type=row["mime_type"],
+        filename=row["name"],
+        content_disposition_type=disposition,
+    )
 
 
 @app.post("/api/files/{file_id}/ticket")
@@ -2788,24 +3088,34 @@ def media_ticket(file_id: int, principal: Auth) -> dict[str, Any]:
     if not Path(row["path"]).is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
     now = time.monotonic()
-    state.media_tickets = {key: value for key, value in state.media_tickets.items() if value[1] > now}
-    if len(state.media_tickets) >= 2048:
-        state.media_tickets.pop(min(state.media_tickets, key=lambda key: state.media_tickets[key][1]), None)
     ticket = secrets.token_urlsafe(32)
-    state.media_tickets[ticket] = (file_id, now + 3600)
+    with MEDIA_TICKETS_LOCK:
+        state.media_tickets = {key: value for key, value in state.media_tickets.items() if value[1] > now}
+        if len(state.media_tickets) >= 2048:
+            state.media_tickets.pop(min(state.media_tickets, key=lambda key: state.media_tickets[key][1]), None)
+        state.media_tickets[ticket] = (file_id, now + 3600)
     return {"url": f"/api/media/{ticket}", "expires_in": 3600}
 
 
 @app.get("/api/media/{ticket}")
 def ticketed_media(ticket: str) -> FileResponse:
-    entry = state.media_tickets.get(ticket)
-    if not entry or entry[1] <= time.monotonic():
-        state.media_tickets.pop(ticket, None)
+    with MEDIA_TICKETS_LOCK:
+        entry = state.media_tickets.get(ticket)
+        if not entry or entry[1] <= time.monotonic():
+            state.media_tickets.pop(ticket, None)
+            entry = None
+    if not entry:
         raise HTTPException(status_code=404, detail="媒体访问链接已失效")
     row = state.database.get_file(entry[0])
     if not row or not Path(row["path"]).is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(row["path"], media_type=row["mime_type"], filename=row["name"], content_disposition_type="inline")
+    disposition = "attachment" if _is_active_content(row["mime_type"]) else "inline"
+    return FileResponse(
+        row["path"],
+        media_type=row["mime_type"],
+        filename=row["name"],
+        content_disposition_type=disposition,
+    )
 
 
 @app.get("/api/files/{file_id}/thumbnail")
@@ -2823,7 +3133,7 @@ def file_thumbnail(file_id: int, principal: Auth) -> FileResponse:
     return FileResponse(destination, media_type="image/jpeg")
 
 
-def _search_filter_file_ids(
+def _search_filter_sql(
     principal: dict[str, Any],
     library_id: int | None = None,
     date_from: str = "",
@@ -2833,7 +3143,9 @@ def _search_filter_file_ids(
     event_id: int | None = None,
     favorite: bool = False,
     tag: str = "",
-) -> list[int] | None:
+) -> tuple[str, list[Any]] | None:
+    # 过滤条件以 SQL 片段（作用于 files 别名 f）返回，由搜索侧下推为 JOIN/子查询，
+    # 不再物化全量 id 拼巨型 IN 列表。
     clauses: list[str] = []
     params: list[Any] = []
     allowed = _library_ids(principal)
@@ -2843,7 +3155,7 @@ def _search_filter_file_ids(
         params.append(library_id)
     elif allowed is not None:
         if not allowed:
-            return []
+            return ("1 = 0", [])
         clauses.append(f"f.library_id IN ({','.join('?' for _ in allowed)})")
         params.extend(allowed)
     time_value = "COALESCE(NULLIF(f.captured_at, ''), datetime(f.mtime_ns / 1000000000.0, 'unixepoch'))"
@@ -2875,8 +3187,7 @@ def _search_filter_file_ids(
             params.extend([user_id, tag.strip()])
     if not clauses:
         return None
-    rows = state.database.fetchall("SELECT f.id FROM files f WHERE " + " AND ".join(clauses), params)
-    return [int(row["id"]) for row in rows]
+    return " AND ".join(clauses), params
 
 
 @app.get("/api/search")
@@ -2897,10 +3208,12 @@ def search(
     favorite: bool = False,
     tag: str = "",
 ) -> dict[str, Any]:
-    file_ids = _search_filter_file_ids(
+    filter_sql = _search_filter_sql(
         principal, library_id, date_from, date_to, person_id, place_id, event_id, favorite, tag
     )
-    result = state.search.search(q.strip(), kind, limit, _library_ids(principal), precise, file_ids, offset, semantic)
+    result = state.search.search(
+        q.strip(), kind, limit, _library_ids(principal), precise, None, offset, semantic, filter_sql=filter_sql
+    )
     if principal.get("user_id") is not None:
         user_id = int(principal["user_id"])
         for item in result["results"]:
@@ -3053,12 +3366,17 @@ async def upload_file(
         destination = destination.with_name(f"{destination.stem}-{secrets.token_hex(4)}{destination.suffix}")
     temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.part")
     written = 0
+    last_space_check = 0
     try:
         with temporary.open("xb") as handle:
             async for chunk in request.stream():
                 written += len(chunk)
                 if written > settings.max_upload_bytes:
                     raise HTTPException(status_code=413, detail="文件超过上传大小限制")
+                if written - last_space_check >= 64 * 1024 * 1024:
+                    last_space_check = written
+                    if shutil.disk_usage(settings.upload_root).free < 256 * 1024 * 1024:
+                        raise HTTPException(status_code=507, detail="NAS 可用空间不足")
                 handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())

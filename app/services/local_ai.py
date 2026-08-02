@@ -133,7 +133,18 @@ class _PriorityGate:
 class LocalAIClient:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._client_lock = threading.Lock()
+        self._client: httpx.Client | None = None
         self._set_gates(1)
+
+    def _http(self) -> httpx.Client:
+        # 复用同一 httpx.Client（连接池），避免每次推理请求重建 TCP/TLS 连接；
+        # httpx.Client 线程安全，懒初始化；各请求按需传 timeout 覆盖默认值
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0))
+        return self._client
 
     def _set_gates(self, limit: int) -> None:
         gates: dict[str, _PriorityGate] = {}
@@ -203,8 +214,7 @@ class LocalAIClient:
         def check(value: str) -> dict:
             try:
                 endpoint = self._validate_endpoint(value)
-                with httpx.Client(timeout=3) as client:
-                    response = client.get(self._api_url(endpoint, "models"), headers=self._headers())
+                response = self._http().get(self._api_url(endpoint, "models"), headers=self._headers(), timeout=3)
                 return {"reachable": response.is_success, "status": response.status_code}
             except Exception as exc:
                 return {"reachable": False, "error": str(exc)}
@@ -224,15 +234,15 @@ class LocalAIClient:
             return []
         endpoint = self._validate_endpoint(self.settings.embedding_base_url)
         with self._embedding_gate.slot(interactive):
-            with httpx.Client(timeout=120) as client:
-                response = client.post(
-                    self._api_url(endpoint, "embeddings"),
-                    headers=self._headers(),
-                    json={"model": self.settings.embedding_model, "input": texts},
-                )
-                response.raise_for_status()
-                data = sorted(response.json()["data"], key=lambda item: item["index"])
-                return [item["embedding"] for item in data]
+            response = self._http().post(
+                self._api_url(endpoint, "embeddings"),
+                headers=self._headers(),
+                json={"model": self.settings.embedding_model, "input": texts},
+                timeout=120,
+            )
+            response.raise_for_status()
+            data = sorted(response.json()["data"], key=lambda item: item["index"])
+            return [item["embedding"] for item in data]
 
     @staticmethod
     def embedding_query(query: str) -> str:
@@ -289,14 +299,14 @@ class LocalAIClient:
             }],
         }
         with self._vision_gate.slot():
-            with httpx.Client(timeout=180) as client:
-                response = client.post(
-                    self._api_url(endpoint, "chat/completions"),
-                    headers=self._headers(),
-                    json=payload,
-                )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"].strip()
+            response = self._http().post(
+                self._api_url(endpoint, "chat/completions"),
+                headers=self._headers(),
+                json=payload,
+                timeout=180,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"].strip()
         content = re.sub(r"\s+", " ", content).strip()
         content = re.sub(r"^(图片|画面|描述)[:：]\s*", "", content)
         sentences = re.findall(r"[^。！？]+[。！？]?", content)
@@ -337,14 +347,14 @@ class LocalAIClient:
             }],
         }
         with self._vision_gate.slot():
-            with httpx.Client(timeout=240) as client:
-                response = client.post(
-                    self._api_url(endpoint, "chat/completions"),
-                    headers=self._headers(),
-                    json=payload,
-                )
-                response.raise_for_status()
-                return response.json()["choices"][0]["message"]["content"].strip()
+            response = self._http().post(
+                self._api_url(endpoint, "chat/completions"),
+                headers=self._headers(),
+                json=payload,
+                timeout=240,
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"].strip()
 
     def rerank(self, query: str, candidates: list[dict]) -> dict[int, dict]:
         if not self.settings.chat_model or not candidates:
@@ -375,14 +385,14 @@ class LocalAIClient:
             ],
         }
         with self._chat_gate.slot(interactive=True):
-            with httpx.Client(timeout=180) as client:
-                response = client.post(
-                    self._api_url(endpoint, "chat/completions"),
-                    headers=self._headers(),
-                    json=payload,
-                )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"].strip()
+            response = self._http().post(
+                self._api_url(endpoint, "chat/completions"),
+                headers=self._headers(),
+                json=payload,
+                timeout=180,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"].strip()
         values = _parse_rerank_values(content)
         result: dict[int, dict] = {}
         for item in values:
@@ -430,14 +440,14 @@ class LocalAIClient:
             answer = ""
             for _ in range(2):
                 with self._chat_gate.slot(interactive=True):
-                    with httpx.Client(timeout=180) as client:
-                        response = client.post(
-                            self._api_url(endpoint, "chat/completions"),
-                            headers=self._headers(),
-                            json=payload,
-                        )
-                        response.raise_for_status()
-                        content = response.json()["choices"][0]["message"]["content"].strip()
+                    response = self._http().post(
+                        self._api_url(endpoint, "chat/completions"),
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=180,
+                    )
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"]["content"].strip()
                 answer = _render_common_answer(_parse_json_object(content), sources, question)
                 if not answer.startswith("现有证据不足"):
                     break
@@ -481,14 +491,14 @@ class LocalAIClient:
             "messages": messages,
         }
         with self._chat_gate.slot(interactive=True):
-            with httpx.Client(timeout=180) as client:
-                response = client.post(
-                    self._api_url(endpoint, "chat/completions"),
-                    headers=self._headers(),
-                    json=payload,
-                )
-                response.raise_for_status()
-                return response.json()["choices"][0]["message"]["content"].strip()
+            response = self._http().post(
+                self._api_url(endpoint, "chat/completions"),
+                headers=self._headers(),
+                json=payload,
+                timeout=180,
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"].strip()
 
     def transcribe(self, path: Path) -> dict:
         if not self.settings.transcription_base_url or not self.settings.transcription_model:
@@ -497,12 +507,13 @@ class LocalAIClient:
         headers = self._headers()
         headers.pop("Content-Type", None)
         with self._transcription_gate.slot():
-            with path.open("rb") as handle, httpx.Client(timeout=3600) as client:
-                response = client.post(
+            with path.open("rb") as handle:
+                response = self._http().post(
                     self._api_url(endpoint, "audio/transcriptions"),
                     headers=headers,
                     data={"model": self.settings.transcription_model, "response_format": "verbose_json"},
                     files={"file": (path.name, handle, "audio/mpeg")},
+                    timeout=3600,
                 )
                 response.raise_for_status()
                 payload = response.json()

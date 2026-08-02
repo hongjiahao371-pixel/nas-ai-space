@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -13,15 +14,21 @@ from pathlib import Path
 from typing import Any
 
 import rawpy
-from PIL import ExifTags, Image
+from PIL import ExifTags, Image, ImageDraw, ImageFont
 
-from app.config import Settings
+from app.config import Settings, settings
 from app.services.hardware import ffmpeg_input_args
 from app.services.local_ai import LocalAIClient
 
 
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".log", ".srt", ".vtt"}
 RAW_IMAGE_EXTENSIONS = {".raw", ".dng", ".cr2", ".cr3", ".nef", ".arw"}
+PSD_EXTENSIONS = {".psd", ".psb"}
+VECTOR_DESIGN_EXTENSIONS = {".ai", ".eps"}
+FONT_EXTENSIONS = {".ttf", ".otf", ".ttc"}
+
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_datetime(value: Any) -> str | None:
@@ -298,8 +305,107 @@ def _convert_raw_image(path: Path, destination: Path, size: int) -> None:
         image.save(destination, "JPEG", quality=88, optimize=True)
 
 
+def _render_psd_preview(path: Path, destination: Path, size: int) -> None:
+    # PSD/PSB 体积可能很大，合成前先做大小检查，避免单文件耗尽内存
+    max_bytes = settings.max_psd_bytes
+    if path.stat().st_size > max_bytes:
+        raise ValueError(f"PSD 文件超过 {max_bytes // 1024 // 1024} MB，跳过合成预览")
+    try:
+        from psd_tools import PSDImage
+    except ImportError as exc:
+        raise RuntimeError("psd-tools 不可用，无法预览 PSD") from exc
+    # 自行持有文件句柄并用 with 确保关闭；psd-tools 传路径时也会内部关闭
+    with path.open("rb") as handle:
+        psd = PSDImage.open(handle)
+        # 像素量是内存炸弹的真正来源：超大画布在 composite 时按 width*height 分配
+        pixels = int(getattr(psd, "width", 0) or 0) * int(getattr(psd, "height", 0) or 0)
+        if pixels > settings.max_psd_pixels:
+            raise ValueError(f"PSD 画布超过 {settings.max_psd_pixels} 像素，跳过合成预览")
+        image = psd.composite()
+    if image is None:
+        raise ValueError("PSD 没有可用的合成图像")
+    image.thumbnail((size, size))
+    if image.mode in {"RGBA", "LA", "PA"}:
+        # 透明区域垫白底，避免转 JPEG 后变成黑块
+        background = Image.new("RGB", image.size, "#ffffff")
+        background.paste(image, mask=image.split()[-1])
+        image = background
+    elif image.mode not in {"RGB", "L"}:
+        image = image.convert("RGB")
+    image.save(destination, "JPEG", quality=82, optimize=True)
+
+
+def _render_font_preview(path: Path, destination: Path, size: int) -> None:
+    # 字体文件也可能异常巨大（TTC 合集），解析前先限制体积
+    max_bytes = settings.max_font_bytes
+    if path.stat().st_size > max_bytes:
+        raise ValueError(f"字体文件超过 {max_bytes // 1024 // 1024} MB，跳过预览")
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError as exc:
+        raise RuntimeError("fontTools 不可用，无法预览字体") from exc
+    try:
+        with path.open("rb") as handle:
+            font = TTFont(handle, fontNumber=0, lazy=True)
+            records = font["name"].names
+            family = next((record.toUnicode() for record in records if record.nameID == 1), "")
+            full_name = next((record.toUnicode() for record in records if record.nameID == 4), "")
+    except Exception as exc:
+        raise ValueError(f"字体文件无法解析：{exc}") from exc
+    title = full_name or family or path.stem
+    try:
+        title_font = ImageFont.truetype(str(path), max(12, size // 22), index=0)
+        sample_font = ImageFont.truetype(str(path), max(16, size * 3 // 20), index=0)
+    except OSError as exc:
+        raise ValueError(f"字体无法渲染：{exc}") from exc
+    canvas = Image.new("RGB", (size, size * 3 // 4), "#f5f5f2")
+    draw = ImageDraw.Draw(canvas)
+    draw.text((size // 16, size // 20), title, fill="#333333", font=title_font)
+    draw.text((size // 16, size // 5), "永 字体预览 AaBbCc 123", fill="#111111", font=sample_font)
+    draw.text((size // 16, size * 2 // 5), "敏捷的棕色狐狸 0123456789", fill="#555555", font=sample_font)
+    canvas.save(destination, "JPEG", quality=88, optimize=True)
+
+
+def _render_eps_preview(path: Path, destination: Path, size: int) -> None:
+    # EPS 依赖系统 Ghostscript，未安装时明确记为不支持而不是静默失败
+    if not shutil.which("gs"):
+        raise ValueError("EPS 预览需要 Ghostscript，当前系统未安装，跳过该文件")
+    command = [
+        "gs", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dEPSCrop",
+        "-dFirstPage=1", "-dLastPage=1", "-sDEVICE=jpeg", "-r150",
+        f"-sOutputFile={destination}", str(path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=120)
+    except subprocess.CalledProcessError as exc:
+        # gs 失败可能留下残缺的输出文件；错误消息只保留退出码与 stderr 末尾，避免刷屏/注入
+        destination.unlink(missing_ok=True)
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        raise ValueError(f"EPS 渲染失败（退出码 {exc.returncode}）：{stderr.strip()[-200:]}") from exc
+    with Image.open(destination) as image:
+        image.thumbnail((size, size))
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        image.save(destination, "JPEG", quality=82, optimize=True)
+
+
 def _convert_image(path: Path, destination: Path, size: int = 2048) -> str:
-    if path.suffix.lower() in RAW_IMAGE_EXTENSIONS:
+    extension = path.suffix.lower()
+    if extension in PSD_EXTENSIONS:
+        _render_psd_preview(path, destination, size)
+        return "psd-tools"
+    if extension == ".ai":
+        # 现代 .ai 本质是 PDF 兼容格式，复用 pdftoppm 渲染首页
+        if _render_pdf_page(path, 1, destination):
+            return "poppler"
+        raise ValueError("AI 文件不含可渲染的 PDF 页面（可能不是 PDF 兼容格式）")
+    if extension == ".eps":
+        _render_eps_preview(path, destination, size)
+        return "ghostscript"
+    if extension in FONT_EXTENSIONS:
+        _render_font_preview(path, destination, size)
+        return "fonttools"
+    if extension in RAW_IMAGE_EXTENSIONS:
         try:
             _convert_raw_image(path, destination, size)
             return "libraw"
@@ -380,38 +486,44 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
         prepared_path = path
         temporary: tempfile.TemporaryDirectory[str] | None = None
         try:
-            result.update(_image_info(path))
-        except (OSError, ValueError):
-            temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="image-")
-            prepared_path = Path(temporary.name) / "converted.jpg"
-            decoder = _convert_image(path, prepared_path)
-            result.update(_image_info(prepared_path))
-            result["metadata"].update({"source_format": extension.lstrip("."), "decoder": decoder})
-            source_probe = _probe_media(path)
-            result["captured_at"] = source_probe.get("captured_at") or result.get("captured_at")
-        if file["size"] > 24 * 1024 * 1024 and prepared_path == path:
-            temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="image-large-")
-            prepared_path = Path(temporary.name) / "resized.jpg"
-            _convert_image(path, prepared_path)
-        if manual_caption:
-            result["caption"] = manual_caption
-            result["metadata"].update({"caption_version": 3, "caption_source": "manual"})
-            result["stages"]["vision"] = {"status": "ready", "error": ""}
-        elif settings.vision_base_url and settings.vision_model:
             try:
-                result["caption"] = ai.caption_image(prepared_path)
-                result["metadata"]["caption_version"] = 3
-                result["metadata"]["caption_source"] = "ai"
-                result["stages"]["vision"] = {
-                    "status": "ready" if result["caption"] else "missing",
-                    "error": "" if result["caption"] else "vision: 模型未返回描述",
-                }
-            except Exception as exc:
-                error = f"vision: {exc}"
-                result["metadata"].setdefault("ai_errors", []).append(error)
-                result["stages"]["vision"] = {"status": "error", "error": error}
-        if temporary:
-            temporary.cleanup()
+                result.update(_image_info(path))
+            except (OSError, ValueError):
+                temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="image-")
+                prepared_path = Path(temporary.name) / "converted.jpg"
+                decoder = _convert_image(path, prepared_path)
+                result.update(_image_info(prepared_path))
+                result["metadata"].update({"source_format": extension.lstrip("."), "decoder": decoder})
+                source_probe = _probe_media(path)
+                result["captured_at"] = source_probe.get("captured_at") or result.get("captured_at")
+                if extension in PSD_EXTENSIONS:
+                    # 索引阶段已经完成一次全分辨率合成，直接铺好缩略图缓存，
+                    # 避免首次缩略图请求再合成一次
+                    _cache_psd_thumbnail(path, prepared_path, int(file.get("mtime_ns") or 0))
+            if file["size"] > 24 * 1024 * 1024 and prepared_path == path:
+                temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="image-large-")
+                prepared_path = Path(temporary.name) / "resized.jpg"
+                _convert_image(path, prepared_path)
+            if manual_caption:
+                result["caption"] = manual_caption
+                result["metadata"].update({"caption_version": 3, "caption_source": "manual"})
+                result["stages"]["vision"] = {"status": "ready", "error": ""}
+            elif settings.vision_base_url and settings.vision_model:
+                try:
+                    result["caption"] = ai.caption_image(prepared_path)
+                    result["metadata"]["caption_version"] = 3
+                    result["metadata"]["caption_source"] = "ai"
+                    result["stages"]["vision"] = {
+                        "status": "ready" if result["caption"] else "missing",
+                        "error": "" if result["caption"] else "vision: 模型未返回描述",
+                    }
+                except Exception as exc:
+                    error = f"vision: {exc}"
+                    result["metadata"].setdefault("ai_errors", []).append(error)
+                    result["stages"]["vision"] = {"status": "error", "error": error}
+        finally:
+            if temporary:
+                temporary.cleanup()
     elif kind in {"video", "audio"}:
         result.update(_probe_media(path))
         with tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="media-") as temporary:
@@ -499,10 +611,37 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
     return result, chunks
 
 
+def _cache_psd_thumbnail(source: Path, prepared: Path, mtime_ns: int) -> None:
+    # 与 /api/files/{id}/thumbnail 的缓存键规则保持一致（path:mtime_ns:size 的 sha256），
+    # 让索引阶段的 PSD 合成结果直接命中首次缩略图请求
+    try:
+        if not mtime_ns:
+            mtime_ns = source.stat().st_mtime_ns
+        key = hashlib.sha256(f"{source}:{mtime_ns}:{settings.thumbnail_size}".encode()).hexdigest()
+        destination = settings.cache_dir / "thumbnails" / key[:2] / f"{key}.jpg"
+        if destination.exists():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(prepared) as image:
+            image.thumbnail((settings.thumbnail_size, settings.thumbnail_size))
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            temporary = destination.with_suffix(".tmp.jpg")
+            image.save(temporary, "JPEG", quality=82, optimize=True)
+            temporary.replace(destination)
+    except Exception as exc:
+        logger.warning("写入 PSD 缩略图缓存失败（%s）：%s", source, exc)
+
+
 def create_thumbnail(path: Path, destination: Path, kind: str, size: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp.jpg")
     if kind == "image":
+        if path.suffix.lower() in PSD_EXTENSIONS | VECTOR_DESIGN_EXTENSIONS | FONT_EXTENSIONS:
+            # PSD/AI/EPS/字体等设计文件走各自的专用渲染路径
+            _convert_image(path, temporary, size)
+            temporary.replace(destination)
+            return
         try:
             with Image.open(path) as image:
                 image.thumbnail((size, size))

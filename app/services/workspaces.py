@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import settings
 from app.database import Database, utc_now
 from app.security import token_digest
 
@@ -415,11 +416,77 @@ class WorkspaceService:
                ORDER BY rc.created_at, rc.id""",
             (asset_id,),
         )
+        self._with_attachments(comments)
         for comment in comments:
             comment["drawing"] = self._loads(comment.pop("drawing_json", "[]"), [])
         asset["versions"] = versions
         asset["comments"] = comments
         return asset
+
+    def _with_attachments(self, comments: list[dict[str, Any]]) -> None:
+        comment_ids = [int(comment["id"]) for comment in comments]
+        if not comment_ids:
+            return
+        placeholders = ",".join("?" for _ in comment_ids)
+        rows = self.database.fetchall(
+            f"""SELECT comment_id, name, original_name, mime, size_bytes, created_at
+                FROM comment_attachments WHERE comment_id IN ({placeholders})
+                ORDER BY created_at, name""",
+            comment_ids,
+        )
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(int(row["comment_id"]), []).append(row)
+        for comment in comments:
+            comment["attachments"] = grouped.get(int(comment["id"]), [])
+
+    def add_comment_attachment(
+        self,
+        comment_id: int,
+        name: str,
+        original_name: str,
+        mime: str,
+        size_bytes: int,
+    ) -> dict[str, Any]:
+        row = self.database.fetchone(
+            "SELECT COUNT(*) AS count FROM comment_attachments WHERE comment_id = ?",
+            (comment_id,),
+        )
+        if row and int(row["count"]) >= settings.comment_attachment_max_per_comment:
+            raise ValueError(f"单条评论最多允许 {settings.comment_attachment_max_per_comment} 个附件")
+        self.database.execute(
+            """INSERT INTO comment_attachments(comment_id, name, original_name, mime, size_bytes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (comment_id, name, original_name[:240], mime, int(size_bytes), utc_now()),
+        )
+        return {
+            "comment_id": comment_id,
+            "name": name,
+            "original_name": original_name,
+            "mime": mime,
+            "size_bytes": int(size_bytes),
+        }
+
+    def comment_attachment_names(self, comment_id: int) -> list[str]:
+        rows = self.database.fetchall(
+            "SELECT name FROM comment_attachments WHERE comment_id = ?",
+            (comment_id,),
+        )
+        return [str(row["name"]) for row in rows]
+
+    def project_attachment_names(self, project_id: int) -> list[str]:
+        rows = self.database.fetchall(
+            """SELECT ca.name FROM comment_attachments ca
+               JOIN review_comments rc ON rc.id = ca.comment_id
+               JOIN assets a ON a.id = rc.asset_id WHERE a.project_id = ?""",
+            (project_id,),
+        )
+        return [str(row["name"]) for row in rows]
+
+    def delete_comment(self, comment_id: int) -> list[str]:
+        names = self.comment_attachment_names(comment_id)
+        self.database.execute("DELETE FROM review_comments WHERE id = ?", (comment_id,))
+        return names
 
     def update_asset(self, asset_id: int, values: dict[str, Any]) -> dict[str, Any]:
         allowed = {
@@ -580,6 +647,7 @@ class WorkspaceService:
             (comment_id,),
         )
         if row:
+            self._with_attachments([row])
             row["drawing"] = self._loads(row.pop("drawing_json", "[]"), [])
         return row
 
@@ -700,6 +768,13 @@ class WorkspaceService:
             "SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (user_id, max(1, min(500, limit))),
         )
+
+    def unread_notifications(self, user_id: int) -> int:
+        row = self.database.fetchone(
+            "SELECT COUNT(*) AS count FROM notifications WHERE user_id = ? AND read_at IS NULL",
+            (user_id,),
+        )
+        return int(row["count"]) if row else 0
 
     def read_notifications(self, user_id: int, notification_id: int | None = None) -> None:
         if notification_id is None:

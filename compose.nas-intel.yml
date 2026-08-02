@@ -1,5 +1,11 @@
 name: nas-ai-space
 
+x-logging: &logging-default
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   app:
     build:
@@ -83,8 +89,10 @@ services:
       - ALL
     read_only: true
     tmpfs:
-      - /tmp:size=512m
+      - /tmp:size=256m
     shm_size: ${NAS_AI_SHM_SIZE:-2gb}
+    mem_limit: ${NAS_AI_APP_MEM_LIMIT:-1536m}
+    logging: *logging-default
 
   qdrant:
     image: nas-ai-llamacpp:local
@@ -95,6 +103,7 @@ services:
       QDRANT__TELEMETRY_DISABLED: "true"
       QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
       QDRANT__STORAGE__SNAPSHOTS_PATH: /qdrant/snapshots
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "true"
     volumes:
       - ./runtime/qdrant:/opt/qdrant:ro
       - qdrant-data:/qdrant/storage
@@ -111,6 +120,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m
+    mem_limit: ${NAS_AI_QDRANT_MEM_LIMIT:-768m}
+    logging: *logging-default
 
   vision:
     build:
@@ -175,6 +186,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=256m
+    mem_limit: ${NAS_AI_VISION_MEM_LIMIT:-3072m}
+    logging: *logging-default
 
   embedding:
     build:
@@ -230,6 +243,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=128m
+    mem_limit: ${NAS_AI_EMBEDDING_MEM_LIMIT:-1024m}
+    logging: *logging-default
 
   speech:
     build:
@@ -253,13 +268,16 @@ services:
       interval: 15s
       timeout: 5s
       retries: 20
+      start_period: 60s
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     read_only: true
     tmpfs:
-      - /tmp:size=512m
+      - /tmp:size=256m
+    mem_limit: ${NAS_AI_SPEECH_MEM_LIMIT:-768m}
+    logging: *logging-default
 
 volumes:
   qdrant-data:

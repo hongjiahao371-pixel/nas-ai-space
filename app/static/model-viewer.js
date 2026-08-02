@@ -172,8 +172,10 @@ export async function mountModelViewer(canvas, url, fileName) {
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
   if (!gl) throw new Error('当前浏览器不支持 WebGL');
   const pipeline = program(gl);
+  const buffers = [];
   const bind = (name, values) => {
     const buffer = gl.createBuffer();
+    buffers.push(buffer);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, values, gl.STATIC_DRAW);
     const location = gl.getAttribLocation(pipeline, name);
@@ -225,6 +227,18 @@ export async function mountModelViewer(canvas, url, fileName) {
     distance = Math.max(2.6, Math.min(9, distance + event.deltaY * 0.003));
     draw();
   }, { passive: false });
-  new ResizeObserver(draw).observe(canvas);
+  const observer = new ResizeObserver(draw);
+  observer.observe(canvas);
   draw();
+
+  // 返回释放函数：原生 WebGL 没有 renderer，删 buffer/program 后借 WEBGL_lose_context 主动丢上下文
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    observer.disconnect();
+    buffers.forEach(buffer => gl.deleteBuffer(buffer));
+    gl.deleteProgram(pipeline);
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+  };
 }

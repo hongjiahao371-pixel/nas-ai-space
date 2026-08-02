@@ -488,6 +488,9 @@ CREATE TABLE IF NOT EXISTS comment_attachments (
     comment_id INTEGER NOT NULL REFERENCES review_comments(id) ON DELETE CASCADE,
     file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
     name TEXT NOT NULL,
+    original_name TEXT NOT NULL DEFAULT '',
+    mime TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     PRIMARY KEY(comment_id, name)
 );
@@ -641,6 +644,27 @@ class Database:
             chunk_columns = {row[1] for row in connection.execute("PRAGMA table_info(content_chunks)").fetchall()}
             if "source_label" not in chunk_columns:
                 connection.execute("ALTER TABLE content_chunks ADD COLUMN source_label TEXT NOT NULL DEFAULT ''")
+            comment_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(review_comments)").fetchall()
+            }
+            if "visibility" not in comment_columns:
+                connection.execute(
+                    "ALTER TABLE review_comments ADD COLUMN visibility TEXT NOT NULL DEFAULT 'team'"
+                )
+            attachment_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(comment_attachments)").fetchall()
+            }
+            for column, statement in {
+                "original_name": (
+                    "ALTER TABLE comment_attachments ADD COLUMN original_name TEXT NOT NULL DEFAULT ''"
+                ),
+                "mime": "ALTER TABLE comment_attachments ADD COLUMN mime TEXT NOT NULL DEFAULT ''",
+                "size_bytes": (
+                    "ALTER TABLE comment_attachments ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0"
+                ),
+            }.items():
+                if column not in attachment_columns:
+                    connection.execute(statement)
             people_columns = {row[1] for row in connection.execute("PRAGMA table_info(people)").fetchall()}
             if "hidden" not in people_columns:
                 connection.execute("ALTER TABLE people ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
@@ -661,6 +685,10 @@ class Database:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_files_quick_hash ON files(quick_hash, size)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_files_content_hash ON files(content_hash, size)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_files_perceptual_hash ON files(perceptual_hash)")
+            # 三个流水线状态列的普通索引（旧库随启动迁移补齐），配合 index_stage_summary 单扫聚合
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_files_vision_status ON files(vision_status)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_files_transcription_status ON files(transcription_status)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_files_embedding_status ON files(embedding_status)")
             self._create_fts(connection)
             connection.commit()
         os.chmod(self.path, 0o600)
@@ -786,21 +814,46 @@ class Database:
                 (stats["count"], stats["bytes"], utc_now(), library_id),
             )
 
+    @staticmethod
+    def _refresh_similarity_groups(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """UPDATE similarity_groups SET member_count = (
+               SELECT COUNT(*) FROM similarity_group_files WHERE group_id = similarity_groups.id)"""
+        )
+        connection.execute("DELETE FROM similarity_groups WHERE member_count < 2")
+
     def upsert_file(self, values: dict[str, Any]) -> tuple[int, bool]:
         return self.upsert_files([values])[0]
 
-    def upsert_files(self, values_list: list[dict[str, Any]]) -> list[tuple[int, bool]]:
+    def upsert_files(self, values_list: list[dict[str, Any]], finalize: bool = True) -> list[tuple[int, bool]]:
+        # finalize=False 用于扫描中途的分批 flush：跳过 similarity_groups 全量重算，
+        # 由扫描结束的最后一次 flush（finalize=True）统一执行一次。
         if not values_list:
+            if finalize:
+                with self.transaction() as connection:
+                    self._refresh_similarity_groups(connection)
             return []
         now = utc_now()
         results: list[tuple[int, bool]] = []
         with self.transaction() as connection:
+            # 按本批 path 一次性预载 path -> (id, size, mtime_ns)，避免每文件一条 SELECT 点查，
+            # 也避免按 library 预载时每批都物化整个媒体库。files.path 是全局 UNIQUE，预载不限
+            # library_id：两个库根目录重叠（/photos 与 /photos/2024）时同 path 命中已有行走
+            # UPDATE 分支，与旧逐条 SELECT（WHERE path=?）时代的全局命中行为一致。
+            paths = sorted({str(values["path"]) for values in values_list})
+            existing_by_path: dict[str, tuple[int, Any, Any]] = {}
+            for start in range(0, len(paths), 900):  # SQLite 单条语句变量上限 999，留余量分批
+                batch = paths[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                for row in connection.execute(
+                    f"SELECT id, path, size, mtime_ns FROM files WHERE path IN ({placeholders})",
+                    batch,
+                ):
+                    existing_by_path[str(row["path"])] = (int(row["id"]), row["size"], row["mtime_ns"])
+            unchanged: list[tuple[Any, ...]] = []
             for values in values_list:
-                existing = connection.execute(
-                    "SELECT id, size, mtime_ns FROM files WHERE path = ?",
-                    (values["path"],),
-                ).fetchone()
-                changed = not existing or existing["size"] != values["size"] or existing["mtime_ns"] != values["mtime_ns"]
+                existing = existing_by_path.get(values["path"])
+                changed = not existing or existing[1] != values["size"] or existing[2] != values["mtime_ns"]
                 if existing and changed:
                     connection.execute(
                         """UPDATE files SET library_id = ?, relative_path = ?, name = ?, extension = ?, kind = ?,
@@ -814,17 +867,18 @@ class Database:
                         (
                             values["library_id"], values["relative_path"], values["name"], values["extension"],
                             values["kind"], values["mime_type"], values["size"], values["mtime_ns"], values["inode"],
-                            values.get("scan_token", ""), now, existing["id"],
+                            values.get("scan_token", ""), now, existing[0],
                         ),
                     )
-                    connection.execute("DELETE FROM similarity_group_files WHERE file_id = ?", (existing["id"],))
-                    results.append((int(existing["id"]), True))
+                    connection.execute("DELETE FROM similarity_group_files WHERE file_id = ?", (existing[0],))
+                    existing_by_path[values["path"]] = (existing[0], values["size"], values["mtime_ns"])
+                    results.append((existing[0], True))
                 elif existing:
-                    connection.execute(
-                        "UPDATE files SET library_id = ?, relative_path = ?, scan_token = ? WHERE id = ?",
-                        (values["library_id"], values["relative_path"], values.get("scan_token", ""), existing["id"]),
+                    # 未变文件只刷 scan_token，收集起来一次 executemany，不再逐行 UPDATE
+                    unchanged.append(
+                        (values["library_id"], values["relative_path"], values.get("scan_token", ""), existing[0])
                     )
-                    results.append((int(existing["id"]), False))
+                    results.append((existing[0], False))
                 else:
                     cursor = connection.execute(
                         """INSERT INTO files(library_id, path, relative_path, name, extension, kind, mime_type,
@@ -835,12 +889,16 @@ class Database:
                             values.get("scan_token", ""), now, now,
                         ),
                     )
-                    results.append((int(cursor.lastrowid), True))
-            connection.execute(
-                """UPDATE similarity_groups SET member_count = (
-                   SELECT COUNT(*) FROM similarity_group_files WHERE group_id = similarity_groups.id)"""
-            )
-            connection.execute("DELETE FROM similarity_groups WHERE member_count < 2")
+                    new_id = int(cursor.lastrowid)
+                    existing_by_path[values["path"]] = (new_id, values["size"], values["mtime_ns"])
+                    results.append((new_id, True))
+            if unchanged:
+                connection.executemany(
+                    "UPDATE files SET library_id = ?, relative_path = ?, scan_token = ? WHERE id = ?",
+                    unchanged,
+                )
+            if finalize:
+                self._refresh_similarity_groups(connection)
         return results
 
     def mark_files_seen(self, file_ids: list[int], scan_token: str) -> None:
@@ -866,11 +924,7 @@ class Database:
                 placeholders = ",".join("?" for _ in batch)
                 connection.execute(f"DELETE FROM files_fts WHERE rowid IN ({placeholders})", batch)
                 connection.execute(f"DELETE FROM files WHERE id IN ({placeholders})", batch)
-            connection.execute(
-                """UPDATE similarity_groups SET member_count = (
-                   SELECT COUNT(*) FROM similarity_group_files WHERE group_id = similarity_groups.id)"""
-            )
-            connection.execute("DELETE FROM similarity_groups WHERE member_count < 2")
+            self._refresh_similarity_groups(connection)
         return [int(file_id) for file_id in missing_ids]
 
     def pending_file_ids(
@@ -993,18 +1047,42 @@ class Database:
         return int(row["count"] if row else 0)
 
     def index_stage_summary(self) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "repairable": self.repair_count(),
-            "retry_waiting": self.retry_waiting_count(),
-            "terminal_failures": self.terminal_failure_count(),
-        }
-        for column, name in (
+        # 单次条件聚合扫描替代原先每个状态列一次 GROUP BY 全表扫（/api/index/status 被前端
+        # 3 秒轮询），repairable/retry_waiting/terminal_failures 三个 COUNT 也合并进同一扫。
+        # 只输出计数非零的状态，保持与旧 GROUP BY 结果一致（不出现的键即 0）。
+        statuses = ("pending", "ready", "error", "missing", "blocked", "not_applicable")
+        stage_columns = (
             ("vision_status", "vision"),
             ("transcription_status", "transcription"),
             ("embedding_status", "embedding"),
-        ):
-            rows = self.fetchall(f"SELECT {column} AS status, COUNT(*) AS count FROM files GROUP BY {column}")
-            result[name] = {str(row["status"]): int(row["count"]) for row in rows}
+        )
+        stage_selects = ", ".join(
+            f"COALESCE(SUM(CASE WHEN {column} = '{status}' THEN 1 ELSE 0 END), 0) AS {name}_{status}"
+            for column, name in stage_columns
+            for status in statuses
+        )
+        now = utc_now()
+        row = self.fetchone(
+            f"""SELECT
+               COALESCE(SUM(CASE WHEN status IN ('partial', 'error') AND terminal_error = 0
+                   AND (next_retry_at IS NULL OR next_retry_at <= ?) THEN 1 ELSE 0 END), 0) AS repairable,
+               COALESCE(SUM(CASE WHEN status IN ('partial', 'error') AND terminal_error = 0
+                   AND next_retry_at IS NOT NULL AND next_retry_at > ? THEN 1 ELSE 0 END), 0) AS retry_waiting,
+               COALESCE(SUM(CASE WHEN status IN ('partial', 'error') AND terminal_error = 1
+                   THEN 1 ELSE 0 END), 0) AS terminal_failures, {stage_selects} FROM files""",
+            (now, now),
+        ) or {}
+        result: dict[str, Any] = {
+            "repairable": int(row.get("repairable") or 0),
+            "retry_waiting": int(row.get("retry_waiting") or 0),
+            "terminal_failures": int(row.get("terminal_failures") or 0),
+        }
+        for _, name in stage_columns:
+            result[name] = {
+                status: int(row.get(f"{name}_{status}") or 0)
+                for status in statuses
+                if int(row.get(f"{name}_{status}") or 0)
+            }
         return result
 
     def get_file(self, file_id: int) -> dict[str, Any] | None:
@@ -1108,7 +1186,9 @@ class Database:
                     (
                         file_id, index, chunk.get("content", ""), chunk.get("start_offset"), chunk.get("end_offset"),
                         chunk.get("start_time"), chunk.get("end_time"), chunk.get("source_label", ""),
-                        json.dumps(chunk["embedding"]) if chunk.get("embedding") else None,
+                        # embedding_json 已弃用：向量只写 Qdrant，不再为每 chunk 冗余存 15-20KB JSON。
+                        # 列保留不删以兼容旧 schema，旧数据不清理（如需回收空间可手动 VACUUM）。
+                        None,
                     ),
                 )
             row = connection.execute("SELECT name, relative_path, extracted_text, ai_caption FROM files WHERE id = ?", (file_id,)).fetchone()
@@ -1260,7 +1340,17 @@ class Database:
         )
 
     def cancel_task(self, task_id: int) -> None:
-        self.execute("UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,))
+        # 等待中的任务还没被 worker 领取，直接标记取消即时生效；
+        # 运行中的任务只置取消标记，由 worker 在批次检查点停止
+        now = utc_now()
+        self.execute(
+            """UPDATE tasks SET cancel_requested = 1,
+               status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END,
+               message = CASE WHEN status = 'pending' THEN '已取消' ELSE message END,
+               finished_at = CASE WHEN status = 'pending' THEN ? ELSE finished_at END,
+               heartbeat_at = ? WHERE id = ?""",
+            (now, now, task_id),
+        )
 
     def reset_task(self, task_id: int) -> None:
         self.execute(
@@ -1624,27 +1714,22 @@ class Database:
 
     def dashboard(self, library_ids: list[int] | None = None, user_id: int | None = None) -> dict[str, Any]:
         permission_sql, permission_params = self._library_clause(library_ids)
+        # 覆盖率统计合并进 files 单次聚合，替代原先对 content_chunks 的两次 COUNT(DISTINCT) 全扫：
+        # semantic_ready 改用 embedding_status = 'ready'（embedding_json 已停止写入，见 finish_file_index），
+        # content_ready 以 extracted_text/ai_caption 非空计数，与“已有可检索内容的文件数”口径一致。
         files = self.fetchone(
             """SELECT COUNT(*) AS total, COALESCE(SUM(size), 0) AS bytes,
                COALESCE(SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
                COALESCE(SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END), 0) AS partial,
                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
-               COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) AS errors FROM files WHERE 1=1""" + permission_sql,
+               COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) AS errors,
+               COALESCE(SUM(CASE WHEN embedding_status = 'ready' THEN 1 ELSE 0 END), 0) AS semantic_ready,
+               COALESCE(SUM(CASE WHEN extracted_text != '' OR ai_caption != '' THEN 1 ELSE 0 END), 0) AS content_ready
+               FROM files WHERE 1=1""" + permission_sql,
             permission_params,
         ) or {}
-        chunk_permission_sql, chunk_permission_params = self._library_clause(library_ids, "f.library_id")
-        semantic = self.fetchone(
-            """SELECT COUNT(DISTINCT c.file_id) AS files FROM content_chunks c
-               JOIN files f ON f.id = c.file_id WHERE c.embedding_json IS NOT NULL""" + chunk_permission_sql,
-            chunk_permission_params,
-        ) or {"files": 0}
-        content = self.fetchone(
-            """SELECT COUNT(DISTINCT c.file_id) AS files FROM content_chunks c
-               JOIN files f ON f.id = c.file_id WHERE c.content != ''""" + chunk_permission_sql,
-            chunk_permission_params,
-        ) or {"files": 0}
-        files["semantic_ready"] = int(semantic["files"])
-        files["content_ready"] = int(content["files"])
+        files["semantic_ready"] = int(files.get("semantic_ready") or 0)
+        files["content_ready"] = int(files.get("content_ready") or 0)
         files["repairable"] = self.repair_count()
         files["retry_waiting"] = self.retry_waiting_count()
         files["terminal_failures"] = self.terminal_failure_count()
@@ -1965,7 +2050,7 @@ class Database:
                 "INSERT INTO library_permissions(user_id, library_id, created_at) VALUES (?, ?, ?)",
                 [(user_id, int(library_id), now) for library_id in sorted(set(library_ids))],
             )
-            if not enabled:
+            if not enabled or password_hash:
                 connection.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
 
     def user_credentials(self, username: str) -> dict[str, Any] | None:
