@@ -2319,7 +2319,37 @@ function bootPublicShare() {
   loadPublicShare('');
 }
 
+// ❓ 帮助点弹层：原生 title 只在鼠标悬停时可见，触屏完全不可用，
+// 点击切换一个跟随的小气泡，点外部 / Escape 关闭
+let helpTipEl = null;
+function closeHelpTip() {
+  helpTipEl?.remove();
+  helpTipEl = null;
+}
+function openHelpTip(dot) {
+  closeHelpTip();
+  const text = dot.getAttribute('title') || '';
+  if (!text) return;
+  helpTipEl = document.createElement('div');
+  helpTipEl.className = 'help-tip';
+  helpTipEl.textContent = text;
+  helpTipEl._dot = dot;
+  document.body.appendChild(helpTipEl);
+  const rect = dot.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.left - 8, window.innerWidth - helpTipEl.offsetWidth - 8));
+  helpTipEl.style.top = `${rect.bottom + window.scrollY + 8}px`;
+  helpTipEl.style.left = `${left}px`;
+}
+
 document.addEventListener('click', async event => {
+  const helpDot = event.target.closest('.help-dot');
+  if (helpDot) {
+    // 再次点击同一个帮助点 = 收起
+    if (helpTipEl && helpTipEl._dot === helpDot) closeHelpTip();
+    else openHelpTip(helpDot);
+    return;
+  }
+  if (helpTipEl && !event.target.closest('.help-tip')) closeHelpTip();
   if (event.target.closest('#systemNavToggle')) {
     const nav = $('#systemNav');
     nav.hidden = !nav.hidden;
@@ -2734,12 +2764,14 @@ document.addEventListener('click', async event => {
     return;
   }
   if (event.target.closest('#upgradeCaptions')) {
+    const button = event.target.closest('#upgradeCaptions');
+    const limit = Number(button.closest('.panel-head')?.querySelector('.repair-limit')?.value || 50);
     try {
       const result = await api('/api/vision/upgrade', {
         method: 'POST',
-        body: JSON.stringify({ limit: 50 }),
+        body: JSON.stringify({ limit }),
       });
-      toast(result.existing ? '已有图片描述升级任务在运行' : '已加入 50 张图片描述升级任务');
+      toast(result.existing ? '已有图片描述升级任务在运行' : limit >= 100000 ? '已加入全部旧版图片描述的升级任务' : `已加入 ${limit} 张图片描述升级任务`);
       showView('tasks');
     } catch (error) { toast(error.message, true); }
     return;
@@ -3831,6 +3863,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   // Escape 只关闭最上层弹窗；文件详情 / 审阅的媒体清理由 closeModal 统一处理
+  if (event.key === 'Escape') closeHelpTip();
   if (event.key === 'Escape' && modalStack.length) {
     const top = modalStack[modalStack.length - 1].modal;
     if (!(top.id === 'tokenModal' && state.bootstrapRequired)) closeModal(top);

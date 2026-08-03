@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · AI 媒体资产工作台</title>
   <script>(function(){try{var c=localStorage.getItem('nasAiTheme')||'system';document.documentElement.dataset.theme=c==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):c;}catch(e){}})();</script>
-  <link rel="stylesheet" href="/assets/styles.css?v=20">
+  <link rel="stylesheet" href="/assets/styles.css?v=21">
 </head>
 <body>
   <div class="app-shell">
@@ -427,7 +427,7 @@
           <article class="panel container-panel"><div class="panel-head"><div><span class="eyebrow">容器资源</span><h2>容器资源<span class="help-dot" title="通过隔离的 ops 边车读取容器状态；内存上限在线调整（docker update），无需重建容器">?</span></h2></div><span class="status-badge" id="containersBadge">加载中</span></div><div class="container-list" id="containerList"></div></article>
           <article class="panel production-panel"><div class="panel-head"><div><span class="eyebrow">生产就绪检查</span><h2>运行基线</h2></div><span class="status-badge" id="productionBadge">检查中</span></div><div class="production-checks" id="productionChecks"></div></article>
           <article class="panel stage-health-panel"><div class="panel-head"><div><span class="eyebrow">真实覆盖率</span><h2>AI 索引阶段<span class="help-dot" title="区分视觉、语音和向量是否真正完成，避免把只有元数据的文件算作可搜索">?</span></h2></div><div class="repair-actions"><select class="repair-limit" aria-label="本次修复数量"><option value="50">50 个</option><option value="200" selected>200 个</option><option value="500">500 个</option><option value="100000">全部</option></select><button class="secondary" id="repairFromOperations">开始修复</button></div></div><div class="stage-health-grid" id="stageHealthGrid"></div></article>
-          <article class="panel vision-upgrade-panel"><div class="panel-head"><div><span class="eyebrow">识别质量迁移</span><h2>升级旧版图片描述<span class="help-dot" title="使用新的事实型描述、OCR 和检索词模板重新处理旧索引；每次只运行一小批">?</span></h2></div><button class="secondary" id="upgradeCaptions">升级下一批 50 张</button></div><div class="vision-upgrade-status" id="visionUpgradeStatus"></div></article>
+          <article class="panel vision-upgrade-panel"><div class="panel-head"><div><span class="eyebrow">识别质量迁移</span><h2>升级旧版图片描述<span class="help-dot" title="使用新的事实型描述、OCR 和检索词模板重新处理旧索引；每次只运行一小批">?</span></h2></div><div class="repair-actions"><select class="repair-limit" aria-label="本次升级数量"><option value="50">50 张</option><option value="200" selected>200 张</option><option value="500">500 张</option><option value="100000">全部</option></select><button class="secondary" id="upgradeCaptions">开始升级</button></div></div><div class="vision-upgrade-status" id="visionUpgradeStatus"></div></article>
           <article class="panel snapshot-panel"><div class="panel-head"><div><span class="eyebrow">向量灾备</span><h2>Qdrant 快照</h2><p class="hint">恢复前会自动备份 SQLite 元数据</p></div><button class="secondary" id="createVectorSnapshot">创建向量快照</button></div><div class="snapshot-list" id="snapshotList"></div></article>
           <article class="panel audit-panel"><div class="panel-head"><div><span class="eyebrow">安全追踪</span><h2>最近操作</h2></div></div><div class="audit-list" id="auditList"></div></article>
         </section>
@@ -462,6 +462,6 @@
   <!-- 阶段二：通用确认 / 输入弹窗（替代原生 confirm/prompt） -->
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" id="dialogModal"><div class="modal-card compact-modal"><span class="eyebrow" id="dialogEyebrow">确认操作</span><h2 id="dialogTitle"></h2><p id="dialogBody"></p><label id="dialogField" hidden><span id="dialogLabel"></span><input id="dialogInput"></label><div class="dialog-actions"><button class="secondary" id="dialogCancel" type="button">取消</button><button class="primary" id="dialogConfirm" type="button">确定</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=28"></script>
+  <script src="/assets/app.js?v=30"></script>
 </body>
 </html>

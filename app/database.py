@@ -1426,7 +1426,7 @@ class Database:
     def index_runtime_summary(self) -> dict[str, Any]:
         rows = self.fetchall(
             """SELECT work_done, started_at, finished_at FROM tasks
-               WHERE type IN ('index_pending', 'repair_index') AND status = 'completed'
+               WHERE type IN ('index_pending', 'repair_index', 'upgrade_captions') AND status = 'completed'
                AND work_done > 0 AND started_at IS NOT NULL AND finished_at IS NOT NULL
                ORDER BY id DESC LIMIT 20"""
         )
@@ -1444,10 +1444,26 @@ class Database:
             total_items += int(row["work_done"] or 0)
             total_seconds += duration
         rate = total_items / total_seconds if total_items and total_seconds else 0.0
+        # 运行中任务的实时速率优先：包含内存等待时间，比历史均值更接近当前体感
+        running = self.fetchone(
+            """SELECT work_done, started_at FROM tasks
+               WHERE type IN ('index_pending', 'repair_index', 'upgrade_captions') AND status = 'running'
+               AND work_done >= 10 AND started_at IS NOT NULL
+               ORDER BY id DESC LIMIT 1"""
+        )
+        if running:
+            try:
+                started = datetime.fromisoformat(str(running["started_at"]).replace("Z", "+00:00"))
+                elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+                if elapsed >= 60:
+                    rate = float(running["work_done"]) / elapsed
+            except (TypeError, ValueError):
+                pass
         pending = int(self.pending_summary()["total"])
         repairable = self.repair_count()
         retry_waiting = self.retry_waiting_count()
-        remaining = pending + repairable + retry_waiting
+        caption_upgrades = self.caption_upgrade_count()
+        remaining = pending + repairable + retry_waiting + caption_upgrades
         return {
             "sample_batches": len(rows),
             "sample_items": total_items,

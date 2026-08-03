@@ -1659,3 +1659,7 @@ input:not([type]) {
   .container-row { grid-template-columns: 10px 1fr auto; grid-auto-rows: auto; }
   .container-mem, .container-restarts { grid-column: 2 / -1; }
 }
+
+/* ===== 阶段九（帮助点点击弹层） ===== */
+.help-dot { cursor: pointer; }
+.help-tip { position: absolute; z-index: 90; max-width: 260px; padding: 8px 12px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text); font-size: var(--fs-sm); line-height: 1.5; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
