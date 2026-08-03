@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 from urllib.parse import quote, unquote
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -96,6 +97,10 @@ class RecycleRequest(BaseModel):
 
 class SnapshotRestoreRequest(BaseModel):
     confirm: str = Field(min_length=1, max_length=200)
+
+
+class OpsMemoryRequest(BaseModel):
+    mb: int = Field(ge=256, le=8192)
 
 
 class CaptionUpgradeRequest(BaseModel):
@@ -289,6 +294,8 @@ class AppState:
 state = AppState()
 INDEX_KINDS = {"", "image", "video", "audio", "document", "archive", "other"}
 INDEX_ORDERS = {"balanced", "newest", "oldest", "smallest"}
+# 容器资源面板可操作的服务白名单（与 ops 边车各自独立校验）
+OPS_SERVICES = {"app", "vision", "embedding", "qdrant", "speech"}
 COMMENT_ATTACHMENT_MIMES = {
     "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif",
     "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
@@ -3764,6 +3771,73 @@ def delete_vector_snapshot(name: str, principal: Auth) -> dict[str, bool]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit(principal, "vector_snapshot.delete", "snapshot", name)
     return {"ok": True}
+
+
+_ops_http_lock = threading.Lock()
+_ops_http_client: httpx.Client | None = None
+
+
+def _ops_http() -> httpx.Client:
+    # 复用同一 httpx.Client（连接池），避免每次操作重建 TCP 连接；
+    # httpx.Client 线程安全，懒初始化（参考 VectorStore._http）
+    global _ops_http_client
+    if _ops_http_client is None:
+        with _ops_http_lock:
+            if _ops_http_client is None:
+                _ops_http_client = httpx.Client(timeout=httpx.Timeout(10.0, connect=3.0))
+    return _ops_http_client
+
+
+def _ops_proxy(method: str, path: str, payload: dict[str, Any] | None = None) -> httpx.Response:
+    if not settings.ops_url:
+        raise HTTPException(status_code=503, detail="资源代理不可用：未配置 NAS_AI_OPS_URL")
+    try:
+        return _ops_http().request(method, f"{settings.ops_url}{path}", json=payload)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=f"资源代理不可用：{exc.__class__.__name__}") from exc
+
+
+def _ops_require_ok(response: httpx.Response) -> dict[str, Any]:
+    if response.status_code >= 400:
+        try:
+            detail = str(response.json().get("detail") or "")
+        except ValueError:
+            detail = ""
+        raise HTTPException(status_code=502, detail=f"资源代理异常：{detail or f'HTTP {response.status_code}'}")
+    return response.json()
+
+
+def _ops_service_or_404(service: str) -> str:
+    if service not in OPS_SERVICES:
+        raise HTTPException(status_code=404, detail="不支持的容器服务")
+    return service
+
+
+@app.get("/api/ops/containers")
+def ops_containers(principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    return _ops_require_ok(_ops_proxy("GET", "/containers"))
+
+
+@app.post("/api/ops/containers/{service}/memory")
+def ops_set_memory(service: str, payload: OpsMemoryRequest, principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    _ops_service_or_404(service)
+    result = _ops_require_ok(_ops_proxy("POST", f"/containers/{service}/memory", {"mb": payload.mb}))
+    _audit(principal, "ops.container.memory", "container", service, {"mb": payload.mb})
+    return result
+
+
+@app.post("/api/ops/containers/{service}/restart")
+def ops_restart_container(service: str, principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    _ops_service_or_404(service)
+    result = _ops_require_ok(_ops_proxy("POST", f"/containers/{service}/restart"))
+    result["restarting"] = True
+    if service == "app":
+        result["notice"] = "正在重启应用容器，页面将短暂断开"
+    _audit(principal, "ops.container.restart", "container", service)
+    return result
 
 
 @app.get("/api/audit")

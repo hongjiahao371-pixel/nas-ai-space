@@ -1636,3 +1636,26 @@ input:not([type]) {
 
 /* ===== 阶段七（任务状态徽章与按钮对齐） ===== */
 .task-status { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; font-size: var(--fs-sm); text-transform: none; flex-shrink: 0; }
+
+/* ===== 阶段八（容器资源） ===== */
+.container-list { display: flex; flex-direction: column; gap: 8px; }
+.container-row { display: grid; grid-template-columns: 10px minmax(140px, 1.2fr) minmax(160px, 2fr) auto 96px auto auto; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--field); }
+.container-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+.container-dot.ok { background: var(--success); }
+.container-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.container-meta b { font-size: var(--fs-sm); }
+.container-meta small { color: var(--text-soft); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.container-mem { display: flex; flex-direction: column; gap: 4px; }
+.container-mem-bar { height: 6px; border-radius: 999px; background: var(--chip); overflow: hidden; }
+.container-mem-bar span { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.container-mem small { color: var(--text-soft); font-size: var(--fs-xs); }
+.container-restarts { font-size: var(--fs-xs); color: var(--text-soft); white-space: nowrap; }
+.container-restarts.warning { color: var(--warning); }
+.container-restarts.danger { color: var(--danger); }
+.container-row input[type="number"] { height: var(--ctl-h); padding: 0 var(--ctl-px-sm); border: 1px solid var(--line); border-radius: var(--radius-sm); outline: 0; background: var(--chip); color: var(--text); font-size: var(--fs-sm); }
+.container-row input[type="number"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.container-row .secondary, .container-row .danger { height: var(--ctl-h); padding: 0 var(--ctl-px); border-radius: var(--radius-sm); font-size: var(--fs-sm); }
+@media (max-width: 900px) {
+  .container-row { grid-template-columns: 10px 1fr auto; grid-auto-rows: auto; }
+  .container-mem, .container-restarts { grid-column: 2 / -1; }
+}

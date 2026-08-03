@@ -62,6 +62,7 @@ services:
       NAS_AI_TRANSCRIPTION_MODEL: ${NAS_AI_TRANSCRIPTION_MODEL:-Systran/faster-whisper-tiny}
       NAS_AI_QDRANT_URL: http://qdrant:6333
       NAS_AI_VECTORS_ON_DISK: ${NAS_AI_VECTORS_ON_DISK:-true}
+      NAS_AI_OPS_URL: http://ops:9100
     volumes:
       - ./data:/opt/nas-ai-space/data
       - ${NAS_LIBRARY_PATH:-./library}:/library:ro
@@ -186,7 +187,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=256m
-    mem_limit: ${NAS_AI_VISION_MEM_LIMIT:-3072m}
+    mem_limit: ${NAS_AI_VISION_MEM_LIMIT:-4096m}
     logging: *logging-default
 
   embedding:
@@ -279,6 +280,33 @@ services:
     mem_limit: ${NAS_AI_SPEECH_MEM_LIMIT:-768m}
     logging: *logging-default
 
+  # 容器资源代理：唯一挂载 docker.sock 的特权边车，只在 compose 内网监听（不发布端口），
+  # 供 app 通过 http://ops:9100 查询容器状态、在线调整内存上限和重启白名单容器
+  ops:
+    build:
+      context: .
+      dockerfile: Dockerfile.ops
+      args:
+        NAS_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
+    image: nas-ai-ops:local
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      # docker.sock 必须可写：docker update / restart 需要，全栈仅 ops 挂载
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ops-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    mem_limit: 128m
+    logging: *logging-default
+
 volumes:
   qdrant-data:
   qdrant-snapshots:
+  ops-data:

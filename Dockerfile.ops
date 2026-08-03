@@ -1,0 +1,14 @@
+ARG NAS_BASE_IMAGE=python:3.11-slim
+FROM ${NAS_BASE_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# 纯 stdlib，无需安装依赖；保持 root 运行（docker.sock 访问需要），
+# 安全边界由 compose 的 no-new-privileges / read_only / 不发布端口承担
+WORKDIR /opt/nas-ai-ops
+COPY docker/ops_agent.py ./ops_agent.py
+
+# 基础镜像的 entrypoint 会写 /etc/localtime，与 read_only 根文件系统冲突，必须清空
+ENTRYPOINT []
+CMD ["python", "ops_agent.py"]

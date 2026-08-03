@@ -400,7 +400,7 @@ function showView(view) {
   if (view === 'recycle') loadRecycle();
   if (view === 'hardware') loadSystem();
   if (view === 'users') loadUsers();
-  if (view === 'operations') loadOperations();
+  if (view === 'operations') { loadOperations(); loadContainers(); }
   if (view === 'projects') loadProjects();
   if (view === 'project' && state.currentProjectId) loadProjectWorkspace(state.currentProjectId);
   if (view === 'reviews') loadAllReviewTasks();
@@ -1546,6 +1546,44 @@ async function loadOperations() {
       : '<div class="empty-state compact"><b>暂无操作记录</b></div>';
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+// 阶段八（容器资源）：ops 边车代理的容器面板
+const OPS_SERVICE_LABELS = { app: '应用', vision: '视觉识别', embedding: '语义向量', qdrant: '向量数据库', speech: '语音转写' };
+
+function containerRow(item) {
+  const usage = Number(item.mem_usage_bytes || 0);
+  const limit = Number(item.mem_limit_bytes || 0);
+  const percent = limit ? Math.min(100, (usage / limit) * 100) : 0;
+  const running = item.status === 'running';
+  const limitMb = limit ? Math.round(limit / 1024 / 1024) : '';
+  const restartClass = item.oom_killed ? 'danger' : Number(item.restart_count) > 0 ? 'warning' : '';
+  return `<div class="container-row">
+    <i class="container-dot ${running ? 'ok' : ''}"></i>
+    <div class="container-meta"><b>${esc(OPS_SERVICE_LABELS[item.service] || item.service)}</b><small>${esc(item.name)} · ${esc(item.status)}</small></div>
+    <div class="container-mem"><div class="container-mem-bar"><span style="width:${percent.toFixed(1)}%"></span></div><small>${fmtBytes(usage)} / ${limit ? fmtBytes(limit) : '无上限'}</small></div>
+    <span class="container-restarts ${restartClass}" title="${item.oom_killed ? '曾被 OOM 终止，建议调高内存上限' : ''}">重启 ${fmtCount(item.restart_count)}${item.oom_killed ? ' · OOM' : ''}</span>
+    <input type="number" min="256" max="8192" step="1" value="${limitMb}" aria-label="内存上限（MB）" data-memory-input="${esc(item.service)}">
+    <button class="secondary" data-apply-memory="${esc(item.service)}">应用</button>
+    <button class="danger" data-restart-container="${esc(item.service)}">重启</button>
+  </div>`;
+}
+
+async function loadContainers() {
+  if (!isAdmin()) return;
+  const list = $('#containerList');
+  const badge = $('#containersBadge');
+  if (!list) return;
+  try {
+    const data = await api('/api/ops/containers');
+    badge.textContent = '代理在线';
+    badge.classList.remove('warning');
+    list.innerHTML = (data.containers || []).map(containerRow).join('');
+  } catch (error) {
+    badge.textContent = '资源代理不可用';
+    badge.classList.add('warning');
+    list.innerHTML = `<div class="empty-state compact"><b>资源代理不可用</b><p>${esc(error.message)}</p></div>`;
   }
 }
 
@@ -2731,6 +2769,41 @@ document.addEventListener('click', async event => {
     } catch (error) { toast(error.message, true); }
     return;
   }
+  // 阶段八（容器资源）：在线调整内存上限 / 重启容器
+  const applyMemory = event.target.closest('[data-apply-memory]');
+  if (applyMemory) {
+    const service = applyMemory.dataset.applyMemory;
+    const input = document.querySelector(`[data-memory-input="${service}"]`);
+    const mb = Math.round(Number(input?.value));
+    if (!Number.isInteger(mb) || mb < 256 || mb > 8192) { toast('内存上限需为 256-8192 之间的整数 MB', true); return; }
+    try {
+      const result = await api(`/api/ops/containers/${encodeURIComponent(service)}/memory`, {
+        method: 'POST',
+        body: JSON.stringify({ mb }),
+      });
+      toast(`内存上限已调整为 ${result.mem_limit_mb} MB`);
+      loadContainers();
+    } catch (error) { toast(error.message, true); loadContainers(); }
+    return;
+  }
+  const restartContainer = event.target.closest('[data-restart-container]');
+  if (restartContainer) {
+    const service = restartContainer.dataset.restartContainer;
+    const label = OPS_SERVICE_LABELS[service] || service;
+    const self = service === 'app';
+    if (!(await confirmDialog({
+      title: `重启${label}容器`,
+      body: self ? '重启应用容器期间页面将短暂断开，稍后请手动刷新。' : `重启${label}容器？进行中的任务可能中断。`,
+      danger: true,
+      confirmText: '重启',
+    }))) return;
+    try {
+      await api(`/api/ops/containers/${encodeURIComponent(service)}/restart`, { method: 'POST' });
+      toast(self ? '应用容器正在重启，页面将短暂断开' : `${label}容器正在重启`);
+      loadContainers();
+    } catch (error) { toast(error.message, true); loadContainers(); }
+    return;
+  }
   if (event.target.closest('#refreshRecycle')) return loadRecycle();
   const recycleFile = event.target.closest('[data-recycle-file]');
   if (recycleFile) {
@@ -3810,6 +3883,11 @@ setInterval(() => {
 setInterval(() => {
   if (state.authReady && !state.publicMode && !document.hidden && $('#view-operations').classList.contains('active')) loadOperations();
 }, 60000);
+
+// 阶段八（容器资源）：运维视图激活且页面可见时 10 秒刷新容器面板
+setInterval(() => {
+  if (state.authReady && !state.publicMode && !document.hidden && $('#view-operations').classList.contains('active')) loadContainers();
+}, 10000);
 
 setInterval(() => {
   if (state.authReady && !state.publicMode && !document.hidden) loadNotifications();

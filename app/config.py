@@ -88,6 +88,7 @@ class Settings:
     qdrant_url: str
     qdrant_collection: str
     vectors_on_disk: bool
+    ops_url: str
     face_detection_model: Path
     face_recognition_model: Path
     face_match_threshold: float
@@ -181,6 +182,7 @@ class Settings:
             qdrant_url=os.getenv("NAS_AI_QDRANT_URL", "http://qdrant:6333").strip().rstrip("/"),
             qdrant_collection=os.getenv("NAS_AI_QDRANT_COLLECTION", "nas_ai_chunks").strip(),
             vectors_on_disk=_bool_env("NAS_AI_VECTORS_ON_DISK", True),
+            ops_url=os.getenv("NAS_AI_OPS_URL", "http://ops:9100").strip().rstrip("/"),
             face_detection_model=Path(os.getenv(
                 "NAS_AI_FACE_DETECTION_MODEL",
                 str(model_dir / "face_detection_yunet_2023mar.onnx"),

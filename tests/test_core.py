@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -12,9 +13,9 @@ import zipfile
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from importlib.util import find_spec
+from importlib.util import find_spec, module_from_spec, spec_from_file_location
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -66,6 +67,13 @@ from app.services.scanner import scan_library
 from app.services.search import SearchService, _partial_coverage_cap, _query_groups
 from app.services.watcher import LibraryWatcher
 from app.services.workspaces import WorkspaceService
+
+# ops 边车是纯 stdlib 脚本（docker/ 不是包），按文件路径加载以单测其校验与持久化逻辑
+_OPS_AGENT_SPEC = spec_from_file_location(
+    "ops_agent", Path(__file__).resolve().parent.parent / "docker" / "ops_agent.py"
+)
+ops_agent = module_from_spec(_OPS_AGENT_SPEC)
+_OPS_AGENT_SPEC.loader.exec_module(ops_agent)
 
 
 class NullVectors:
@@ -2891,3 +2899,209 @@ class BackendRegressionPerfTests(unittest.TestCase):
                 self.assertEqual(submit.await_count, 4)
 
         asyncio.run(scenario())
+
+
+class OpsAgentTests(unittest.TestCase):
+    def test_validate_service_whitelist(self) -> None:
+        self.assertEqual(ops_agent.validate_service("app"), "nas-ai-space-app-1")
+        self.assertEqual(ops_agent.validate_service("speech"), "nas-ai-space-speech-1")
+        for bad in ("nginx", "", "ops", "app1", "../app"):
+            with self.assertRaises(ValueError):
+                ops_agent.validate_service(bad)
+
+    def test_validate_memory_mb_bounds_and_type(self) -> None:
+        self.assertEqual(ops_agent.validate_memory_mb(256), 256)
+        self.assertEqual(ops_agent.validate_memory_mb(8192), 8192)
+        for bad in (0, 255, 8193, -1):
+            with self.assertRaises(ValueError):
+                ops_agent.validate_memory_mb(bad)
+        for bad in (True, 512.0, "512", None):
+            with self.assertRaises(ValueError):
+                ops_agent.validate_memory_mb(bad)
+
+    def test_set_memory_rejects_before_docker_call(self) -> None:
+        calls = []
+        with patch.object(ops_agent, "docker_request", side_effect=lambda *args: calls.append(args)):
+            with self.assertRaises(ValueError):
+                ops_agent.set_memory("vision", 100)
+            with self.assertRaises(ValueError):
+                ops_agent.set_memory("nginx", 512)
+        self.assertEqual(calls, [])
+
+    def test_overrides_roundtrip_and_reapply(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nas-ai-ops-") as directory:
+            path = Path(directory) / "overrides.json"
+            calls = []
+
+            def fake_docker(method, url, body=None):
+                calls.append((method, url, body))
+                return {}
+
+            with patch.object(ops_agent, "OVERRIDES_PATH", path), \
+                    patch.object(ops_agent, "docker_request", side_effect=fake_docker):
+                result = ops_agent.set_memory("vision", 3072)
+                self.assertEqual(result["mem_limit_mb"], 3072)
+                self.assertEqual(result["mem_limit_bytes"], 3072 * 1024 * 1024)
+                self.assertEqual(calls[-1], (
+                    "POST",
+                    "/containers/nas-ai-space-vision-1/update",
+                    {"Memory": 3072 * 1024 * 1024, "MemorySwap": -1},
+                ))
+                ops_agent.set_memory("speech", 512)
+                self.assertEqual(ops_agent.load_overrides(), {"vision": 3072, "speech": 512})
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["vision"], 3072)
+                # 启动重放：compose 重建容器后保持管理员设定
+                calls.clear()
+                ops_agent.apply_overrides()
+                self.assertEqual(len(calls), 2)
+                self.assertTrue(all(call[0] == "POST" and call[1].endswith("/update") for call in calls))
+            # 覆盖文件损坏时按空处理，不阻塞启动
+            path.write_text("{bad json", encoding="utf-8")
+            with patch.object(ops_agent, "OVERRIDES_PATH", path):
+                self.assertEqual(ops_agent.load_overrides(), {})
+
+    def test_list_containers_parses_engine_payload(self) -> None:
+        payloads = {
+            ("GET", "/containers/nas-ai-space-app-1/json"): {
+                "Name": "/nas-ai-space-app-1",
+                "RestartCount": 2,
+                "State": {"Status": "running", "Running": True, "OOMKilled": False},
+                "HostConfig": {"Memory": 1610612736},
+            },
+            ("GET", "/containers/nas-ai-space-app-1/stats?stream=false"): {
+                "memory_stats": {"usage": 805306368},
+            },
+        }
+
+        def fake_docker(method, url, body=None):
+            if (method, url) in payloads:
+                return payloads[(method, url)]
+            return {
+                "Name": "",
+                "RestartCount": 0,
+                "State": {"Status": "exited", "Running": False, "OOMKilled": True},
+                "HostConfig": {"Memory": 0},
+            }
+
+        with patch.object(ops_agent, "docker_request", side_effect=fake_docker):
+            items = ops_agent.list_containers()
+        self.assertEqual(len(items), 5)
+        app_item = items[0]
+        self.assertEqual(app_item["service"], "app")
+        self.assertEqual(app_item["name"], "nas-ai-space-app-1")
+        self.assertEqual(app_item["status"], "running")
+        self.assertEqual(app_item["mem_usage_bytes"], 805306368)
+        self.assertEqual(app_item["mem_limit_bytes"], 1610612736)
+        self.assertEqual(app_item["restart_count"], 2)
+        self.assertFalse(app_item["oom_killed"])
+        qdrant_item = next(item for item in items if item["service"] == "qdrant")
+        self.assertEqual(qdrant_item["status"], "exited")
+        self.assertEqual(qdrant_item["mem_usage_bytes"], 0)
+        self.assertTrue(qdrant_item["oom_killed"])
+
+
+class _FakeOpsResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class OpsProxyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client_context = TestClient(app)
+        cls.client = cls.client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client_context.__exit__(None, None, None)
+
+    def test_non_admin_forbidden_and_anonymous_unauthorized(self) -> None:
+        username = f"ops-member-{time.time_ns()}"
+        created = self.client.post("/api/users", json={
+            "username": username,
+            "display_name": "运维成员",
+            "password": "strong-password",
+            "role": "member",
+            "library_ids": [],
+        })
+        self.assertEqual(created.status_code, 201)
+        login = self.client.post("/api/auth/login", json={"username": username, "password": "strong-password"})
+        self.assertEqual(login.status_code, 200)
+        headers = {"Authorization": f"Bearer {login.json()['token']}"}
+        self.assertEqual(self.client.get("/api/ops/containers", headers=headers).status_code, 403)
+        self.assertEqual(self.client.post("/api/ops/containers/app/restart", headers=headers).status_code, 403)
+        self.assertEqual(
+            self.client.post("/api/ops/containers/app/memory", json={"mb": 512}, headers=headers).status_code,
+            403,
+        )
+        secured = replace(settings, api_token="ops-proxy-token")
+        with patch("app.main.settings", secured):
+            self.assertEqual(self.client.get("/api/ops/containers").status_code, 401)
+
+    def test_service_whitelist_and_memory_range_rejected(self) -> None:
+        self.assertEqual(self.client.post("/api/ops/containers/nginx/memory", json={"mb": 512}).status_code, 404)
+        self.assertEqual(self.client.post("/api/ops/containers/nginx/restart").status_code, 404)
+        self.assertEqual(self.client.post("/api/ops/containers/app/memory", json={"mb": 100}).status_code, 422)
+        self.assertEqual(self.client.post("/api/ops/containers/app/memory", json={"mb": 99999}).status_code, 422)
+
+    def test_ops_unreachable_returns_503(self) -> None:
+        import httpx
+
+        broken = Mock()
+        broken.request.side_effect = httpx.ConnectError("connection refused")
+        with patch("app.main._ops_http", return_value=broken):
+            response = self.client.get("/api/ops/containers")
+            restart = self.client.post("/api/ops/containers/vision/restart")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("资源代理不可用", response.json()["detail"])
+        self.assertEqual(restart.status_code, 503)
+
+    def test_proxy_success_payloads(self) -> None:
+        containers = {"containers": [{
+            "name": "nas-ai-space-app-1",
+            "service": "app",
+            "status": "running",
+            "mem_usage_bytes": 805306368,
+            "mem_limit_bytes": 1610612736,
+            "restart_count": 0,
+            "oom_killed": False,
+        }]}
+        client = Mock()
+        client.request.return_value = _FakeOpsResponse(200, containers)
+        with patch("app.main._ops_http", return_value=client):
+            response = self.client.get("/api/ops/containers")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["containers"][0]["service"], "app")
+
+        client.request.return_value = _FakeOpsResponse(200, {
+            "service": "vision",
+            "mem_limit_mb": 3072,
+            "mem_limit_bytes": 3072 * 1024 * 1024,
+        })
+        with patch("app.main._ops_http", return_value=client):
+            response = self.client.post("/api/ops/containers/vision/memory", json={"mb": 3072})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mem_limit_mb"], 3072)
+        client.request.assert_called_with(
+            "POST", f"{settings.ops_url}/containers/vision/memory", json={"mb": 3072},
+        )
+
+        client.request.return_value = _FakeOpsResponse(200, {"service": "app", "restarting": True})
+        with patch("app.main._ops_http", return_value=client):
+            response = self.client.post("/api/ops/containers/app/restart")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["restarting"])
+        self.assertIn("短暂断开", response.json()["notice"])
+
+    def test_ops_error_detail_is_forwarded(self) -> None:
+        client = Mock()
+        client.request.return_value = _FakeOpsResponse(400, {"detail": "内存上限需在 256-8192 MB 之间"})
+        with patch("app.main._ops_http", return_value=client):
+            response = self.client.post("/api/ops/containers/vision/memory", json={"mb": 512})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("资源代理异常", response.json()["detail"])
+        self.assertIn("256-8192", response.json()["detail"])
