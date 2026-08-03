@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -536,6 +537,8 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self._write_lock = threading.RLock()
+        # resolve_session 刷新 last_seen_at 的进程内节流表（session_id -> 上次写入的 monotonic 时间）
+        self._session_seen_at: dict[int, float] = {}
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -1402,6 +1405,24 @@ class Database:
                 return row
         return None
 
+    def active_task_with_file(self, task_type: str, file_id: int) -> dict[str, Any] | None:
+        rows = self.fetchall(
+            """SELECT * FROM tasks WHERE type = ? AND status IN ('pending', 'running')
+               ORDER BY priority DESC, id""",
+            (task_type,),
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            file_ids = payload.get("file_ids") or []
+            if int(file_id) in {int(item) for item in file_ids}:
+                row["payload"] = payload
+                row.pop("payload_json", None)
+                return row
+        return None
+
     def active_task_count(self) -> int:
         row = self.fetchone("SELECT COUNT(*) AS count FROM tasks WHERE status IN ('pending', 'running')")
         return int(row["count"] if row else 0)
@@ -2092,7 +2113,16 @@ class Database:
             (token_hash, now),
         )
         if row:
-            self.execute("UPDATE user_sessions SET last_seen_at = ? WHERE id = ?", (now, row["session_id"]))
+            session_id = int(row["session_id"])
+            # last_seen_at 无消费方（过期判断只看 expires_at），按会话节流 600 秒，
+            # 避免每个请求都持全局写锁做一次 UPDATE
+            last_write = self._session_seen_at.get(session_id)
+            now_monotonic = time.monotonic()
+            if last_write is None or now_monotonic - last_write > 600:
+                self.execute("UPDATE user_sessions SET last_seen_at = ? WHERE id = ?", (now, session_id))
+                if len(self._session_seen_at) > 4096:
+                    self._session_seen_at.clear()
+                self._session_seen_at[session_id] = now_monotonic
             row["library_ids"] = [
                 int(item["library_id"])
                 for item in self.fetchall("SELECT library_id FROM library_permissions WHERE user_id = ?", (row["id"],))

@@ -1467,7 +1467,8 @@ function userCard(user) {
     ? '全部媒体库'
     : user.library_ids.map(id => state.libraries.find(item => item.id === id)?.name).filter(Boolean).join('、') || '未授权媒体库';
   const roleLabel = user.role === 'owner' ? '系统所有者' : user.role === 'admin' ? '管理员' : '普通成员';
-  return `<article class="user-card"><span class="card-leading">${icon('user')}</span><div><h3>${esc(user.display_name)} <small>@${esc(user.username)}</small></h3><p>${roleLabel} · ${esc(libraries)}</p><span class="user-state ${user.enabled ? 'enabled' : ''}">${user.enabled ? '已启用' : '已停用'}</span></div>${canEdit ? `<button class="secondary" data-edit-user="${user.id}">编辑</button>` : '<span class="project-state">受保护</span>'}</article>`;
+  const initial = (user.display_name || user.username || '?').trim().charAt(0).toUpperCase() || '?';
+  return `<article class="user-card"><span class="user-avatar role-${esc(user.role)}">${esc(initial)}</span><div class="user-card-main"><h3>${esc(user.display_name)}<small>@${esc(user.username)}</small></h3><p><span class="role-badge role-${esc(user.role)}">${roleLabel}</span><span class="user-state ${user.enabled ? 'enabled' : ''}"><i></i>${user.enabled ? '已启用' : '已停用'}</span></p><small class="user-libs">${esc(libraries)}</small></div>${canEdit ? `<button class="secondary" data-edit-user="${user.id}">编辑</button>` : '<span class="project-state">受保护</span>'}</article>`;
 }
 
 async function loadUsers() {
@@ -1497,7 +1498,7 @@ function openUserModal(user = null) {
   form.elements.enabled.checked = user?.enabled !== 0;
   form.elements.enabled.disabled = owner;
   $('#userModalTitle').textContent = user ? '编辑用户' : '添加用户';
-  $('#permissionList').innerHTML = state.libraries.map(library => `<label><input type="checkbox" name="library_ids" value="${library.id}" ${(owner || user?.library_ids.includes(library.id)) ? 'checked' : ''} ${owner ? 'disabled' : ''}><span>${esc(library.name)}</span><small>${esc(library.path)}</small></label>`).join('');
+  $('#permissionList').innerHTML = state.libraries.map(library => `<label><input type="checkbox" name="library_ids" value="${library.id}" ${(owner || user?.library_ids.includes(library.id)) ? 'checked' : ''} ${owner ? 'disabled' : ''}><span class="perm-name">${esc(library.name)}</span><small class="perm-path">${esc(library.path)}</small></label>`).join('');
   openModal($('#userModal'));
 }
 
@@ -4008,6 +4009,26 @@ if (cleanLocation.searchParams.has('token')) {
   cleanLocation.searchParams.delete('token');
   history.replaceState(null, '', `${cleanLocation.pathname}${cleanLocation.search}${cleanLocation.hash}`);
 }
+
+// 多标签页会话同步：其他标签页登录/换号/退出时同步本页令牌并重新 boot
+// （storage 事件只在非写入方的标签页触发，天然免疫本页自己写 localStorage 的回声）
+window.addEventListener('storage', event => {
+  if (state.publicMode || event.key !== 'nasAiToken') return;
+  const token = event.newValue || '';
+  if (token === state.token) return;
+  state.token = token;
+  state.user = null;
+  state.authReady = false;
+  if (token) {
+    closeModal($('#tokenModal'));
+    boot();
+    return;
+  }
+  // 令牌已在其他标签页清除：回到登录流程
+  $('#tokenForm [name=token]').value = '';
+  applyRole();
+  openModal($('#tokenModal'));
+});
 
 if (state.publicMode) {
   bootPublicShare();

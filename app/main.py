@@ -399,7 +399,8 @@ def require_auth(
                 "library_ids": user["library_ids"],
                 "auth_type": "session",
             }
-    if not settings.api_token:
+    # 匿名 owner 兜底只放行纯首次启动窗口（users 表为空）；bootstrap 完成后无凭据一律 401
+    if not settings.api_token and state.database.user_count() == 0:
         return {
             "user_id": None,
             "username": "system",
@@ -766,7 +767,7 @@ def _public_file(row: dict[str, Any]) -> dict[str, Any]:
 
 def _login_failure_key(request: Request, username: str) -> str:
     client = request.client.host if request.client else "unknown"
-    return f"{client}\0{username.casefold()}"
+    return f"{client}\0{username.strip().casefold()}"
 
 
 def _prune_rate_limits(
@@ -791,12 +792,22 @@ def _login_retry_after(key: str) -> int:
     with LOGIN_FAILURES_LOCK:
         _prune_rate_limits(LOGIN_FAILURES, now, 900)
         client_key = f"client:{key.split(chr(0), 1)[0]}"
+        # 纯账号名全局桶：跨 IP 计数，堵住多 IP 密码喷洒
+        account_key = f"account:{key.split(chr(0), 1)[1]}"
         failures = LOGIN_FAILURES.get(key, [])
         client_failures = LOGIN_FAILURES.get(client_key, [])
-        if len(failures) < 5 and len(client_failures) < 20:
+        account_failures = LOGIN_FAILURES.get(account_key, [])
+        if len(failures) < 5 and len(client_failures) < 20 and len(account_failures) < 30:
             return 0
-        threshold = failures[-5] if len(failures) >= 5 else client_failures[-20]
-        return max(1, round(900 - (now - threshold)))
+        thresholds = []
+        if len(failures) >= 5:
+            thresholds.append(failures[-5])
+        if len(client_failures) >= 20:
+            thresholds.append(client_failures[-20])
+        if len(account_failures) >= 30:
+            thresholds.append(account_failures[-30])
+        # Retry-After 取各超限桶中的最大等待时长（即最早脱离窗口的那次失败）
+        return max(1, round(900 - (now - min(thresholds))))
 
 
 def _register_login_failure(key: str) -> None:
@@ -804,8 +815,10 @@ def _register_login_failure(key: str) -> None:
     with LOGIN_FAILURES_LOCK:
         _prune_rate_limits(LOGIN_FAILURES, now, 900)
         client_key = f"client:{key.split(chr(0), 1)[0]}"
+        account_key = f"account:{key.split(chr(0), 1)[1]}"
         LOGIN_FAILURES[key] = [*LOGIN_FAILURES.get(key, []), now][-20:]
         LOGIN_FAILURES[client_key] = [*LOGIN_FAILURES.get(client_key, []), now][-40:]
+        LOGIN_FAILURES[account_key] = [*LOGIN_FAILURES.get(account_key, []), now][-60:]
 
 
 def _public_rate_key(request: Request, token: str) -> str:
@@ -1181,8 +1194,8 @@ def update_user(user_id: int, payload: UserUpdate, principal: Auth) -> dict[str,
 
 
 @app.get("/api/system")
-def system(_: Auth) -> dict[str, Any]:
-    return {
+def system(principal: Auth) -> dict[str, Any]:
+    result = {
         "hardware": detect_hardware().as_dict(),
         "metrics": runtime_metrics(),
         "local_ai": state.ai.health(),
@@ -1227,6 +1240,13 @@ def system(_: Auth) -> dict[str, Any]:
             },
         },
     }
+    if not _is_admin(principal):
+        # 非管理员不暴露 NAS 绝对路径与内部模型端点等拓扑信息（前端算力卡片不依赖这些字段）
+        configuration = result["configuration"]
+        for key in ("scan_root", "scan_roots", "upload_root", "recycle_root", "model_endpoints"):
+            configuration.pop(key, None)
+        result["local_ai"].pop("endpoints", None)
+    return result
 
 
 @app.get("/api/system/metrics")
@@ -2965,25 +2985,27 @@ def similar_files(
 
 
 @app.post("/api/files/{file_id}/reindex", status_code=202)
-async def reindex_file(file_id: int, principal: Auth) -> dict[str, int]:
+async def reindex_file(file_id: int, principal: Auth) -> dict[str, Any]:
     _visible_file(file_id, principal)
     state.database.reset_file_retry(file_id, pending=True)
-    task_id = await state.tasks.submit(
-        "index_files", {"file_ids": [file_id]}, priority=8, user_id=principal["user_id"]
+    # 按文件去重：同一文件的排队/进行中的重索引任务直接复用，避免重复提交堆积重资源任务
+    task_id, existing = await state.tasks.submit_unique_file(
+        "index_files", file_id, {"file_ids": [file_id]}, priority=8, user_id=principal["user_id"]
     )
-    return {"task_id": task_id}
+    return {"task_id": task_id, "existing": existing}
 
 
 @app.put("/api/files/{file_id}/caption", status_code=202)
 async def update_file_caption(file_id: int, payload: CaptionUpdate, principal: Auth) -> dict[str, Any]:
     _visible_file(file_id, principal)
     state.database.set_manual_caption(file_id, payload.caption)
-    task_id = await state.tasks.submit(
-        "index_files", {"file_ids": [file_id], "source": "manual_caption"}, priority=9,
+    # 手动描述变更触发的重建与重索引同属 index_files，按同一文件去重合并
+    task_id, existing = await state.tasks.submit_unique_file(
+        "index_files", file_id, {"file_ids": [file_id], "source": "manual_caption"}, priority=9,
         user_id=principal.get("user_id"),
     )
     _audit(principal, "file.caption", "file", str(file_id), {"manual": bool(payload.caption.strip())})
-    return {"task_id": task_id, "manual": bool(payload.caption.strip())}
+    return {"task_id": task_id, "existing": existing, "manual": bool(payload.caption.strip())}
 
 
 @app.post("/api/files/{file_id}/feedback")

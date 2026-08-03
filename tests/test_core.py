@@ -1115,6 +1115,10 @@ class APITests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.client_context.__exit__(None, None, None)
 
+    def tearDown(self) -> None:
+        # 匿名 owner 兜底只在 users 表为空时生效，每个用例结束后清掉测试账号避免相互影响
+        state.database.execute("DELETE FROM users")
+
     def test_health_and_static_frontend(self) -> None:
         health = self.client.get("/api/health")
         self.assertEqual(health.status_code, 200)
@@ -1829,14 +1833,21 @@ class APITests(unittest.TestCase):
             "username": username,
             "display_name": "通知用户",
             "password": "notify-password-1",
-            "role": "member",
+            "role": "admin",
         })
         self.assertEqual(created.status_code, 201)
         user_id = created.json()["id"]
+        # users 表已有账号后匿名 owner 兜底失效，后续管理操作一律携带该管理员的会话
+        login = self.client.post("/api/auth/login", json={
+            "username": username,
+            "password": "notify-password-1",
+        })
+        self.assertEqual(login.status_code, 200)
+        headers = {"Authorization": f"Bearer {login.json()['token']}"}
         membership = self.client.put(f"/api/projects/{project_id}/members", json={
             "user_id": user_id,
             "role": "reviewer",
-        })
+        }, headers=headers)
         self.assertEqual(membership.status_code, 200)
         guest_two = self.client.post(f"/api/public/shares/{token}/comments", json={
             "asset_id": asset_id,
@@ -1845,12 +1856,6 @@ class APITests(unittest.TestCase):
             "access_code": "",
         })
         self.assertEqual(guest_two.status_code, 201)
-        login = self.client.post("/api/auth/login", json={
-            "username": username,
-            "password": "notify-password-1",
-        })
-        self.assertEqual(login.status_code, 200)
-        headers = {"Authorization": f"Bearer {login.json()['token']}"}
         notifications = self.client.get("/api/notifications", headers=headers)
         self.assertEqual(notifications.status_code, 200)
         self.assertGreaterEqual(notifications.json()["unread"], 1)
@@ -1871,7 +1876,7 @@ class APITests(unittest.TestCase):
 
         task_id = state.database.create_task("analyze_duplicates", {}, user_id=user_id)
         state.database.fail_task(task_id, "测试失败")
-        retry = self.client.post(f"/api/tasks/{task_id}/retry")
+        retry = self.client.post(f"/api/tasks/{task_id}/retry", headers=headers)
         self.assertEqual(retry.status_code, 202)
         status = "pending"
         for _ in range(100):
@@ -1887,11 +1892,11 @@ class APITests(unittest.TestCase):
         self.assertEqual(len(task_notifications), 1)
         self.assertIn("完成", task_notifications[0]["title"])
 
-        deleted = self.client.delete(f"/api/comments/{external_id}")
+        deleted = self.client.delete(f"/api/comments/{external_id}", headers=headers)
         self.assertEqual(deleted.status_code, 200)
         self.assertFalse(stored.exists())
         self.assertFalse((settings.data_dir / "comment-attachments" / traversal.json()["name"]).exists())
-        removed = self.client.delete(f"/api/projects/{project_id}")
+        removed = self.client.delete(f"/api/projects/{project_id}", headers=headers)
         self.assertEqual(removed.status_code, 200)
         self.assertFalse(guest_stored.exists())
 
@@ -1947,6 +1952,10 @@ class SecurityHardeningTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.client_context.__exit__(None, None, None)
+
+    def tearDown(self) -> None:
+        # 匿名 owner 兜底只在 users 表为空时生效，每个用例结束后清掉测试账号避免相互影响
+        state.database.execute("DELETE FROM users")
 
     def _shared_asset(self, name: str) -> tuple[int, int]:
         upload = self.client.post(
@@ -2359,6 +2368,10 @@ class PreviewSecurityTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.client_context.__exit__(None, None, None)
+
+    def tearDown(self) -> None:
+        # 匿名 owner 兜底只在 users 表为空时生效，每个用例结束后清掉测试账号避免相互影响
+        state.database.execute("DELETE FROM users")
 
     def _temp_db(self, prefix: str):
         temp = tempfile.TemporaryDirectory(prefix=prefix)
@@ -3019,6 +3032,10 @@ class OpsProxyTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.client_context.__exit__(None, None, None)
 
+    def tearDown(self) -> None:
+        # 匿名 owner 兜底只在 users 表为空时生效，每个用例结束后清掉测试账号避免相互影响
+        state.database.execute("DELETE FROM users")
+
     def test_non_admin_forbidden_and_anonymous_unauthorized(self) -> None:
         username = f"ops-member-{time.time_ns()}"
         created = self.client.post("/api/users", json={
@@ -3105,3 +3122,158 @@ class OpsProxyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertIn("资源代理异常", response.json()["detail"])
         self.assertIn("256-8192", response.json()["detail"])
+
+
+class AccountSecurityReviewTests(unittest.TestCase):
+    """账号体系设计审查修复的配套测试（匿名兜底/会话节流/登录限流/任务去重/系统信息脱敏）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client_context = TestClient(app)
+        cls.client = cls.client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client_context.__exit__(None, None, None)
+
+    def tearDown(self) -> None:
+        state.database.execute("DELETE FROM users")
+        LOGIN_FAILURES.clear()
+
+    def _temp_database(self, prefix: str) -> Database:
+        temp = tempfile.TemporaryDirectory(prefix=prefix)
+        self.addCleanup(temp.cleanup)
+        database = Database(Path(temp.name) / "index.db")
+        database.initialize()
+        return database
+
+    def test_anonymous_owner_fallback_only_before_bootstrap(self) -> None:
+        database = self._temp_database("nas-ai-anon-")
+        with patch.object(state, "database", database):
+            # 纯首次启动窗口（users 表为空）：匿名请求仍按本地 owner 放行
+            self.assertEqual(self.client.get("/api/system").status_code, 200)
+        database.create_user("occupied-admin", "已初始化管理员", "scrypt$16384$8$1$invalid$invalid", "owner", [])
+        with patch.object(state, "database", database):
+            # bootstrap 完成后无有效 token/会话一律 401
+            self.assertEqual(self.client.get("/api/system").status_code, 401)
+            # 公开端点不受影响
+            self.assertEqual(self.client.get("/api/health").status_code, 200)
+            self.assertEqual(self.client.get("/api/auth/bootstrap").status_code, 200)
+            login = self.client.post(
+                "/api/auth/login",
+                json={"username": "occupied-admin", "password": "wrong-password"},
+            )
+            self.assertEqual(login.status_code, 401)
+
+    def test_resolve_session_throttles_last_seen_writes(self) -> None:
+        from app.security import token_digest
+
+        database = self._temp_database("nas-ai-throttle-")
+        user = database.create_user("节流用户", "节流用户", "hash", "member", [])
+        token_hash = token_digest("throttle-token")
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="seconds")
+        database.create_session(int(user["id"]), token_hash, expires_at)
+        writes = 0
+        original_execute = database.execute
+
+        def counting_execute(query, params=()):
+            nonlocal writes
+            if "last_seen_at" in query:
+                writes += 1
+            return original_execute(query, params)
+
+        with patch.object(database, "execute", side_effect=counting_execute):
+            self.assertIsNotNone(database.resolve_session(token_hash))
+            self.assertIsNotNone(database.resolve_session(token_hash))
+        self.assertEqual(writes, 1)
+        # 距上次写入超过 600 秒后再次刷新
+        session_id = next(iter(database._session_seen_at))
+        database._session_seen_at[session_id] -= 601
+        with patch.object(database, "execute", side_effect=counting_execute):
+            self.assertIsNotNone(database.resolve_session(token_hash))
+        self.assertEqual(writes, 2)
+
+    def test_login_rate_limit_account_bucket_spans_ips(self) -> None:
+        from app.main import _login_failure_key, _login_retry_after, _register_login_failure
+
+        request = Mock()
+        request.client.host = "10.9.9.9"
+        # 限流 key 对账号名做大小写/空白规范化
+        self.assertEqual(_login_failure_key(request, "  Victim  "), "10.9.9.9\0victim")
+
+        LOGIN_FAILURES.clear()
+        try:
+            for index in range(30):
+                _register_login_failure(f"10.0.0.{index}\0victim")
+            # 第 31 个全新 IP 也命中同一账号的跨 IP 桶
+            self.assertGreaterEqual(_login_retry_after("192.168.1.1\0victim"), 1)
+            # 其它账号不受影响
+            self.assertEqual(_login_retry_after("192.168.1.1\0other-account"), 0)
+        finally:
+            LOGIN_FAILURES.clear()
+
+    def test_reindex_and_caption_submissions_dedupe_per_file(self) -> None:
+        library = state.database.create_library(f"去重库-{time.time_ns()}", str(SCAN_ROOT))
+        file_id = state.database.upsert_files([{
+            "library_id": int(library["id"]),
+            "path": str(SCAN_ROOT / f"dedup-{time.time_ns()}.txt"),
+            "relative_path": "dedup.txt",
+            "name": "dedup.txt",
+            "extension": ".txt",
+            "kind": "document",
+            "mime_type": "text/plain",
+            "size": 10,
+            "mtime_ns": 1,
+            "inode": 1,
+            "scan_token": "token-1",
+        }])[0][0]
+        # 同一文件已有排队中的 index_files 任务时，重复提交（含 caption 重建）自动合并
+        pending = state.database.create_task("index_files", {"file_ids": [file_id]}, 8)
+        reindex = self.client.post(f"/api/files/{file_id}/reindex")
+        self.assertEqual(reindex.status_code, 202)
+        self.assertEqual(reindex.json(), {"task_id": pending, "existing": True})
+        caption = self.client.put(f"/api/files/{file_id}/caption", json={"caption": "手动描述"})
+        self.assertEqual(caption.status_code, 202)
+        self.assertEqual(caption.json()["task_id"], pending)
+        self.assertTrue(caption.json()["existing"])
+        # 任务结束后再次提交会创建新任务
+        state.database.mark_task_cancelled(pending)
+        fresh = self.client.post(f"/api/files/{file_id}/reindex")
+        self.assertEqual(fresh.status_code, 202)
+        self.assertFalse(fresh.json()["existing"])
+        state.database.mark_task_cancelled(fresh.json()["task_id"])
+
+    def test_system_endpoint_masks_topology_for_members(self) -> None:
+        from app.security import token_digest
+
+        database = self._temp_database("nas-ai-mask-")
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="seconds")
+        member = database.create_user("普通成员", "普通成员", "hash", "member", [])
+        member_token = "mask-member-token"
+        database.create_session(int(member["id"]), token_digest(member_token), expires_at)
+        admin = database.create_user("管理员", "管理员", "hash", "admin", [])
+        admin_token = "mask-admin-token"
+        database.create_session(int(admin["id"]), token_digest(admin_token), expires_at)
+        with patch.object(state, "database", database):
+            member_view = self.client.get(
+                "/api/system",
+                headers={"Authorization": f"Bearer {member_token}"},
+            )
+            self.assertEqual(member_view.status_code, 200)
+            member_config = member_view.json()["configuration"]
+            for key in ("scan_root", "scan_roots", "upload_root", "recycle_root", "model_endpoints"):
+                self.assertNotIn(key, member_config)
+            # 前端 member 首页算力卡片依赖的字段保留
+            self.assertIn("indexing", member_config)
+            self.assertIn("hardware", member_view.json())
+            self.assertIn("metrics", member_view.json())
+            self.assertIn("configured", member_view.json()["local_ai"])
+            admin_view = self.client.get(
+                "/api/system",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            self.assertEqual(admin_view.status_code, 200)
+            admin_config = admin_view.json()["configuration"]
+            self.assertIn("scan_root", admin_config)
+            self.assertIn("upload_root", admin_config)
+            self.assertIn("model_endpoints", admin_config)

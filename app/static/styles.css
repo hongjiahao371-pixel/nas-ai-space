@@ -820,7 +820,7 @@ main { grid-column: 2; min-width: 0; }
 .modal-close:hover { background: var(--hover); color: var(--text); }
 .modal-card form { display: grid; gap: 13px; margin-top: 22px; }
 .modal-card label { color: var(--muted); font-size: var(--fs-sm); }
-.modal-card input { display: block; width: 100%; height: 40px; margin-top: 7px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: var(--field); color: var(--text); font-size: var(--fs-md); }
+.modal-card input:not([type="checkbox"]):not([type="radio"]) { display: block; width: 100%; height: 40px; margin-top: 7px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: var(--field); color: var(--text); font-size: var(--fs-md); }
 .modal-card .form-hint { margin-top: -3px; color: var(--muted-2); font-size: var(--fs-xs); line-height: 1.55; }
 .modal-card form .primary { margin-top: 3px; }
 .file-modal-card { width: min(1180px, 96vw); height: min(760px, 92vh); padding: 0; overflow: hidden; }
@@ -1663,3 +1663,51 @@ input:not([type]) {
 /* ===== 阶段九（帮助点点击弹层） ===== */
 .help-dot { cursor: pointer; }
 .help-tip { position: absolute; z-index: 90; max-width: 260px; padding: 8px 12px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text); font-size: var(--fs-sm); line-height: 1.5; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+
+/* ===== 阶段十（用户管理界面重排） ===== */
+/* 用户卡片：头像 + 名称/徽章 + 媒体库，修正名称字号过小的层级问题 */
+.user-avatar { width: 40px; height: 40px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: var(--fs-lg); font-weight: 600; color: #fff; background: var(--accent); flex-shrink: 0; }
+.user-avatar.role-owner { background: #8b5cf6; }
+.user-avatar.role-admin { background: var(--accent); }
+.user-avatar.role-member { background: #64748b; }
+.user-card { grid-template-columns: 40px 1fr auto; }
+.user-card h3 { margin: 0 0 5px; font-size: var(--fs-md); font-weight: 600; }
+.user-card h3 small { margin-left: 8px; font-size: var(--fs-sm); font-weight: 400; color: var(--muted); }
+.user-card p { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; }
+.role-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-size: var(--fs-xs); border: 1px solid var(--line); color: var(--text-soft); }
+.role-badge.role-owner { color: #a78bfa; border-color: rgba(139,92,246,.35); background: rgba(139,92,246,.1); }
+.role-badge.role-admin { color: var(--accent); border-color: rgba(59,130,246,.3); background: rgba(59,130,246,.08); }
+.user-state { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; font-size: var(--fs-xs); color: var(--muted); background: none; }
+.user-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--danger); }
+.user-state.enabled { color: var(--success); }
+.user-state.enabled i { background: var(--success); }
+.user-libs { display: block; color: var(--muted-2); font-size: var(--fs-xs); }
+/* 用户弹窗：分区完全对齐模态原生规范（gap 13px、label 默认色、radius 一致） */
+.form-section { display: grid; gap: 13px; padding-top: 16px; margin-top: 3px; border-top: 1px solid var(--line-soft); }
+.form-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.form-section > h3 { margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text-soft); }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+/* 媒体库权限组：软底分组 + 紧凑单行（勾选 + 名称 + 路径） */
+.perm-group { padding: 10px 12px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--inset); }
+.perm-group-label { display: block; margin-bottom: 6px; font-size: var(--fs-xs); color: var(--muted-2); }
+.permission-list { gap: 2px; max-height: 180px; }
+.permission-list label { grid-template-columns: auto 1fr auto; gap: 8px; padding: 6px 8px; background: transparent; border-radius: 7px; cursor: pointer; }
+.permission-list label:hover { background: var(--chip); }
+.permission-list .perm-name { overflow: hidden; font-size: var(--fs-sm); color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.permission-list .perm-path { grid-column: auto; color: var(--muted-2); font-size: var(--fs-xs); }
+.form-footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+@media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } }
+
+/* ===== 阶段十一（勾选/单选控件统一） ===== */
+input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor: not-allowed; opacity: .55; }
+.check-row { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+
+/* 弹窗内 select：.modal-card 背景简写会覆盖全局箭头，补回 */
+.modal-card select { background: var(--ctl-arrow) no-repeat right 10px center / 12px var(--field); }
+
+/* 上传拖放区：隐藏原生文件输入，整个区域可点，标题做成按钮样 */
+.file-drop { position: relative; }
+.file-drop input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
+.file-drop .drop-title { display: inline-flex; align-items: center; height: var(--ctl-h); padding: 0 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--chip); color: var(--text); font-size: var(--fs-sm); pointer-events: none; }
+.file-drop #uploadSelection { pointer-events: none; }

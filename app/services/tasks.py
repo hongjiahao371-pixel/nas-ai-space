@@ -96,6 +96,20 @@ class TaskManager:
             return int(existing["id"]), True
         return await self.submit(task_type, payload, priority, user_id), False
 
+    async def submit_unique_file(
+        self,
+        task_type: str,
+        file_id: int,
+        payload: dict[str, Any],
+        priority: int = 0,
+        user_id: int | None = None,
+    ) -> tuple[int, bool]:
+        # 按文件去重：同一文件已有排队/进行中的同类任务时直接复用，避免重复提交堆积重资源任务
+        existing = self.database.active_task_with_file(task_type, file_id)
+        if existing:
+            return int(existing["id"]), True
+        return await self.submit(task_type, payload, priority, user_id), False
+
     async def retry(self, task_id: int) -> None:
         self.database.reset_task(task_id)
         task = self.database.get_task(task_id)
