@@ -1711,3 +1711,17 @@ input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor: not-allo
 .file-drop input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
 .file-drop .drop-title { display: inline-flex; align-items: center; height: var(--ctl-h); padding: 0 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--chip); color: var(--text); font-size: var(--fs-sm); pointer-events: none; }
 .file-drop #uploadSelection { pointer-events: none; }
+
+/* 表单页脚主/次按钮统一高度（.modal-card form 直子选择器覆盖不到 footer 内的按钮） */
+.form-footer .secondary, .form-footer .primary { height: var(--ctl-h-lg); min-height: var(--ctl-h-lg); margin: 0; }
+
+/* 页脚按钮字号统一（主按钮 13px、次按钮 12px 造成视觉不等高） */
+.form-footer .secondary, .form-footer .primary { font-size: var(--fs-md); }
+
+/* 页脚按钮跨浏览器完全一致：Safari 原生按钮外观会按字重/字号撑高盒子，必须 appearance:none + 统一盒模型 */
+.form-footer .secondary, .form-footer .primary {
+  appearance: none; -webkit-appearance: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  height: var(--ctl-h-lg); min-height: var(--ctl-h-lg); padding: 0 16px;
+  font-size: var(--fs-md); line-height: 1;
+}

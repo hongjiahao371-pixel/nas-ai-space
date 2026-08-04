@@ -3876,5 +3876,7 @@ app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 def frontend(path: str = "") -> FileResponse:
     candidate = (STATIC_DIR / path).resolve()
     if path and candidate.is_relative_to(STATIC_DIR) and candidate.is_file():
-        return FileResponse(candidate)
-    return FileResponse(STATIC_DIR / "index.html")
+        # 静态资源随 index.html 里的 ?v= 版本号更新，可长缓存加速加载
+        return FileResponse(candidate, headers={"Cache-Control": "public, max-age=86400"})
+    # index.html 每次回源校验（etag 保证廉价），避免旧 HTML 引用过期静态资源
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
