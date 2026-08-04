@@ -463,7 +463,7 @@ async function loadDashboard(quiet = false) {
     if (terminal) parts.push(`人工检查 ${fmtCount(terminal)}`);
     const eta = indexing.runtime?.eta_seconds;
     if (eta !== null && eta !== undefined && Number(indexing.runtime?.remaining_items || 0)) parts.push(fmtEta(eta));
-    const updated = indexing.updated_at ? new Date(indexing.updated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+    const updated = indexing.updated_at ? new Date(indexing.updated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
     $('#indexHealthMeta').textContent = `${parts.join(' · ') || '索引状态正常'}${updated ? ` · ${updated} 更新` : ''}`;
   } catch (error) {
     $('#indexHealthMeta').textContent = '实时状态暂时不可用，保留上次数据';
@@ -473,7 +473,9 @@ async function loadDashboard(quiet = false) {
 
 function libraryRow(item) {
   const scanned = Boolean(item.last_scan_at);
-  return `<div class="library-row"><i class="lib-status${scanned ? ' on' : ''}" title="${scanned ? '已完成扫描' : '尚未扫描'}"></i><div><b>${esc(item.name)}</b><small>${esc(item.path)}</small></div><div class="library-meta"><strong>${fmtCount(item.file_count)} 个文件</strong><span>${fmtBytes(item.total_bytes)}</span></div><span class="lib-bar"><i style="width:${scanned ? 100 : 0}%"></i></span></div>`;
+  // 空库不显示进度条（0 个文件显示满格条没有意义）
+  const bar = Number(item.file_count) ? `<span class="lib-bar"><i style="width:${scanned ? 100 : 0}%"></i></span>` : '';
+  return `<div class="library-row"><i class="lib-status${scanned ? ' on' : ''}" title="${scanned ? '已完成扫描' : '尚未扫描'}"></i><div><b>${esc(item.name)}</b><small>${esc(item.path)}</small></div><div class="library-meta"><strong>${fmtCount(item.file_count)} 个文件</strong><span>${fmtBytes(item.total_bytes)}</span></div>${bar}</div>`;
 }
 
 async function loadLibraries() {

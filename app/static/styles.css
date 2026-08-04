@@ -1725,3 +1725,6 @@ input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor: not-allo
   height: var(--ctl-h-lg); min-height: var(--ctl-h-lg); padding: 0 16px;
   font-size: var(--fs-md); line-height: 1;
 }
+
+/* 首页最近任务：状态文字不折行 */
+.home-task-row > span { white-space: nowrap; flex-shrink: 0; }
