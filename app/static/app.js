@@ -445,6 +445,14 @@ async function loadDashboard(quiet = false) {
     ].join('');
     $('#indexHealthText').textContent = fmtPercent(completion);
     $('#indexHealthBar').style.width = `${completion}%`;
+    // 存储概览（仅管理员）：索引数据库 / 备份 / 回收站，补齐媒体库面板信息密度
+    if (isAdmin()) {
+      api('/api/operations/status').then(ops => {
+        const row = $('#homeStorage');
+        row.hidden = false;
+        row.innerHTML = `<span>索引数据库 <b>${fmtBytes(ops.database.bytes)}</b></span><span>应用备份 <b>${fmtCount(ops.backups.count)}</b></span><span>回收站 <b>${fmtCount(ops.recycle.count)} 个文件</b></span>`;
+      }).catch(() => {});
+    }
     const active = indexing.active;
     const parts = [];
     if (active) {
@@ -494,7 +502,7 @@ async function loadLibraries() {
       ? items.slice(0, 4).map(libraryRow).join('')
       : '<div class="empty-state compact"><b>还没有媒体库</b><p>添加只读目录后即可开始索引。</p></div>';
     $('#libraryCards').innerHTML = items.length
-      ? items.map(item => `<article class="library-card"><span class="card-leading">${icon('library')}</span><div><h3>${esc(item.name)}</h3><p>${esc(item.path)} · ${fmtCount(item.file_count)} 个文件 · ${fmtBytes(item.total_bytes)}</p><div class="progress"><span style="width:${item.last_scan_at ? '100' : '0'}%"></span></div></div><div class="card-actions"><button class="secondary" data-discover="${item.id}">快速扫描</button><button class="danger" data-delete-library="${item.id}">删除</button></div></article>`).join('')
+      ? items.map(item => `<article class="library-card"><span class="card-leading">${icon('library')}</span><div><h3>${esc(item.name)}</h3><p>${esc(item.path)} · ${fmtCount(item.file_count)} 个文件 · ${fmtBytes(item.total_bytes)}</p>${Number(item.file_count) ? `<div class="progress"><span style="width:${item.last_scan_at ? '100' : '0'}%"></span></div>` : ''}</div><div class="card-actions"><button class="secondary" data-discover="${item.id}">快速扫描</button><button class="danger" data-delete-library="${item.id}">删除</button></div></article>`).join('')
       : '<div class="empty-state"><span class="empty-icon">' + icon('library') + '</span><b>添加第一个媒体库</b><p>建立索引后，你就可以搜索和询问本地资料。</p></div>';
   } catch (error) {
     toast(error.message, true);
@@ -2287,7 +2295,7 @@ function renderPublicShare(data) {
     const comments = asset.comments || [];
     return `<article class="public-asset" data-public-asset="${asset.id}">
       <div class="public-asset-stage">${publicStage(current, asset.id)}${data.share.watermark_text ? `<span class="review-watermark">${esc(data.share.watermark_text)}</span>` : ''}</div>
-      <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p>${(comment.attachments || []).length ? `<div class="comment-attachments">${comment.attachments.map(commentAttachmentHtml).join('')}</div>` : ''}</article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><input name="attachments" type="file" accept="image/*,video/*" multiple><button class="primary">发布意见</button></form>` : ''}</div></div>
+      <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p>${(comment.attachments || []).length ? `<div class="comment-attachments">${comment.attachments.map(commentAttachmentHtml).join('')}</div>` : ''}</article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><label class="attachment-picker"><span class="attach-btn">添加附件</span><input name="attachments" type="file" accept="image/*,video/*" multiple><span class="attach-name">未选择文件</span></label><button class="primary">发布意见</button></form>` : ''}</div></div>
     </article>`;
   }).join('');
   state.publicShareData = data;
@@ -2343,6 +2351,16 @@ function openHelpTip(dot) {
   helpTipEl.style.top = `${rect.bottom + window.scrollY + 8}px`;
   helpTipEl.style.left = `${left}px`;
 }
+
+// 附件选择器：隐藏原生文件输入后，用自定义文案显示已选文件（审阅评论与公共分享共用）
+document.addEventListener('change', event => {
+  const input = event.target instanceof Element ? event.target.closest('.attachment-picker input[type=file]') : null;
+  if (!input) return;
+  const nameEl = input.closest('.attachment-picker')?.querySelector('.attach-name');
+  if (!nameEl) return;
+  const files = [...input.files];
+  nameEl.textContent = files.length ? `${files.length} 个文件 · ${files[0].name}${files.length > 1 ? ' 等' : ''}` : '未选择文件';
+});
 
 document.addEventListener('click', async event => {
   const helpDot = event.target.closest('.help-dot');
@@ -3691,6 +3709,9 @@ $('#reviewCommentForm').addEventListener('submit', async event => {
       await uploadCommentAttachment(`/api/comments/${comment.id}/attachments`, file);
     }
     form.reset();
+    // 附件选择后的文件名提示随表单一起复位
+    const attachName = form.querySelector('.attach-name');
+    if (attachName) attachName.textContent = '未选择文件';
     state.annotationStrokes = [];
     state.currentAsset = await api(`/api/assets/${state.currentAsset.id}`);
     renderReviewComments();

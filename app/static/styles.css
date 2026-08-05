@@ -1728,3 +1728,48 @@ input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor: not-allo
 
 /* 首页最近任务：状态文字不折行 */
 .home-task-row > span { white-space: nowrap; flex-shrink: 0; }
+
+/* ===== 总览布局紧凑化（媒体库面板密度 + 存储概览行） ===== */
+.library-row { min-height: 46px; padding: 8px 0; }
+.library-row:last-child { border-bottom: 0; }
+.lib-bar { height: 2px; margin-top: 5px; }
+.storage-row { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 8px; padding: 10px 2px; border-top: 1px solid var(--line-soft); font-size: var(--fs-xs); color: var(--muted-2); }
+.storage-row b { margin-left: 4px; color: var(--text-soft); font-weight: 600; }
+
+/* ===== 总览布局重排：间距统一 16px + 最近任务通栏 ===== */
+.dash-head { margin-bottom: 16px; }
+.stats-grid { gap: 16px; margin: 0 0 16px; }
+.command-card { margin-bottom: 16px; }
+#view-home .recent-panel { margin-top: 16px; }
+/* 通栏任务列表：多列排布，避免整行拉伸 */
+.home-task-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 24px; }
+.home-task-list .home-task-row:first-child, .home-task-list .home-task-row:nth-child(-n+3) { border-top: 0; }
+
+/* ===== 宽屏/高分屏适配：放开内容区宽度上限（网格均为 auto-fill，会自动增列） ===== */
+.content { width: min(1760px, 100%); }
+/* 工作台类视图（浏览/搜索/项目）信息流密度优先，接近全幅 */
+.content:has(.workbench) { width: min(2160px, 100%); }
+.workspace-view { max-width: 1900px; }
+/* 问答对话保持可读性，但 900px 在宽屏上太窄 */
+.ask-layout { max-width: 1100px; }
+
+/* ===== 问资料：对话区撑满视口，输入框吸附底部 ===== */
+.ask-layout { display: flex; flex-direction: column; min-height: calc(100vh - 190px); }
+.ask-layout .conversation { flex: 1 1 auto; min-height: 0; padding: 16px 0; }
+.ask-layout .ask-box { position: sticky; bottom: 12px; margin-top: auto; }
+
+/* 媒体库管理页：卡片标题字号与用户卡一致；空库不渲染进度条后收紧间距 */
+.library-card h3, .task-card h3 { font-size: var(--fs-md); }
+
+/* ===== 审阅评论工具区重排：两行布局 + 附件选择器按钮化 ===== */
+.comment-tools { display: grid; grid-template-columns: none; gap: 8px; margin: 8px 0; }
+.comment-tools-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.comment-tools-row label { display: grid; gap: 4px; color: var(--muted); font-size: var(--fs-xs); }
+.comment-tools-row .check-row { display: flex; align-items: center; gap: 6px; height: 32px; }
+.attachment-picker { position: relative; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.attachment-picker input[type=file] { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.attach-btn { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--chip); color: var(--text); font-size: var(--fs-xs); pointer-events: none; }
+.attach-name { max-width: 180px; overflow: hidden; color: var(--muted-2); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+
+/* 附件选择器横向排布（压过 .comment-tools-row label 的 grid） */
+.comment-tools-row label.attachment-picker { display: flex; flex-direction: row; align-items: center; gap: 8px; }
