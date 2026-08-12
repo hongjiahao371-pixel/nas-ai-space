@@ -11,7 +11,7 @@ from typing import Any
 
 from app.config import Settings
 from app.database import Database, utc_now
-from app.services.extractors import index_file
+from app.services.extractors import index_file, upgrade_image_caption
 from app.services.faces import analyze_people
 from app.services.hardware import detect_hardware, memory_runtime
 from app.services.ingest import collect_project_inbox
@@ -33,7 +33,9 @@ class TaskManager:
         self.ai = ai
         self.vectors = vectors
         self.queue: asyncio.PriorityQueue[tuple[int, int]] = asyncio.PriorityQueue()
+        self.light_queue: asyncio.PriorityQueue[tuple[int, int]] = asyncio.PriorityQueue()
         self.workers: list[asyncio.Task] = []
+        self.light_workers: list[asyncio.Task] = []
         self.scheduler: asyncio.Task | None = None
         self.maintenance: asyncio.Task | None = None
         self.scan_locks: dict[int, asyncio.Lock] = {}
@@ -52,9 +54,10 @@ class TaskManager:
         for task_id in self.database.recover_tasks():
             task = self.database.get_task(task_id)
             if task:
-                await self.queue.put((-int(task["priority"]), task_id))
+                await self._enqueue(task["type"], int(task["priority"]), task_id)
         count = self.settings.task_workers or max(1, min(2, detect_hardware().plan.index_workers))
-        self.workers = [asyncio.create_task(self._worker(index), name=f"task-worker-{index}") for index in range(count)]
+        self.workers = [asyncio.create_task(self._worker(index, self.queue), name=f"task-worker-{index}") for index in range(count)]
+        self.light_workers = [asyncio.create_task(self._worker(0, self.light_queue), name="task-light-worker")]
         self.scheduler = asyncio.create_task(self._auto_index_loop(), name="auto-index-scheduler")
         self.maintenance = asyncio.create_task(self._maintenance_loop(), name="maintenance-scheduler")
 
@@ -64,9 +67,9 @@ class TaskManager:
             self.scheduler.cancel()
         if self.maintenance:
             self.maintenance.cancel()
-        for worker in self.workers:
+        for worker in [*self.workers, *self.light_workers]:
             worker.cancel()
-        tasks = [*self.workers]
+        tasks = [*self.workers, *self.light_workers]
         if self.scheduler:
             tasks.append(self.scheduler)
         if self.maintenance:
@@ -81,8 +84,12 @@ class TaskManager:
         user_id: int | None = None,
     ) -> int:
         task_id = self.database.create_task(task_type, payload, priority, user_id)
-        await self.queue.put((-priority, task_id))
+        await self._enqueue(task_type, priority, task_id)
         return task_id
+
+    async def _enqueue(self, task_type: str, priority: int, task_id: int) -> None:
+        queue = self.light_queue if task_type == "scan_only" else self.queue
+        await queue.put((-priority, task_id))
 
     async def submit_unique(
         self,
@@ -114,7 +121,7 @@ class TaskManager:
         self.database.reset_task(task_id)
         task = self.database.get_task(task_id)
         if task:
-            await self.queue.put((-int(task["priority"]), task_id))
+            await self._enqueue(task["type"], int(task["priority"]), task_id)
 
     def _notify_user(self, task: dict[str, Any], title: str, body: str) -> None:
         user_id = task.get("user_id")
@@ -129,9 +136,9 @@ class TaskManager:
         except Exception:
             logger.exception("Failed to record task notification")
 
-    async def _worker(self, _: int) -> None:
+    async def _worker(self, _: int, queue: asyncio.PriorityQueue[tuple[int, int]]) -> None:
         while not self.stopping:
-            _, task_id = await self.queue.get()
+            _, task_id = await queue.get()
             try:
                 task = self.database.get_task(task_id)
                 if not task or task["cancel_requested"]:
@@ -164,7 +171,7 @@ class TaskManager:
                     )
                 elif task["type"] == "upgrade_captions":
                     file_ids = self.database.caption_upgrade_file_ids(int(task["payload"].get("limit") or 50))
-                    message = await self._index_file_ids(task_id, file_ids)
+                    message = await self._upgrade_captions(task_id, file_ids)
                 elif task["type"] == "repair_index":
                     file_ids = self.database.repair_file_ids(int(task["payload"].get("limit") or 50))
                     message = await self._index_file_ids(task_id, file_ids)
@@ -267,7 +274,7 @@ class TaskManager:
                         self.settings.task_retention_count,
                         self.settings.task_retention_days,
                     )
-                self.queue.task_done()
+                queue.task_done()
 
     async def _scan_and_index(self, task_id: int, library_id: int) -> str:
         result = await self._scan(task_id, library_id)
@@ -390,15 +397,57 @@ class TaskManager:
                 return file_id, "error", "missing"
             try:
                 result, chunks = index_file(file, self.settings, self.ai)
-                final_status = self.database.finish_file_index(
-                    file_id,
-                    result,
-                    chunks,
-                    self.settings.index_retry_max_attempts,
-                    self.settings.index_retry_base_seconds,
+                stages = result.get("stages") or {}
+                incomplete = any(
+                    str((stages.get(name) or {}).get("status") or "") in {"error", "missing", "blocked"}
+                    for name in ("vision", "transcription", "embedding")
                 )
-                if any(chunk.get("embedding") for chunk in chunks):
-                    self.vectors.replace_file(file, chunks)
+                previous_content = bool(
+                    str(file.get("ai_caption") or file.get("extracted_text") or "").strip()
+                    and self.database.fetchone(
+                        "SELECT 1 AS found FROM content_chunks WHERE file_id = ? LIMIT 1", (file_id,)
+                    )
+                )
+                if incomplete and previous_content:
+                    errors = [
+                        str((stages.get(name) or {}).get("error") or "")
+                        for name in ("vision", "transcription", "embedding")
+                    ]
+                    error = "；".join(value for value in errors if value) or "新版索引不完整"
+                    self.database.fail_file_index(
+                        file_id,
+                        f"新索引未提交，继续使用旧版：{error}",
+                        self.settings.index_retry_max_attempts,
+                        self.settings.index_retry_base_seconds,
+                    )
+                    return file_id, "partial", error
+                embedded = any(chunk.get("embedding") for chunk in chunks)
+                previous_points = self.vectors.file_points(file_id) if previous_content and embedded else []
+                new_ids = self.vectors.stage_file(file, chunks) if embedded else []
+                try:
+                    final_status = self.database.finish_file_index(
+                        file_id,
+                        result,
+                        chunks,
+                        self.settings.index_retry_max_attempts,
+                        self.settings.index_retry_base_seconds,
+                    )
+                except Exception:
+                    if previous_points:
+                        self.vectors.restore_points(previous_points)
+                        previous_ids = {int(point["id"]) for point in previous_points}
+                        self.vectors.delete_points([point_id for point_id in new_ids if point_id not in previous_ids])
+                    else:
+                        self.vectors.delete_points(new_ids)
+                    raise
+                if embedded:
+                    new_id_set = set(new_ids)
+                    try:
+                        self.vectors.delete_points([
+                            int(point["id"]) for point in previous_points if int(point["id"]) not in new_id_set
+                        ])
+                    except Exception:
+                        logger.warning("Failed to remove stale index vectors for file %s", file_id, exc_info=True)
                 return file_id, final_status, ""
             except Exception as exc:
                 self.database.fail_file_index(
@@ -471,6 +520,88 @@ class TaskManager:
             f"本批完整索引 {indexed:,} 个，部分完成 {partial:,}，失败 {failed:,}，"
             f"全库待处理 {remaining:,}，待修复 {self.database.repair_count():,}"
         )
+
+    async def _upgrade_captions(self, task_id: int, file_ids: list[int]) -> str:
+        total = len(file_ids)
+        if not total:
+            self.database.update_task(task_id, 1, "没有需要升级的图片")
+            return "没有需要升级的图片"
+        self.database.update_task(task_id, 0, f"准备无损升级 {total:,} 张图片", 0, total)
+        upgraded = 0
+        preserved = 0
+        consecutive_service_errors = 0
+        transient_markers = (
+            "503 Service Unavailable", "Connection refused", "Connection reset",
+            "Server disconnected", "No address associated", "无法解析模型服务地址",
+        )
+        loop = asyncio.get_running_loop()
+
+        def upgrade_one(file_id: int) -> tuple[bool, str]:
+            file = self.database.get_file(file_id)
+            if not file:
+                return False, "文件记录不存在"
+            previous_points = self.vectors.file_points(file_id)
+            previous_ids = [int(point["id"]) for point in previous_points]
+            last_error = ""
+            for attempt, delay in enumerate((0, 5, 15), 1):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    caption, metadata, chunks = upgrade_image_caption(file, self.settings, self.ai)
+                    new_ids = self.vectors.stage_file(file, chunks)
+                    try:
+                        self.database.apply_caption_upgrade(file_id, caption, metadata, chunks)
+                    except Exception:
+                        if previous_points:
+                            self.vectors.restore_points(previous_points)
+                            previous_id_set = set(previous_ids)
+                            self.vectors.delete_points([
+                                point_id for point_id in new_ids if point_id not in previous_id_set
+                            ])
+                        else:
+                            self.vectors.delete_points(new_ids)
+                        raise
+                    stale_ids = [point_id for point_id in previous_ids if point_id not in set(new_ids)]
+                    try:
+                        self.vectors.delete_points(stale_ids)
+                    except Exception:
+                        logger.warning("Failed to remove stale caption vectors for file %s", file_id, exc_info=True)
+                    return True, ""
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    if not any(marker in last_error for marker in transient_markers) or attempt == 3:
+                        break
+            self.database.record_caption_upgrade_failure(
+                file_id,
+                last_error,
+                self.settings.index_retry_max_attempts,
+                self.settings.index_retry_base_seconds,
+            )
+            return False, last_error
+
+        for index, file_id in enumerate(file_ids, 1):
+            if self.stopping or self.database.is_task_cancelled(task_id):
+                break
+            ok, error = await loop.run_in_executor(None, upgrade_one, file_id)
+            if ok:
+                upgraded += 1
+                consecutive_service_errors = 0
+            else:
+                preserved += 1
+                if any(marker in error for marker in transient_markers):
+                    consecutive_service_errors += 1
+                else:
+                    consecutive_service_errors = 0
+            self.database.update_task(
+                task_id,
+                index / total,
+                f"已处理 {index:,}/{total:,}，升级 {upgraded:,}，保留旧版 {preserved:,}",
+                index,
+                total,
+            )
+            if consecutive_service_errors >= 3:
+                raise RuntimeError("视觉服务连续不可用，已停止本批；旧描述和旧向量均已保留")
+        return f"无损升级 {upgraded:,} 张，保留旧版等待重试 {preserved:,} 张"
 
     async def _queue_album_refresh(self) -> None:
         # 相册分析是全库重算，每批索引完成都刷代价太高：距上次排队不足
@@ -590,11 +721,12 @@ class TaskManager:
                 )
                 repair_count = self.database.repair_count()
                 pending_count = int(self.database.pending_summary()["total"])
+                caption_count = self.database.caption_upgrade_count()
                 if (
                     policy["enabled"]
                     and self._within_window(datetime.now().hour, policy["start_hour"], policy["end_hour"])
                     and self.database.active_task_count() == 0
-                    and (pending_count > 0 or repair_count > 0)
+                    and (pending_count > 0 or repair_count > 0 or caption_count > 0)
                     and (not available or available >= self.settings.min_available_memory_bytes)
                     and swap_ready
                 ):
@@ -605,17 +737,24 @@ class TaskManager:
                             priority=2,
                         )
                     else:
-                        await self.submit_unique(
-                            "index_pending",
-                            {
-                                "limit": policy["batch_size"],
-                                "library_id": policy["library_id"],
-                                "kind": policy["kind"],
-                                "order": policy["order"],
-                                "source": "schedule",
-                            },
-                            priority=1,
-                        )
+                        if pending_count:
+                            await self.submit_unique(
+                                "index_pending",
+                                {
+                                    "limit": policy["batch_size"],
+                                    "library_id": policy["library_id"],
+                                    "kind": policy["kind"],
+                                    "order": policy["order"],
+                                    "source": "schedule",
+                                },
+                                priority=1,
+                            )
+                        else:
+                            await self.submit_unique(
+                                "upgrade_captions",
+                                {"limit": min(50, policy["batch_size"]), "source": "schedule"},
+                                priority=1,
+                            )
             except asyncio.CancelledError:
                 raise
             except Exception:

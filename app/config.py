@@ -49,6 +49,7 @@ class Settings:
     max_psd_pixels: int
     max_font_bytes: int
     pdf_ocr_pages: int
+    video_frame_count: int
     thumbnail_size: int
     task_workers: int
     index_workers: int
@@ -78,9 +79,11 @@ class Settings:
     embedding_base_url: str
     vision_base_url: str
     chat_base_url: str
+    rerank_base_url: str
     embedding_model: str
     vision_model: str
     chat_model: str
+    rerank_model: str
     transcription_base_url: str
     transcription_model: str
     allow_cloud_endpoints: bool
@@ -143,6 +146,7 @@ class Settings:
             max_psd_pixels=_int_env("NAS_AI_MAX_PSD_PIXELS", 100_000_000, 1_000_000, 10_000_000_000),
             max_font_bytes=_int_env("NAS_AI_MAX_FONT_MB", 100, 1, 2048) * 1024 * 1024,
             pdf_ocr_pages=_int_env("NAS_AI_PDF_OCR_PAGES", 20, 0, 200),
+            video_frame_count=_int_env("NAS_AI_VIDEO_FRAME_COUNT", 6, 1, 12),
             thumbnail_size=_int_env("NAS_AI_THUMBNAIL_SIZE", 640, 160, 2048),
             task_workers=_int_env("NAS_AI_TASK_WORKERS", 0, 0, 32),
             index_workers=_int_env("NAS_AI_INDEX_WORKERS", 0, 0, 16),
@@ -172,9 +176,17 @@ class Settings:
             embedding_base_url=os.getenv("NAS_AI_EMBEDDING_URL", local_ai_base_url).strip().rstrip("/"),
             vision_base_url=os.getenv("NAS_AI_VISION_URL", local_ai_base_url).strip().rstrip("/"),
             chat_base_url=os.getenv("NAS_AI_CHAT_URL", local_ai_base_url).strip().rstrip("/"),
+            rerank_base_url=os.getenv(
+                "NAS_AI_RERANK_URL",
+                os.getenv("NAS_AI_CHAT_URL", local_ai_base_url),
+            ).strip().rstrip("/"),
             embedding_model=os.getenv("NAS_AI_EMBEDDING_MODEL", "").strip(),
             vision_model=os.getenv("NAS_AI_VISION_MODEL", "").strip(),
             chat_model=os.getenv("NAS_AI_CHAT_MODEL", "").strip(),
+            rerank_model=os.getenv(
+                "NAS_AI_RERANK_MODEL",
+                os.getenv("NAS_AI_CHAT_MODEL", ""),
+            ).strip(),
             transcription_base_url=os.getenv("NAS_AI_TRANSCRIPTION_URL", "").strip().rstrip("/"),
             transcription_model=os.getenv("NAS_AI_TRANSCRIPTION_MODEL", "").strip(),
             allow_cloud_endpoints=_bool_env("NAS_AI_ALLOW_CLOUD_ENDPOINTS", False),

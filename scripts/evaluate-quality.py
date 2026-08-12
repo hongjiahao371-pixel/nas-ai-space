@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -12,6 +13,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+
+class RequestError(RuntimeError):
+    def __init__(self, message: str, latency: float):
+        super().__init__(message)
+        self.latency = latency
 
 
 def percentile(values: list[float], percent: float) -> float:
@@ -49,8 +56,17 @@ class Client:
             },
         )
         started = time.perf_counter()
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            result = json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as exc:
+            latency = time.perf_counter() - started
+            try:
+                detail = json.loads(exc.read(4096).decode("utf-8", "replace")).get("detail", "")
+            except (json.JSONDecodeError, AttributeError):
+                detail = ""
+            suffix = f": {detail}" if detail else ""
+            raise RequestError(f"HTTP {exc.code}{suffix}", latency) from exc
         return result, time.perf_counter() - started
 
 
@@ -66,7 +82,23 @@ def evaluate_search(client: Client, cases: list[dict[str, Any]]) -> tuple[list[d
             "precise": str(bool(case.get("precise", True))).lower(),
             "semantic": str(bool(case.get("semantic", True))).lower(),
         })
-        payload, latency = client.request("GET", f"/api/search?{params}")
+        try:
+            payload, latency = client.request("GET", f"/api/search?{params}")
+        except RequestError as exc:
+            latencies.append(exc.latency)
+            reports.append({
+                "type": "search",
+                "name": str(case.get("name") or case["query"]),
+                "passed": False,
+                "rank": None,
+                "recall_at_k": 0,
+                "reciprocal_rank": 0,
+                "top_confidence": 0,
+                "latency_seconds": round(exc.latency, 3),
+                "top_names": [],
+                "error": str(exc),
+            })
+            continue
         latencies.append(latency)
         results = payload.get("results") or []
         names = [str(item.get("name") or item.get("relative_path") or "") for item in results[:top_k]]
@@ -94,14 +126,34 @@ def evaluate_ask(client: Client, cases: list[dict[str, Any]]) -> tuple[list[dict
     reports = []
     latencies = []
     for case in cases:
-        payload, latency = client.request(
-            "POST",
-            "/api/ask",
-            {"question": str(case["question"]), "kind": str(case.get("kind") or "")},
-        )
+        try:
+            payload, latency = client.request(
+                "POST",
+                "/api/ask",
+                {"question": str(case["question"]), "kind": str(case.get("kind") or "")},
+            )
+        except RequestError as exc:
+            latencies.append(exc.latency)
+            reports.append({
+                "type": "ask",
+                "name": str(case.get("name") or case["question"]),
+                "passed": False,
+                "source_hit": False,
+                "source_count": 0,
+                "answer_term_coverage": 0,
+                "citations_valid": False,
+                "citation_count": 0,
+                "latency_seconds": round(exc.latency, 3),
+                "source_names": [],
+                "answer_preview": "",
+                "error": str(exc),
+            })
+            continue
         latencies.append(latency)
         answer = str(payload.get("answer") or "")
         sources = payload.get("sources") or []
+        citations = [int(value) for value in re.findall(r"\[(\d+)]", answer)]
+        citations_valid = bool(citations) and all(1 <= value <= len(sources) for value in citations)
         source_names = [str(source.get("name") or source.get("relative_path") or "") for source in sources]
         expected_sources = [str(value) for value in case.get("expected_sources_any", [])]
         answer_terms = [str(value) for value in case.get("required_answer_terms", [])]
@@ -112,6 +164,7 @@ def evaluate_ask(client: Client, cases: list[dict[str, Any]]) -> tuple[list[dict
             source_hit
             and len(sources) >= int(case.get("min_sources", 1))
             and term_coverage >= float(case.get("min_term_coverage", 1.0))
+            and citations_valid
         )
         reports.append({
             "type": "ask",
@@ -120,8 +173,11 @@ def evaluate_ask(client: Client, cases: list[dict[str, Any]]) -> tuple[list[dict
             "source_hit": source_hit,
             "source_count": len(sources),
             "answer_term_coverage": round(term_coverage, 4),
+            "citations_valid": citations_valid,
+            "citation_count": len(citations),
             "latency_seconds": round(latency, 3),
             "source_names": source_names[:8],
+            "answer_preview": answer[:500],
         })
     return reports, latencies
 

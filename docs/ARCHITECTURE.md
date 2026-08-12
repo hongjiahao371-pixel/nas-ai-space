@@ -32,8 +32,8 @@ FastAPI 进程只运行一个 Web worker，避免多个 worker 各自启动任�
 - 新媒体库必须位于 `NAS_AI_SCAN_ROOT` 内。
 - API Token 保留为系统管理员钥匙；本地账号密码使用 scrypt（运行时不支持时回退 PBKDF2-HMAC-SHA256），会话令牌在数据库中只保存 SHA-256 摘要。
 - 管理员可访问全部媒体库，普通成员只能搜索、浏览与预览被授权媒体库；上传也要求“上传空间”权限。
-- 浏览器会话令牌只保存在当前 origin 的 localStorage。
-- URL 查询参数令牌默认不被 API 接受；前端兼容入口会立即转存为 Authorization Header 并清理地址栏。
+- 本地账号登录使用 HttpOnly、SameSite=Strict Cookie；写操作同时校验 CSRF Cookie 与请求头，Cookie 模式的登录响应不返回会话令牌正文。API Token 仍只为运维客户端保留在当前 origin 的 localStorage。
+- URL 查询参数令牌默认不被 API 接受；兼容入口只负责清理遗留参数，不会把本地账号会话暴露给 JavaScript。
 - 登录失败按客户端与用户名组合限流，API 响应包含 CSP、禁止 MIME 嗅探、同源 frame 限制和请求追踪 ID。
 - 模型地址默认只允许解析到环回或私有 IP；只有显式开启 `NAS_AI_ALLOW_CLOUD_ENDPOINTS` 才允许公网端点。
 - 应用容器丢弃 Linux capabilities、启用 `no-new-privileges`，根文件系统只读。

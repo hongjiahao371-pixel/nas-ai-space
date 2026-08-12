@@ -29,6 +29,16 @@ SYNONYMS = {
     "汽车": ("车辆", "轿车", "车"),
     "宝宝": ("婴儿", "小孩", "儿童"),
     "结婚证": ("婚姻登记证", "结婚证明"),
+    "大熊猫": ("熊猫",),
+    "熊猫": ("大熊猫",),
+    "鱼缸": ("水族箱", "水族缸"),
+    "鱼": ("鱼类",),
+    "退款": ("退费",),
+    "金额": ("费用", "价款"),
+    "实付": ("实际支付",),
+    "竹叶": ("竹子", "竹枝"),
+    "木质": ("木制",),
+    "平台": ("台面",),
 }
 STOP_PHRASES = (
     "共同出现的布置和物品", "共同出现了哪些布置和物品", "布置和物品", "布置与物品", "布置及物品",
@@ -37,12 +47,19 @@ STOP_PHRASES = (
     "请帮我", "帮我", "请问", "告诉我", "查找", "找到", "找出", "搜索", "看看", "相关的", "相关",
     "可以确认", "能够确认", "能否确认", "确认", "可以", "能否", "是否", "有哪些", "哪些", "什么",
     "能够看到", "可以看到", "能看到", "看到", "看见",
+    "正在做", "分别", "主要", "多少", "上的", "里的",
     "这些", "那些", "其中", "同时拍到了", "拍到了", "出现了", "出现", "同时",
     "拍摄的", "拍的", "显示的", "显示", "包含", "照片", "图片", "视频", "文件", "内容",
     "物品", "东西", "资料中", "资料里",
 )
 SCREENSHOT_QUERY_MARKERS = ("截图", "截屏", "屏幕", "界面", "聊天", "对话", "消息", "微信", "页面", "app")
 SCREENSHOT_CONTENT_MARKERS = ("聊天界面", "微信界面", "手机屏幕", "电脑屏幕", "应用界面", "网页截图", "屏幕截图")
+KNOWN_QUERY_TERMS = tuple(sorted(
+    {term for key, values in SYNONYMS.items() for term in (key, *values)},
+    key=len,
+    reverse=True,
+))
+AMBIGUOUS_REVERSE_ALIASES = {"喵"}
 
 
 def _highlight(text: str, query: str, radius: int = 100) -> str:
@@ -72,16 +89,74 @@ def _partial_coverage_cap(coverage: float) -> float:
     return 0.3
 
 
+def _term_aliases(term: str) -> tuple[str, ...]:
+    values = [term]
+    for key, aliases in SYNONYMS.items():
+        group = (key, *aliases)
+        if term in group:
+            values.extend(
+                value
+                for value in group
+                if value == term or value not in AMBIGUOUS_REVERSE_ALIASES
+            )
+    return tuple(dict.fromkeys(values))
+
+
+def _chinese_terms(value: str) -> list[str]:
+    occupied = [False] * len(value)
+    positioned: list[tuple[int, str]] = []
+    for start in range(len(value)):
+        if occupied[start]:
+            continue
+        term = next(
+            (candidate for candidate in KNOWN_QUERY_TERMS if value.startswith(candidate, start)),
+            "",
+        )
+        if not term:
+            continue
+        positioned.append((start, term))
+        for index in range(start, start + len(term)):
+            occupied[index] = True
+
+    start = 0
+    while start < len(value):
+        if occupied[start]:
+            start += 1
+            continue
+        end = start + 1
+        while end < len(value) and not occupied[end]:
+            end += 1
+        fragment = value[start:end]
+        cursor = start
+        for piece in fragment.split("的"):
+            piece_start = value.find(piece, cursor, end) if piece else cursor
+            cursor = piece_start + len(piece) + 1
+            if len(piece) > 2 and piece.startswith("在"):
+                piece_start += 1
+                piece = piece[1:]
+            if len(piece) == 1 and piece in "的在里中和与":
+                continue
+            if len(piece) >= 4:
+                positioned.extend(
+                    (piece_start + index, piece[index:index + 2])
+                    for index in range(0, len(piece), 2)
+                    if len(piece[index:index + 2]) > 1
+                )
+            elif len(piece) > 1:
+                positioned.append((piece_start, piece))
+        start = end
+    return [term for _, term in sorted(positioned, key=lambda item: item[0])]
+
+
 def _query_groups(query: str) -> list[tuple[str, ...]]:
     normalized = query.strip().lower()
     for phrase in STOP_PHRASES:
         normalized = normalized.replace(phrase, " ")
-    normalized = re.sub(r"[的在里中和与]+", " ", normalized)
     parts = re.findall(r"[a-z0-9][a-z0-9._-]*|[\u4e00-\u9fff]+", normalized)
     terms: list[str] = []
     for part in parts:
-        if re.fullmatch(r"[\u4e00-\u9fff]+", part) and len(part) >= 4:
-            terms.extend(part[index:index + 2] for index in range(0, len(part), 2) if len(part[index:index + 2]) > 1)
+        if re.fullmatch(r"[\u4e00-\u9fff]+", part):
+            terms.extend(_chinese_terms(part))
         elif len(part) > 1:
             terms.append(part)
     groups: list[tuple[str, ...]] = []
@@ -89,7 +164,7 @@ def _query_groups(query: str) -> list[tuple[str, ...]]:
     for term in terms[:8]:
         if term in seen:
             continue
-        aliases = tuple(dict.fromkeys((term, *SYNONYMS.get(term, ()))))
+        aliases = _term_aliases(term)
         groups.append(aliases)
         seen.add(term)
     return groups
@@ -441,7 +516,7 @@ class SearchService:
         precise_used = False
         if precise and ordered:
             candidates = []
-            for row in ordered[:8]:
+            for row in ordered[:4]:
                 file_id = int(row["id"])
                 candidates.append({
                     "id": file_id,
@@ -462,7 +537,12 @@ class SearchService:
                             rerank_score *= 0.45 + 0.55 * coverage
                             if coverage < 1:
                                 rerank_score = min(rerank_score, _partial_coverage_cap(coverage))
-                            if any(marker in reason for marker in ("未显示", "未明确", "无关", "不符合", "只满足", "仅")):
+                            if any(
+                                marker in reason
+                                for marker in ("非生日", "非聚会", "不涉及", "不是", "不属于", "无关", "不符合", "完全无")
+                            ):
+                                rerank_score = min(rerank_score, 0.2)
+                            elif any(marker in reason for marker in ("未显示", "未明确", "只满足", "仅")):
                                 rerank_score = min(rerank_score, 0.45)
                         if profile.get("screenshot") and not screenshot_intent:
                             rerank_score *= 0.85

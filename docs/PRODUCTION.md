@@ -40,7 +40,7 @@ NAS_AI_AUTOMATIC_BACKUP_RETENTION=7
 3. 用 `scripts/create-release-backup.sh` 备份项目代码。归档会主动排除 `.env`、`data`、`uploads`、`recycle` 和 `runtime`，并以 `0600` 保存；这些持久化目录应由 NAS 快照单独保护。
 4. 同步新代码并先执行 Compose `config` 校验。
 5. 只重建 `app`；模型服务配置未变化时不要无谓重建或重新下载模型。
-6. 启动后等待数据库迁移，检查 `/api/health`、`/api/ready`、SQLite、五个容器和最近错误日志。
+6. 启动后等待数据库迁移，检查 `/api/health`、`/api/ready`、SQLite、全部服务容器和最近错误日志。
 7. 执行真实图片搜索、带来源问答、缩略图、视频 Range 206、转写和 GPU 利用率验收。
 
 数据库迁移只做向前兼容加列。升级前在线备份和代码副本必须同时存在。

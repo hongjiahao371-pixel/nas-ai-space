@@ -336,11 +336,14 @@ class WorkspaceService:
 
     def version(self, version_id: int) -> dict[str, Any] | None:
         return self.database.fetchone(
-            """SELECT av.*, f.library_id, f.relative_path, f.status AS index_status,
+            """SELECT av.*, f.library_id, f.relative_path, f.status AS index_status, f.metadata_json,
                COALESCE(NULLIF(f.manual_caption, ''), f.ai_caption, '') AS caption
                FROM asset_versions av LEFT JOIN files f ON f.id = av.file_id WHERE av.id = ?""",
             (version_id,),
         )
+        for version in versions:
+            metadata = self._loads(version.pop("metadata_json", "{}"), {})
+            version["frame_rate"] = float(metadata.get("frame_rate") or 0) or None
 
     def list_assets(
         self,

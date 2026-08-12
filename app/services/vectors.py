@@ -72,13 +72,30 @@ class VectorStore:
             self._dimension = dimension
 
     def replace_file(self, file: dict[str, Any], chunks: list[dict[str, Any]]) -> None:
-        vectors = [(index, chunk) for index, chunk in enumerate(chunks) if chunk.get("embedding")]
-        if not vectors:
+        points = self._file_points(file, chunks)
+        if not points:
             return
-        dimension = len(vectors[0][1]["embedding"])
+        dimension = len(points[0]["vector"])
         self._ensure_collection(dimension)
+        client = self._http()
+        client.post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=false",
+            json={"filter": {"must": [{"key": "file_id", "match": {"value": int(file["id"])}}]}},
+            timeout=60,
+        )
+        response = client.put(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points?wait=false",
+            json={"points": points},
+            timeout=60,
+        )
+        response.raise_for_status()
+
+    @staticmethod
+    def _file_points(file: dict[str, Any], chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         points = []
-        for index, chunk in vectors:
+        for index, chunk in enumerate(chunks):
+            if not chunk.get("embedding"):
+                continue
             points.append({
                 "id": int(file["id"]) * 1_000_000 + index,
                 "vector": chunk["embedding"],
@@ -94,16 +111,101 @@ class VectorStore:
                     "end_time": chunk.get("end_time"),
                 },
             })
-        # 批量索引路径用 wait=false：Qdrant 本地 WAL 足够可靠，避免 delete+upsert
-        # 双 wait=true 逐批同步刷盘拖慢索引
+        return points
+
+    def file_point_ids(self, file_id: int) -> list[int]:
+        return [int(point["id"]) for point in self.file_points(file_id)]
+
+    def file_points(self, file_id: int) -> list[dict[str, Any]]:
+        points: list[dict[str, Any]] = []
+        offset: int | str | None = None
+        while True:
+            payload: dict[str, Any] = {
+                "filter": {"must": [{"key": "file_id", "match": {"value": int(file_id)}}]},
+                "limit": 1000,
+                "with_payload": True,
+                "with_vector": True,
+            }
+            if offset is not None:
+                payload["offset"] = offset
+            response = self._http().post(
+                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/scroll",
+                json=payload,
+                timeout=60,
+            )
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            result = response.json().get("result", {})
+            batch = result.get("points", [])
+            points.extend(
+                {"id": point["id"], "vector": point.get("vector"), "payload": point.get("payload") or {}}
+                for point in batch
+                if point.get("id") is not None and isinstance(point.get("vector"), list)
+            )
+            offset = result.get("next_page_offset")
+            if offset is None or not batch:
+                return points
+
+    def file_point_counts(self) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        offset: int | str | None = None
+        while True:
+            payload: dict[str, Any] = {
+                "limit": 10000,
+                "with_payload": ["file_id"],
+                "with_vector": False,
+            }
+            if offset is not None:
+                payload["offset"] = offset
+            response = self._http().post(
+                f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/scroll",
+                json=payload,
+                timeout=60,
+            )
+            if response.status_code == 404:
+                return {}
+            response.raise_for_status()
+            result = response.json().get("result", {})
+            points = result.get("points", [])
+            for point in points:
+                file_id = int((point.get("payload") or {}).get("file_id") or 0)
+                if file_id:
+                    counts[file_id] = counts.get(file_id, 0) + 1
+            offset = result.get("next_page_offset")
+            if offset is None or not points:
+                break
+        return counts
+
+    def stage_file(self, file: dict[str, Any], chunks: list[dict[str, Any]]) -> list[int]:
+        points = self._file_points(file, chunks)
+        if not points:
+            raise ValueError("没有可写入的向量")
+        self._ensure_collection(len(points[0]["vector"]))
         client = self._http()
-        client.post(
-            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=false",
-            json={"filter": {"must": [{"key": "file_id", "match": {"value": int(file["id"])}}]}},
+        response = client.put(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points?wait=true",
+            json={"points": points},
             timeout=60,
         )
-        response = client.put(
-            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points?wait=false",
+        response.raise_for_status()
+        return [int(point["id"]) for point in points]
+
+    def delete_points(self, point_ids: list[int]) -> None:
+        if not point_ids:
+            return
+        response = self._http().post(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points/delete?wait=true",
+            json={"points": [int(point_id) for point_id in point_ids]},
+            timeout=60,
+        )
+        response.raise_for_status()
+
+    def restore_points(self, points: list[dict[str, Any]]) -> None:
+        if not points:
+            return
+        response = self._http().put(
+            f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}/points?wait=true",
             json={"points": points},
             timeout=60,
         )

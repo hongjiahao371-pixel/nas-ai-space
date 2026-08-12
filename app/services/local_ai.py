@@ -4,10 +4,13 @@ import ast
 import base64
 import ipaddress
 import json
+import math
 import mimetypes
 import re
 import socket
 import threading
+import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -61,6 +64,39 @@ def _parse_json_object(content: str) -> dict:
     return {}
 
 
+def _compact_fact(value: object) -> str:
+    text = re.sub(r"<[^>]+>", "", str(value or "")).lower()
+    return re.sub(r"[\W_]+", "", text, flags=re.UNICODE).replace("的", "")
+
+
+def _claim_supported(claim: str, source: dict) -> bool:
+    evidence_text = re.sub(
+        r"<[^>]+>",
+        "",
+        str(source.get("evidence") or source.get("snippet") or source.get("caption") or source.get("content") or ""),
+    ).lower()
+    positive_clauses = [
+        value for value in re.split(r"[。！？；;\n，,]", evidence_text)
+        if not any(marker in value for marker in ("没有", "未见", "不含", "不存在", "看不见", "未发现"))
+    ]
+    evidence = _compact_fact(" ".join(positive_clauses))
+    raw_evidence = _compact_fact(
+        source.get("evidence") or source.get("snippet") or source.get("caption") or source.get("content")
+    )
+    compact = _compact_fact(claim)
+    if len(compact) < 2 or not raw_evidence:
+        return False
+    if compact in raw_evidence and compact not in evidence:
+        return False
+    if compact in evidence:
+        return True
+    if len(compact) <= 3:
+        return False
+    bigrams = {compact[index:index + 2] for index in range(len(compact) - 1)}
+    matched = sum(value in evidence for value in bigrams)
+    return matched >= max(2, math.ceil(len(bigrams) * 0.8))
+
+
 def _render_common_answer(payload: dict, sources: list[dict], question: str) -> str:
     items = payload.get("common") or payload.get("common_points") or []
     if not isinstance(items, list):
@@ -69,7 +105,8 @@ def _render_common_answer(payload: dict, sources: list[dict], question: str) -> 
     if "布置" in question:
         excluded = (
             "男子", "女子", "男士", "女士", "人物", "西装", "衣着", "动作", "微笑", "氛围",
-            "坐在", "站在", "斜倚",
+            "坐在", "站在", "斜倚", "衬衫", "上衣", "外套", "裙子", "裤子", "鞋子", "帽子",
+            "领带", "服装", "穿着",
         )
     lines: list[str] = []
     seen: set[str] = set()
@@ -86,7 +123,11 @@ def _render_common_answer(payload: dict, sources: list[dict], question: str) -> 
                 reference = int(value)
             except (TypeError, ValueError):
                 continue
-            if 1 <= reference <= len(sources) and reference not in references:
+            if (
+                1 <= reference <= len(sources)
+                and reference not in references
+                and _claim_supported(text, sources[reference - 1])
+            ):
                 references.append(reference)
         if len(references) < 2:
             continue
@@ -101,6 +142,29 @@ def _render_common_answer(payload: dict, sources: list[dict], question: str) -> 
     if not lines:
         return "现有证据不足以由至少两份资料可靠确认共同点。"
     return "由至少两份资料共同支持的内容：\n\n" + "\n".join(lines)
+
+
+def _fallback_common_arrangements(sources: list[dict]) -> str:
+    terms = (
+        "HAPPY BIRTHDAY气球", "金色边框镜子", "生日蛋糕", "背景板", "装饰墙", "气球",
+        "镜子", "蛋糕", "花束", "鲜花", "礼盒", "蜡烛", "烛台", "彩带", "灯笼",
+        "泰迪熊", "酒瓶", "酒杯", "桌布", "桌子", "餐具", "相框", "拱门", "展台",
+    )
+    matches: list[tuple[str, list[int]]] = []
+    for term in terms:
+        references = [
+            index for index, source in enumerate(sources, 1)
+            if _claim_supported(term, source)
+        ]
+        if len(references) >= 2 and not any(term in selected for selected, _ in matches):
+            matches.append((term, references))
+    if not matches:
+        return "现有证据不足以由至少两份资料可靠确认共同点。"
+    lines = [
+        f"- {term} {''.join(f'[{reference}]' for reference in references[:8])}"
+        for term, references in matches[:8]
+    ]
+    return "由至少两份资料共同支持的布置：\n\n" + "\n".join(lines)
 
 
 class _PriorityGate:
@@ -135,6 +199,9 @@ class LocalAIClient:
         self.settings = settings
         self._client_lock = threading.Lock()
         self._client: httpx.Client | None = None
+        self._cache_lock = threading.Lock()
+        self._embedding_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+        self._rerank_cache: OrderedDict[str, tuple[float, dict[int, dict]]] = OrderedDict()
         self._set_gates(1)
 
     def _http(self) -> httpx.Client:
@@ -158,6 +225,7 @@ class LocalAIClient:
         self._embedding_gate = gate(self.settings.embedding_base_url)
         self._vision_gate = gate(self.settings.vision_base_url)
         self._chat_gate = gate(self.settings.chat_base_url)
+        self._rerank_gate = gate(self.settings.rerank_base_url)
         self._transcription_gate = gate(self.settings.transcription_base_url)
 
     def set_max_concurrency(self, value: int) -> None:
@@ -170,6 +238,7 @@ class LocalAIClient:
             or self.settings.embedding_base_url
             or self.settings.vision_base_url
             or self.settings.chat_base_url
+            or self.settings.rerank_base_url
         )
 
     def _validate_endpoint(self, base_url: str | None = None) -> str:
@@ -202,11 +271,40 @@ class LocalAIClient:
             headers["Authorization"] = f"Bearer {self.settings.local_ai_api_key}"
         return headers
 
+    def _post_json(self, url: str, payload: dict, timeout: float) -> httpx.Response:
+        last_error: Exception | None = None
+        for attempt, delay in enumerate((0.0, 0.75, 2.0), 1):
+            if delay:
+                time.sleep(delay)
+            try:
+                response = self._http().post(
+                    url,
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=timeout,
+                )
+                if response.status_code not in {429, 502, 503, 504} or attempt == 3:
+                    response.raise_for_status()
+                    return response
+                last_error = httpx.HTTPStatusError(
+                    f"Transient model response {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                last_error = exc
+                if attempt == 3:
+                    raise
+        if last_error:
+            raise last_error
+        raise RuntimeError("模型服务请求失败")
+
     def health(self) -> dict:
         endpoints = {
             "embedding": self.settings.embedding_base_url,
             "vision": self.settings.vision_base_url,
             "chat": self.settings.chat_base_url,
+            "rerank": self.settings.rerank_base_url,
         }
         endpoints = {key: value for key, value in endpoints.items() if value}
         if not endpoints:
@@ -233,16 +331,29 @@ class LocalAIClient:
         if not self.settings.embedding_model or not texts:
             return []
         endpoint = self._validate_endpoint(self.settings.embedding_base_url)
+        cache_key = ""
+        if interactive and len(texts) == 1:
+            cache_key = f"{self.settings.embedding_model}\n{texts[0]}"
+            with self._cache_lock:
+                cached = self._embedding_cache.get(cache_key)
+                if cached and time.monotonic() - cached[0] <= 600:
+                    self._embedding_cache.move_to_end(cache_key)
+                    return [list(cached[1])]
         with self._embedding_gate.slot(interactive):
-            response = self._http().post(
+            response = self._post_json(
                 self._api_url(endpoint, "embeddings"),
-                headers=self._headers(),
-                json={"model": self.settings.embedding_model, "input": texts},
-                timeout=120,
+                {"model": self.settings.embedding_model, "input": texts},
+                120,
             )
-            response.raise_for_status()
             data = sorted(response.json()["data"], key=lambda item: item["index"])
-            return [item["embedding"] for item in data]
+            result = [item["embedding"] for item in data]
+        if cache_key and result:
+            with self._cache_lock:
+                self._embedding_cache[cache_key] = (time.monotonic(), list(result[0]))
+                self._embedding_cache.move_to_end(cache_key)
+                while len(self._embedding_cache) > 256:
+                    self._embedding_cache.popitem(last=False)
+        return result
 
     @staticmethod
     def embedding_query(query: str) -> str:
@@ -299,13 +410,11 @@ class LocalAIClient:
             }],
         }
         with self._vision_gate.slot():
-            response = self._http().post(
+            response = self._post_json(
                 self._api_url(endpoint, "chat/completions"),
-                headers=self._headers(),
-                json=payload,
-                timeout=180,
+                payload,
+                180,
             )
-            response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"].strip()
         content = re.sub(r"\s+", " ", content).strip()
         content = re.sub(r"^(图片|画面|描述)[:：]\s*", "", content)
@@ -347,51 +456,56 @@ class LocalAIClient:
             }],
         }
         with self._vision_gate.slot():
-            response = self._http().post(
+            response = self._post_json(
                 self._api_url(endpoint, "chat/completions"),
-                headers=self._headers(),
-                json=payload,
-                timeout=240,
+                payload,
+                240,
             )
-            response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"].strip()
 
     def rerank(self, query: str, candidates: list[dict]) -> dict[int, dict]:
-        if not self.settings.chat_model or not candidates:
+        if not self.settings.rerank_model or not candidates:
             return {}
-        endpoint = self._validate_endpoint(self.settings.chat_base_url)
+        endpoint = self._validate_endpoint(self.settings.rerank_base_url)
+        cache_key = json.dumps(
+            [self.settings.rerank_model, query, candidates],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._cache_lock:
+            cached = self._rerank_cache.get(cache_key)
+            if cached and time.monotonic() - cached[0] <= 300:
+                self._rerank_cache.move_to_end(cache_key)
+                return {key: dict(value) for key, value in cached[1].items()}
         documents = "\n\n".join(
-            f"[{index}] 文件名：{candidate['name']}\n路径：{candidate['path']}\n"
-            f"类型：{candidate['kind']}\n内容：{str(candidate.get('content') or '')[:320]}"
+            f"[{index}] 文件名：{candidate['name']}\n内容：{str(candidate.get('content') or '')[:160]}"
             for index, candidate in enumerate(candidates, 1)
         )
         payload = {
-            "model": self.settings.chat_model,
+            "model": self.settings.rerank_model,
             "temperature": 0,
-            "max_tokens": 520,
+            "max_tokens": 110,
+            "chat_template_kwargs": {"enable_thinking": False},
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "你是严格的私人资料相关性重排器。查询包含多个条件时，默认这些条件需要同时满足，"
-                        "不能因为只命中一个词就给高分。只依据候选内容中明确出现的主体、属性、场景、动作和文字评分，"
-                        "不得脑补。90-100表示直接且完整满足，70-89表示高度相关但缺少次要条件，"
-                        "40-69表示只满足部分条件，0-39表示弱相关或无关。"
-                        "完整满足全部条件的候选必须高于只满足部分条件的候选。"
-                        "只返回JSON数组，每项格式为{\"id\":候选编号,\"score\":0到100,\"reason\":\"12字内理由\"}。"
+                        "按查询全部条件严格重排，只依据候选中明确的主体、属性、场景、动作和文字，不得脑补。"
+                        "90-100为全部满足，70-89为高度相关，40-69为部分满足，0-39为无关或相反。"
+                        "只返回JSON数组，每项格式为{\"id\":候选编号,\"score\":0到100,"
+                        "\"match\":\"all|partial|negative|none\"}。match只能取这四个英文值，不要写理由。"
                     ),
                 },
                 {"role": "user", "content": f"查询：{query}\n\n候选：\n{documents}"},
             ],
         }
-        with self._chat_gate.slot(interactive=True):
-            response = self._http().post(
+        with self._rerank_gate.slot(interactive=True):
+            response = self._post_json(
                 self._api_url(endpoint, "chat/completions"),
-                headers=self._headers(),
-                json=payload,
-                timeout=180,
+                payload,
+                90,
             )
-            response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"].strip()
         values = _parse_rerank_values(content)
         result: dict[int, dict] = {}
@@ -402,7 +516,19 @@ class LocalAIClient:
                 score = max(0.0, min(1.0, float(item["score"]) / 100))
             except (KeyError, TypeError, ValueError, IndexError):
                 continue
-            result[int(candidate["id"])] = {"score": score, "reason": str(item.get("reason") or "")[:80]}
+            match_reason = {
+                "all": "全部条件",
+                "partial": "只满足部分",
+                "negative": "不符合",
+                "none": "无关",
+            }.get(str(item.get("match") or "").lower(), str(item.get("reason") or "")[:80])
+            result[int(candidate["id"])] = {"score": score, "reason": match_reason}
+        if result:
+            with self._cache_lock:
+                self._rerank_cache[cache_key] = (time.monotonic(), {key: dict(value) for key, value in result.items()})
+                self._rerank_cache.move_to_end(cache_key)
+                while len(self._rerank_cache) > 128:
+                    self._rerank_cache.popitem(last=False)
         return result
 
     def answer(self, question: str, sources: list[dict], history: list[dict] | None = None) -> str:
@@ -418,7 +544,7 @@ class LocalAIClient:
             payload = {
                 "model": self.settings.chat_model,
                 "temperature": 0,
-                "max_tokens": 500,
+                "max_tokens": 300,
                 "repeat_penalty": 1.15,
                 "response_format": {"type": "json_object"},
                 "messages": [
@@ -440,13 +566,11 @@ class LocalAIClient:
             answer = ""
             for _ in range(2):
                 with self._chat_gate.slot(interactive=True):
-                    response = self._http().post(
+                    response = self._post_json(
                         self._api_url(endpoint, "chat/completions"),
-                        headers=self._headers(),
-                        json=payload,
-                        timeout=180,
+                        payload,
+                        180,
                     )
-                    response.raise_for_status()
                     content = response.json()["choices"][0]["message"]["content"].strip()
                 answer = _render_common_answer(_parse_json_object(content), sources, question)
                 if not answer.startswith("现有证据不足"):
@@ -458,6 +582,8 @@ class LocalAIClient:
                         "content": "上一次输出无有效具体事实。请重新核对每份证据，text只能填写证据原文明确出现的具体物品或事实；没有则输出空数组。",
                     },
                 ])
+            if answer.startswith("现有证据不足") and "布置" in question:
+                return _fallback_common_arrangements(sources)
             return answer
         messages = [
             {
@@ -465,7 +591,8 @@ class LocalAIClient:
                 "content": (
                     "你是严谨的私有 NAS 资料助手。先判断资料是否真正回答问题，只使用直接相关的证据。"
                     "多个来源重复时合并，不把相似图片数量当成独立事实。每个可核查事实紧跟 [编号]；"
-                    "若证据只支持部分结论，明确区分“可以确认”“可能”“无法确认”。"
+                    "若证据只支持部分结论，明确区分“可以确认”“可能”“无法确认”。先直接回答问题，"
+                    "只给答案和必要依据，全文不超过120个汉字，最多3项，不复述检索过程或逐份资料。"
                     "回答共同点、相同点或比较类问题时，每个声称为共同点的事实必须至少由两个不同编号明确支持；"
                     "共同点段落和最终总结都只能列满足该条件的事实。只在一份资料出现的内容如有必要，"
                     "必须放在单独的“仅单个来源出现”段落，绝不能混入共同点。最多列8项，避免重复展开引用原文。"
@@ -486,18 +613,16 @@ class LocalAIClient:
         payload = {
             "model": self.settings.chat_model,
             "temperature": 0.1,
-            "max_tokens": 800,
+            "max_tokens": 180,
             "repeat_penalty": 1.15,
             "messages": messages,
         }
         with self._chat_gate.slot(interactive=True):
-            response = self._http().post(
+            response = self._post_json(
                 self._api_url(endpoint, "chat/completions"),
-                headers=self._headers(),
-                json=payload,
-                timeout=180,
+                payload,
+                180,
             )
-            response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"].strip()
 
     def transcribe(self, path: Path) -> dict:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import shutil
 import sqlite3
@@ -39,7 +40,10 @@ from app.database import Database
 from app.main import (
     LOGIN_FAILURES,
     PUBLIC_ACCESS_FAILURES,
+    _controller_status,
     _focus_answer_evidence,
+    _natural_date_filter,
+    _production_readiness,
     _select_answer_sources,
     app,
     state,
@@ -56,6 +60,7 @@ from app.services.hardware import GPU, _make_plan
 from app.services.local_ai import (
     LocalAIClient,
     _PriorityGate,
+    _fallback_common_arrangements,
     _parse_json_object,
     _parse_rerank_values,
     _render_common_answer,
@@ -65,6 +70,7 @@ from app.services.proxy import generate_look_preview, generate_proxy
 from app.services.recycle import RecycleBin
 from app.services.scanner import scan_library
 from app.services.search import SearchService, _partial_coverage_cap, _query_groups
+from app.services.tasks import TaskManager
 from app.services.watcher import LibraryWatcher
 from app.services.workspaces import WorkspaceService
 
@@ -421,19 +427,20 @@ class CoreTests(unittest.TestCase):
 
     def test_place_and_event_album_analysis(self) -> None:
         files = []
-        for index in range(6):
+        for index in range(7):
             path = self.library_path / f"album-{index}.jpg"
             Image.new("RGB", (320 + index, 240), "#4968ba").save(path)
             files.append(path)
         scan_library(self.database, self.library, lambda *_: None, lambda: False)
         rows = self.database.fetchall("SELECT id, name FROM files ORDER BY name")
         values = [
-            ("2024-05-01T09:00:00", 31.2304, 121.4737),
-            ("2024-05-01T10:00:00", 31.2310, 121.4740),
-            ("2024-05-01T11:00:00", 31.2320, 121.4750),
+            ("2024-05-01T11:00:00+08:00", 31.2304, 121.4737),
+            ("2024-05-01T04:00:00+00:00", 31.2310, 121.4740),
+            ("2024-05-01T13:00:00+08:00", 31.2320, 121.4750),
             ("2024-06-15T09:00:00", 39.9042, 116.4074),
             ("2024-06-15T10:00:00", 39.9050, 116.4080),
             ("2024-06-15T11:00:00", 39.9060, 116.4090),
+            ("2024-07-01T09:00:00", 0.0, 0.0),
         ]
         for row, value in zip(rows, values):
             self.database.execute(
@@ -446,6 +453,121 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(event_result["events"], 2)
         self.assertEqual(self.database.fetchone("SELECT COUNT(*) AS count FROM place_files")["count"], 6)
         self.assertEqual(self.database.fetchone("SELECT COUNT(*) AS count FROM event_files")["count"], 6)
+        place_names = {row["name"] for row in self.database.fetchall("SELECT name FROM places")}
+        self.assertEqual(place_names, {"上海市", "北京市"})
+        events = self.database.fetchall("SELECT start_at, end_at FROM events")
+        self.assertTrue(all(event["start_at"] <= event["end_at"] for event in events))
+
+    def test_natural_date_filters(self) -> None:
+        now = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+        self.assertEqual(
+            _natural_date_filter("去年在北京的照片", now),
+            ("2025-01-01", "2025-12-31", "在北京的照片"),
+        )
+        self.assertEqual(
+            _natural_date_filter("2024年5月 生日聚会", now),
+            ("2024-05-01", "2024-05-31", "生日聚会"),
+        )
+        self.assertEqual(
+            _natural_date_filter("最近7天的合同", now),
+            ("2026-08-06", "2026-08-12", "合同"),
+        )
+
+    def test_manual_transcript_replaces_automatic_text(self) -> None:
+        self.local_settings.cache_dir.mkdir(parents=True, exist_ok=True)
+        media = self.library_path / "interview.mp3"
+        media.write_bytes(b"audio fixture")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        self.database.set_manual_transcript(file_id, "这是人工修正后的采访转写。")
+        file = self.database.get_file(file_id)
+        result, chunks = index_file(file, self.local_settings, LocalAIClient(self.local_settings))
+        self.assertEqual(result["text"], "这是人工修正后的采访转写。")
+        self.assertEqual(result["metadata"]["transcription_source"], "manual")
+        self.assertEqual(chunks[0]["source_label"], "人工转写")
+
+    def test_video_visual_chunks_keep_seekable_timestamps(self) -> None:
+        video = self.library_path / "timeline.mp4"
+        video.write_bytes(b"video fixture")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file = self.database.get_file(self.database.pending_file_ids()[0])
+        local_settings = replace(
+            self.local_settings,
+            vision_base_url="http://vision",
+            vision_model="test",
+            video_frame_count=6,
+        )
+        local_settings.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        class VisualAI:
+            @staticmethod
+            def caption_image(path):
+                return f"画面 {path.stem}"
+
+            @staticmethod
+            def embeddings(values):
+                return [[0.1, 0.2] for _ in values]
+
+        with (
+            patch("app.services.extractors._probe_media", return_value={
+                "duration": 900.0,
+                "metadata": {"video_codec": "h264", "audio_codec": ""},
+            }),
+            patch("app.services.extractors._extract_video_frames", return_value=[
+                (120.0, Path("frame-one.jpg")),
+                (480.0, Path("frame-two.jpg")),
+            ]) as extract_frames,
+        ):
+            result, chunks = index_file(file, local_settings, VisualAI())
+        extract_frames.assert_called_once_with(Path(file["path"]), unittest.mock.ANY, 900.0, 5)
+        self.assertEqual(result["metadata"]["visual_frame_count"], 2)
+        self.assertEqual([chunk["start_time"] for chunk in chunks], [120.0, 480.0])
+        self.assertEqual(chunks[0]["source_label"], "120.0 秒画面")
+
+    def test_caption_upgrade_failure_preserves_existing_index(self) -> None:
+        image = self.library_path / "safe-upgrade.jpg"
+        Image.new("RGB", (64, 64), "#336699").save(image)
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        old_result = {
+            "caption": "旧版但可用的描述",
+            "text": "",
+            "quick_hash": "old",
+            "metadata": {"caption_version": 3},
+            "stages": {
+                "metadata": {"status": "ready", "error": ""},
+                "vision": {"status": "ready", "error": ""},
+                "transcription": {"status": "not_applicable", "error": ""},
+                "embedding": {"status": "ready", "error": ""},
+            },
+        }
+        self.database.finish_file_index(
+            file_id,
+            old_result,
+            [{"content": "旧版但可用的描述", "source_label": "画面描述", "embedding": [0.1, 0.2]}],
+        )
+
+        class FailingAI:
+            @staticmethod
+            def caption_image(_path):
+                raise RuntimeError("503 Service Unavailable")
+
+        class MemoryVectors:
+            @staticmethod
+            def file_points(_file_id):
+                return [{"id": file_id * 1_000_000, "vector": [0.1, 0.2], "payload": {"file_id": file_id}}]
+
+        manager = TaskManager(self.database, self.local_settings, FailingAI(), MemoryVectors())
+        task_id = self.database.create_task("upgrade_captions", {"limit": 1})
+        with patch("app.services.tasks.time.sleep", return_value=None):
+            message = asyncio.run(manager._upgrade_captions(task_id, [file_id]))
+        current = self.database.get_file(file_id)
+        chunk = self.database.fetchone("SELECT content FROM content_chunks WHERE file_id = ?", (file_id,))
+        self.assertEqual(current["ai_caption"], "旧版但可用的描述")
+        self.assertEqual(json.loads(current["metadata_json"])["caption_version"], 3)
+        self.assertEqual(chunk["content"], "旧版但可用的描述")
+        self.assertIn("保留旧版", message)
+        self.assertEqual(self.database.caption_upgrade_failure_summary()["retryable"], 1)
 
     def test_duplicate_recycle_and_restore(self) -> None:
         first = self.library_path / "keep.bin"
@@ -588,17 +710,65 @@ class CoreTests(unittest.TestCase):
             '{"text":"香槟","sources":[1]},'
             '{"text":"无效来源","sources":[1,99]}]}\n```'
         )
-        answer = _render_common_answer(payload, [{}, {}, {}], "有哪些共同的布置元素？")
+        answer = _render_common_answer(
+            payload,
+            [
+                {"evidence": "桌上摆放生日蛋糕，旁边有一名男子身穿西装"},
+                {"evidence": "房间中央是一只生日蛋糕，一名男子身穿西装"},
+                {"evidence": "画面内可见蛋糕"},
+            ],
+            "有哪些共同的布置元素？",
+        )
         self.assertIn("蛋糕 [1][2][3]", answer)
         self.assertNotIn("西装", answer)
         self.assertNotIn("香槟", answer)
         self.assertNotIn("无效来源", answer)
+
+    def test_common_answer_filters_unsupported_citations_and_clothing(self) -> None:
+        payload = {"common": [
+            {"text": "蓝色气球", "sources": [1, 2, 3]},
+            {"text": "蓝色衬衫", "sources": [1, 2]},
+        ]}
+        answer = _render_common_answer(
+            payload,
+            [
+                {"evidence": "墙上挂着一组蓝色气球，人物穿蓝色衬衫"},
+                {"evidence": "背景有蓝色气球和生日彩带"},
+                {"evidence": "桌面只有蛋糕，没有气球"},
+            ],
+            "有哪些共同的布置元素？",
+        )
+        self.assertIn("蓝色气球 [1][2]", answer)
+        self.assertNotIn("[3]", answer)
+        self.assertNotIn("衬衫", answer)
+        negative = _render_common_answer(
+            {"common": [{"text": "蛋糕", "sources": [1, 2]}]},
+            [{"evidence": "桌上摆着蛋糕"}, {"evidence": "桌上没有蛋糕"}],
+            "共同点是什么？",
+        )
+        self.assertTrue(negative.startswith("现有证据不足"))
+        attribute_mismatch = _render_common_answer(
+            {"common": [{"text": "白色桌布", "sources": [1, 2]}]},
+            [{"evidence": "桌上铺着白色桌布"}, {"evidence": "男子坐在白色桌旁"}],
+            "共同布置是什么？",
+        )
+        self.assertTrue(attribute_mismatch.startswith("现有证据不足"))
 
     def test_common_answer_rejects_schema_placeholders(self) -> None:
         answer = _render_common_answer(
             {"common": [{"text": "共同事实", "sources": [1, 2]}]}, [{}, {}], "共同点是什么？"
         )
         self.assertTrue(answer.startswith("现有证据不足"))
+
+    def test_common_arrangement_fallback_requires_two_sources(self) -> None:
+        answer = _fallback_common_arrangements([
+            {"evidence": "背景装饰有HAPPY BIRTHDAY气球和金色边框镜子，桌上摆着蛋糕"},
+            {"evidence": "身后有金色边框镜子和HAPPY BIRTHDAY气球，左侧桌上有蛋糕"},
+            {"evidence": "房间里只有一束鲜花"},
+        ])
+        self.assertIn("镜子 [1][2]", answer)
+        self.assertIn("蛋糕 [1][2]", answer)
+        self.assertNotIn("鲜花", answer)
 
     def test_partial_query_coverage_caps_confidence(self) -> None:
         self.assertEqual(_partial_coverage_cap(0.5), 0.58)
@@ -614,6 +784,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([group[0] for group in groups], ["生日", "聚会"])
         groups = _query_groups("有哪些照片同时拍到了灰色猫咪和花盆？")
         self.assertEqual([group[0] for group in groups], ["灰色", "猫咪", "花盆"])
+        groups = _query_groups("猫在花盆里")
+        self.assertEqual([group[0] for group in groups], ["猫", "花盆"])
+        groups = _query_groups("中国旅行")
+        self.assertEqual([group[0] for group in groups], ["中国", "旅行"])
+        groups = _query_groups("桌面上的生日蛋糕")
+        self.assertEqual([group[0] for group in groups], ["桌面", "生日", "蛋糕"])
+        self.assertIn("桌上", groups[0])
+        cat_groups = _query_groups("猫咪 花盆")
+        self.assertNotIn("喵", cat_groups[0])
+        meow_groups = _query_groups("喵 花盆")
+        self.assertIn("猫咪", meow_groups[0])
+        payment_groups = _query_groups("南方电网充电订单的实付金额和退款金额分别是多少？")
+        self.assertEqual(
+            [group[0] for group in payment_groups],
+            ["南方", "电网", "充电", "订单", "实付", "金额", "退款"],
+        )
+        panda_groups = _query_groups("木质平台上的大熊猫正在做什么？")
+        self.assertEqual([group[0] for group in panda_groups], ["木质", "平台", "大熊猫"])
+        fish_groups = _query_groups("鱼缸里的鱼主要有哪些颜色？")
+        self.assertEqual([group[0] for group in fish_groups], ["鱼缸", "鱼", "颜色"])
 
     def test_answer_sources_exclude_low_coverage_distractors(self) -> None:
         sources = _select_answer_sources([
@@ -630,6 +820,32 @@ class CoreTests(unittest.TestCase):
             {"name": "desk.jpg", "confidence": 0.9, "coverage": 0.25},
         ])
         self.assertEqual([source["name"] for source in sources], ["party.jpg", "party-two.jpg"])
+
+    def test_answer_sources_drop_low_confidence_reranked_distractors(self) -> None:
+        sources = _select_answer_sources([
+            {"name": "party.jpg", "confidence": 0.8, "coverage": 0.5, "rerank_reason": "直接相关"},
+            {"name": "party-two.jpg", "confidence": 0.7, "coverage": 0.5, "rerank_reason": "直接相关"},
+            {"name": "id-card.jpg", "confidence": 0.9, "coverage": 0.5, "rerank_reason": "非生日聚会场景"},
+        ])
+        self.assertEqual([source["name"] for source in sources], ["party.jpg", "party-two.jpg"])
+
+    def test_answer_sources_support_exact_fields_and_common_minimum(self) -> None:
+        candidates = [
+            {"name": "exact.jpg", "confidence": 0.9, "coverage": 1.0},
+            {"name": "partial.jpg", "confidence": 0.8, "coverage": 0.7},
+            {"name": "weak.jpg", "confidence": 0.4, "coverage": 0.4},
+        ]
+        exact = _select_answer_sources(candidates, prefer_single=True)
+        self.assertEqual([source["name"] for source in exact], ["exact.jpg"])
+        common = _select_answer_sources(candidates, minimum_sources=2)
+        self.assertEqual([source["name"] for source in common], ["exact.jpg", "partial.jpg"])
+
+        sparse = [
+            {"name": "best.jpg", "confidence": 0.95, "coverage": 1.0},
+            {"name": "second.jpg", "confidence": 0.2, "coverage": 0.4},
+        ]
+        common = _select_answer_sources(sparse, minimum_sources=2)
+        self.assertEqual([source["name"] for source in common], ["best.jpg", "second.jpg"])
 
     def test_answer_evidence_keeps_only_matched_sentences(self) -> None:
         source = _focus_answer_evidence({
@@ -671,7 +887,7 @@ class CoreTests(unittest.TestCase):
             task_columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
         self.assertTrue({
             "captured_at", "latitude", "longitude", "perceptual_hash", "content_hash",
-            "manual_caption", "metadata_status", "vision_status", "transcription_status", "embedding_status",
+            "manual_caption", "manual_transcript", "metadata_status", "vision_status", "transcription_status", "embedding_status",
             "retry_count", "last_attempt_at", "next_retry_at", "terminal_error", "last_error_fingerprint",
         }.issubset(columns))
         self.assertTrue({"work_total", "work_done", "heartbeat_at"}.issubset(task_columns))
@@ -1147,7 +1363,8 @@ class APITests(unittest.TestCase):
         self.assertIn("bootstrapForm", homepage.text)
         self.assertIn('name="password_confirm"', homepage.text)
         self.assertIn("完成设置并进入空间", homepage.text)
-        self.assertIn("response.token", script.text)
+        self.assertIn("response.cookie_session", script.text)
+        self.assertNotIn("if (!response.token)", script.text)
         self.assertNotIn("new URLSearchParams(location.search).get('token')", script.text)
         self.assertIn("searchParams.delete('token')", script.text)
         self.assertIn("auth_type === 'api_token'", script.text)
@@ -1158,6 +1375,8 @@ class APITests(unittest.TestCase):
         self.assertIn("conversation_id", script.text)
         self.assertIn("indexHealthMeta", homepage.text)
         self.assertIn("productionChecks", homepage.text)
+        self.assertIn("checkIndexConsistency", homepage.text)
+        self.assertIn("compactDatabase", homepage.text)
         self.assertIn("projectInboxButton", homepage.text)
         self.assertIn("lookModal", homepage.text)
         model_viewer = self.client.get("/assets/model-viewer.js")
@@ -1256,15 +1475,28 @@ class APITests(unittest.TestCase):
             patch.object(state.vectors, "health", return_value={"reachable": True}),
             patch.object(state.ai, "health", return_value={"reachable": True}),
         ):
+            report = _production_readiness()
             response = self.client.get("/api/ready")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ready"])
-        checks = {item["name"]: item for item in payload["checks"]}
+        self.assertNotIn("checks", payload)
+        checks = {item["name"]: item for item in report["checks"]}
         self.assertEqual(checks["database"]["level"], "ok")
         self.assertEqual(checks["authentication"]["level"], "ok")
         self.assertEqual(checks["local_ai"]["level"], "ok")
         self.assertEqual(checks["vector_store"]["level"], "ok")
+
+    def test_internal_scheduler_satisfies_controller_status(self) -> None:
+        with patch.object(state.tasks, "index_policy", return_value={
+            "enabled": True,
+            "start_hour": 0,
+            "end_hour": 7,
+        }):
+            status = _controller_status()
+        self.assertEqual(status["state"], "scheduled")
+        self.assertFalse(status["stale"])
+        self.assertIn("00:00–07:00", status["message"])
 
     def test_login_failures_are_rate_limited(self) -> None:
         username = f"rate-limit-{time.time_ns()}"
@@ -1567,6 +1799,16 @@ class APITests(unittest.TestCase):
         snapshots = self.client.get("/api/operations/vector-snapshots")
         self.assertEqual(snapshots.status_code, 200)
         self.assertIn("collection", snapshots.json())
+
+    def test_index_consistency_unavailable_is_clean_503(self) -> None:
+        with (
+            patch.object(state.vectors, "file_point_counts", side_effect=RuntimeError("qdrant offline")),
+            self.assertLogs("app.main", level="WARNING") as captured,
+        ):
+            response = self.client.get("/api/operations/index-consistency")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "向量数据库不可用，暂时无法核对索引一致性")
+        self.assertTrue(any("Index consistency check unavailable" in line for line in captured.output))
 
     def test_personal_library_search_album_and_conversation_endpoints(self) -> None:
         file_row = state.database.fetchone("SELECT * FROM files ORDER BY id LIMIT 1")
@@ -2050,6 +2292,40 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertIsNotNone(database.resolve_session(token_hash))
         database.set_user(user_id, "会话用户", "member", True, [], "new-hash")
         self.assertIsNone(database.resolve_session(token_hash))
+
+    def test_browser_cookie_session_requires_csrf_for_mutations(self) -> None:
+        self.client.cookies.clear()
+        username = f"cookie-user-{time.time_ns()}"
+        created = self.client.post("/api/users", json={
+            "username": username,
+            "display_name": "Cookie 用户",
+            "password": "strong-password",
+            "role": "member",
+            "library_ids": [],
+        })
+        self.assertEqual(created.status_code, 201)
+        try:
+            login = self.client.post(
+                "/api/auth/login",
+                headers={"X-Session-Cookie": "1"},
+                json={"username": username, "password": "strong-password"},
+            )
+            self.assertEqual(login.status_code, 200)
+            self.assertNotIn("token", login.json())
+            self.assertTrue(login.json()["cookie_session"])
+            self.assertTrue(self.client.cookies.get("nas_ai_session"))
+            csrf = self.client.cookies.get("nas_ai_csrf")
+            self.assertTrue(csrf)
+            me = self.client.get("/api/auth/me")
+            self.assertEqual(me.status_code, 200)
+            self.assertEqual(me.json()["auth_type"], "session")
+            rejected = self.client.post("/api/auth/logout")
+            self.assertEqual(rejected.status_code, 403)
+            accepted = self.client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
+            self.assertEqual(accepted.status_code, 200)
+            self.assertFalse(self.client.cookies.get("nas_ai_session"))
+        finally:
+            self.client.cookies.clear()
 
     def test_workspace_tickets_thread_safety(self) -> None:
         from app.main import WORKSPACE_TICKETS_LOCK, _workspace_ticket
@@ -2883,6 +3159,123 @@ class BackendRegressionPerfTests(unittest.TestCase):
         self.assertIsNone(client._client)
         self.assertIs(client._http(), client._http())
 
+    def test_vector_scroll_paginates_and_counts_files(self) -> None:
+        from app.services.vectors import VectorStore
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def json(self):
+                return self.payload
+
+            def raise_for_status(self):
+                return None
+
+        class FakeClient:
+            def __init__(self, responses):
+                self.responses = list(responses)
+                self.requests = []
+
+            def post(self, _url, **kwargs):
+                self.requests.append(kwargs["json"])
+                return FakeResponse(self.responses.pop(0))
+
+        points_client = FakeClient([
+            {"result": {"points": [{"id": 1, "vector": [0.1], "payload": {"file_id": 7}}], "next_page_offset": 1}},
+            {"result": {"points": [{"id": 2, "vector": [0.2], "payload": {"file_id": 7}}], "next_page_offset": None}},
+        ])
+        store = VectorStore(self.local_settings)
+        store._client = points_client
+        self.assertEqual([point["id"] for point in store.file_points(7)], [1, 2])
+        self.assertEqual(points_client.requests[1]["offset"], 1)
+
+        counts_client = FakeClient([
+            {"result": {"points": [{"id": 1, "payload": {"file_id": 7}}, {"id": 2, "payload": {"file_id": 8}}], "next_page_offset": 2}},
+            {"result": {"points": [{"id": 3, "payload": {"file_id": 7}}], "next_page_offset": None}},
+        ])
+        store._client = counts_client
+        self.assertEqual(store.file_point_counts(), {7: 2, 8: 1})
+        self.assertEqual(counts_client.requests[0]["with_payload"], ["file_id"])
+
+    def test_index_db_failure_restores_old_vectors_and_removes_new_extras(self) -> None:
+        document = self.library_path / "rollback.txt"
+        document.write_text("旧索引正文", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file_id = self.database.pending_file_ids()[0]
+        old_result = {
+            "caption": "",
+            "text": "旧索引正文",
+            "quick_hash": "old",
+            "metadata": {},
+            "stages": {
+                "metadata": {"status": "ready", "error": ""},
+                "vision": {"status": "not_applicable", "error": ""},
+                "transcription": {"status": "not_applicable", "error": ""},
+                "embedding": {"status": "ready", "error": ""},
+            },
+        }
+        self.database.finish_file_index(
+            file_id,
+            old_result,
+            [{"content": "旧索引正文", "source_label": "正文", "embedding": [0.1]}],
+        )
+        base_id = file_id * 1_000_000
+
+        class RecordingVectors:
+            restored = []
+            deleted = []
+
+            @staticmethod
+            def file_points(_file_id):
+                return [{"id": base_id, "vector": [0.1], "payload": {"file_id": file_id}}]
+
+            @staticmethod
+            def stage_file(_file, _chunks):
+                return [base_id, base_id + 1]
+
+            @classmethod
+            def restore_points(cls, points):
+                cls.restored.append(points)
+
+            @classmethod
+            def delete_points(cls, point_ids):
+                cls.deleted.append(point_ids)
+
+        new_result = {
+            **old_result,
+            "text": "新版正文",
+            "quick_hash": "new",
+        }
+        new_chunks = [
+            {"content": "新版正文一", "source_label": "正文", "embedding": [0.2]},
+            {"content": "新版正文二", "source_label": "正文", "embedding": [0.3]},
+        ]
+        manager = TaskManager(self.database, self.local_settings, LocalAIClient(self.local_settings), RecordingVectors())
+        task_id = self.database.create_task("index_files", {"file_ids": [file_id]})
+        with (
+            patch("app.services.tasks.index_file", return_value=(new_result, new_chunks)),
+            patch.object(self.database, "finish_file_index", side_effect=sqlite3.OperationalError("disk full")),
+        ):
+            asyncio.run(manager._index_file_ids(task_id, [file_id]))
+        self.assertEqual(len(RecordingVectors.restored), 1)
+        self.assertIn([base_id + 1], RecordingVectors.deleted)
+        chunk = self.database.fetchone("SELECT content FROM content_chunks WHERE file_id = ?", (file_id,))
+        self.assertEqual(chunk["content"], "旧索引正文")
+
+    def test_scan_only_uses_dedicated_light_queue(self) -> None:
+        manager = TaskManager(self.database, self.local_settings, LocalAIClient(self.local_settings), NullVectors())
+
+        async def scenario() -> None:
+            await manager._enqueue("scan_only", 2, 10)
+            await manager._enqueue("index_pending", 1, 11)
+            self.assertEqual(await manager.light_queue.get(), (-2, 10))
+            self.assertEqual(await manager.queue.get(), (-1, 11))
+
+        asyncio.run(scenario())
+
     def test_album_refresh_is_throttled_until_queue_drains(self) -> None:
         import asyncio
         from unittest.mock import AsyncMock
@@ -2958,7 +3351,7 @@ class OpsAgentTests(unittest.TestCase):
                 self.assertEqual(calls[-1], (
                     "POST",
                     "/containers/nas-ai-space-vision-1/update",
-                    {"Memory": 3072 * 1024 * 1024, "MemorySwap": -1},
+                    {"Memory": 3072 * 1024 * 1024, "MemorySwap": 6144 * 1024 * 1024},
                 ))
                 ops_agent.set_memory("speech", 512)
                 self.assertEqual(ops_agent.load_overrides(), {"vision": 3072, "speech": 512})
@@ -2998,7 +3391,7 @@ class OpsAgentTests(unittest.TestCase):
 
         with patch.object(ops_agent, "docker_request", side_effect=fake_docker):
             items = ops_agent.list_containers()
-        self.assertEqual(len(items), 5)
+        self.assertEqual(len(items), 6)
         app_item = items[0]
         self.assertEqual(app_item["service"], "app")
         self.assertEqual(app_item["name"], "nas-ai-space-app-1")

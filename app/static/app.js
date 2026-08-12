@@ -43,6 +43,7 @@ const state = {
   assetLayout: 'grid',
   currentAsset: null,
   currentVersionId: null,
+  versionCompare: false,
   lookPreviewEnabled: false,
   annotationStrokes: [],
   drawingActive: false,
@@ -308,6 +309,10 @@ $('#dialogInput').addEventListener('keydown', event => {
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (options.method && !['GET', 'HEAD', 'OPTIONS'].includes(options.method.toUpperCase())) {
+    const csrf = document.cookie.split('; ').find(item => item.startsWith('nas_ai_csrf='))?.split('=').slice(1).join('=');
+    if (csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
+  }
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const response = await fetch(path, { ...options, headers });
   let detail = `请求失败 (${response.status})`;
@@ -658,7 +663,7 @@ async function loadSystem() {
       <article class="hardware-card">${hardwareHead('cpu', '主机', 'NAS 计算资源')}${kv('处理器', data.hardware.cpu)}${kv('架构', data.hardware.arch)}${kv('逻辑核心', data.hardware.logical_cpus)}${kv('可用内存', fmtBytes(data.hardware.memory_bytes))}</article>
       <article class="hardware-card">${hardwareHead('gpu', '加速器', '图形与运行时')}${kv('GPU', gpu)}${kv('ONNX', data.hardware.onnx_providers.join(', ') || 'CPU / 未安装')}${kv('媒体后端', plan.media_backend.toUpperCase())}${kv('推理后端', plan.inference_backend.toUpperCase())}</article>
       <article class="hardware-card wide">${hardwareHead('plan', '调度策略', '自动执行计划')}<div class="plan-list">${plan.reasons.map(value => `<div class="plan-step">${esc(value)}</div>`).join('')}</div>${kv('任务进程', data.configuration.indexing.task_workers)}${kv('文件索引线程', data.configuration.indexing.index_workers)}${kv('媒体处理并发', plan.media_workers)}${kv('模型推理并发', plan.inference_workers)}${kv('内存保护线', fmtBytes(data.configuration.indexing.min_available_memory_bytes))}${kv('Swap 保护线', fmtBytes(data.configuration.indexing.min_free_swap_bytes))}</article>
-      <article class="hardware-card">${hardwareHead('model', '本地模型', '推理服务')}${kv('服务状态', data.local_ai.configured ? (data.local_ai.reachable ? '已连接' : '连接失败') : '未配置')}${kv('向量模型', data.configuration.embedding_model || '未配置')}${kv('视觉模型', data.configuration.vision_model || '未配置')}${kv('问答模型', data.configuration.chat_model || '未配置')}</article>
+      <article class="hardware-card">${hardwareHead('model', '本地模型', '推理服务')}${kv('服务状态', data.local_ai.configured ? (data.local_ai.reachable ? '已连接' : '连接失败') : '未配置')}${kv('向量模型', data.configuration.embedding_model || '未配置')}${kv('视觉模型', data.configuration.vision_model || '未配置')}${kv('精准重排', data.configuration.rerank_model || data.configuration.chat_model || '未配置')}${kv('问答模型', data.configuration.chat_model || '未配置')}</article>
       <article class="hardware-card">${hardwareHead('vector', '向量索引', 'Qdrant 数据库')}${kv('运行状态', data.vector_store.reachable ? '运行中' : '不可达')}${kv('检索结构', 'HNSW · On-disk')}${kv('数据位置', 'NAS 本地卷')}</article>`;
   } catch (error) {
     toast(error.message, true);
@@ -977,7 +982,10 @@ function renderSearchResults(data, append = false, phase = 'fast') {
   const label = phase === 'precise' && data.precise
     ? '全文 + 语义 + 精准重排'
     : data.semantic ? '全文 + 语义' : '全文索引';
-  $('#searchSummary').innerHTML = `找到约 ${fmtCount(data.total)} 个候选 · 已显示 ${fmtCount(state.searchResults.length)} 个 · ${label}${phase === 'fast' && state.preciseSearch ? '<span class="refining"><i></i>正在后台精排首屏</span>' : ''}`;
+  const dateHint = data.applied_filters
+    ? ` · 已识别日期 ${esc(data.applied_filters.date_from)} 至 ${esc(data.applied_filters.date_to)}`
+    : '';
+  $('#searchSummary').innerHTML = `找到约 ${fmtCount(data.total)} 个候选 · 已显示 ${fmtCount(state.searchResults.length)} 个 · ${label}${dateHint}${phase === 'fast' && state.preciseSearch ? '<span class="refining"><i></i>正在后台精排首屏</span>' : ''}`;
   if (state.searchResults.length) {
     renderFileList($('#searchResults'), state.searchResults);
   } else {
@@ -1528,10 +1536,19 @@ async function loadOperations() {
       statsCard('回收站', fmtCount(data.recycle.count), `${fmtBytes(data.recycle.bytes)} 可恢复`, 'recycle'),
     ].join('');
     const production = data.production || { ready: false, checks: [] };
-    $('#productionBadge').textContent = production.ready ? '生产基线通过' : '存在阻塞项';
-    $('#productionBadge').classList.toggle('warning', !production.ready);
+    $('#productionBadge').textContent = production.status === 'healthy' ? '生产基线通过' : production.ready ? '生产可用 · 有提醒' : '存在阻塞项';
+    $('#productionBadge').classList.toggle('warning', production.status !== 'healthy');
+    const checkLabels = {
+      database: '索引数据库', vector_store: '向量数据库', local_ai: '本地 AI 服务',
+      authentication: '访问控制', bootstrap: '管理员初始化', storage: '存储空间',
+      memory_headroom: '内存余量', backup: '元数据备份', vector_backup: '向量灾备',
+      sensitive_permissions: '敏感文件权限', backup_verification: '备份完整性',
+      index_failures: '索引失败项', caption_upgrades: '图片描述版本',
+      caption_upgrade_failures: '描述迁移失败', index_controller: '外部调度器',
+      task_heartbeat: '任务心跳',
+    };
     $('#productionChecks').innerHTML = production.checks.length
-      ? production.checks.map(check => `<div class="production-check ${esc(check.level)}"><i></i><div><b>${esc(check.name)}</b><span>${esc(check.detail)}</span></div><small>${check.level === 'ok' ? '通过' : check.level === 'warning' ? '提醒' : '阻塞'}</small></div>`).join('')
+      ? production.checks.map(check => `<div class="production-check ${esc(check.level)}"><i></i><div><b>${esc(checkLabels[check.name] || check.name)}</b><span>${esc(check.detail)}</span></div><small>${check.level === 'ok' ? '通过' : check.level === 'warning' ? '提醒' : '阻塞'}</small></div>`).join('')
       : '<div class="empty-state compact"><b>尚未取得生产检查结果</b></div>';
     const stages = data.indexing.stages;
     const stageCard = (name, values) => {
@@ -1560,8 +1577,32 @@ async function loadOperations() {
   }
 }
 
+async function loadIndexConsistency() {
+  const status = $('#indexConsistencyStatus');
+  const repair = $('#repairIndexConsistency');
+  status.innerHTML = '<span>正在核对 SQLite 与向量索引…</span><small>大规模资料库可能需要几十秒</small>';
+  repair.disabled = true;
+  try {
+    const data = await api('/api/operations/index-consistency');
+    const missing = data.missing_vectors.length;
+    const stale = data.stale_vectors.length;
+    const mismatched = data.count_mismatches.length;
+    const issues = missing + stale + mismatched;
+    status.innerHTML = data.ok
+      ? `<span class="ok">一致性正常</span><small>已核对 ${fmtCount(data.sql_files)} 个资料索引 · ${esc(fmtTime(data.checked_at))}</small>`
+      : `<span class="warning">发现 ${fmtCount(issues)} 个异常${data.truncated ? '（仅显示首批）' : ''}</span><small>缺失向量 ${fmtCount(missing)} · 孤立向量 ${fmtCount(stale)} · 分块数量不符 ${fmtCount(mismatched)}</small>`;
+    repair.disabled = data.ok;
+    repair.dataset.issueCount = String(issues);
+    return data;
+  } catch (error) {
+    status.innerHTML = `<span class="warning">检查失败</span><small>${esc(error.message)}</small>`;
+    toast(error.message, true);
+    return null;
+  }
+}
+
 // 阶段八（容器资源）：ops 边车代理的容器面板
-const OPS_SERVICE_LABELS = { app: '应用', vision: '视觉识别', embedding: '语义向量', qdrant: '向量数据库', speech: '语音转写' };
+const OPS_SERVICE_LABELS = { app: '应用', vision: '视觉识别', reranker: '精准重排', embedding: '语义向量', qdrant: '向量数据库', speech: '语音转写' };
 
 function containerRow(item) {
   const usage = Number(item.mem_usage_bytes || 0);
@@ -1604,6 +1645,8 @@ function uploadOne(file, progress) {
     xhr.open('POST', '/api/uploads');
     xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
     if (state.token) xhr.setRequestHeader('Authorization', `Bearer ${state.token}`);
+    const csrf = document.cookie.split('; ').find(item => item.startsWith('nas_ai_csrf='))?.split('=').slice(1).join('=');
+    if (csrf) xhr.setRequestHeader('X-CSRF-Token', decodeURIComponent(csrf));
     xhr.upload.addEventListener('progress', event => {
       if (event.lengthComputable) progress(event.loaded / event.total);
     });
@@ -1658,6 +1701,8 @@ async function openFileViewer(fileId, matchTime = null) {
       ? `<h3>${details.manual_caption ? '人工内容描述' : 'AI 内容描述'}</h3><p>${esc(details.ai_caption).replace(/\n/g, '<br>')}</p>${details.vision_error ? `<small class="stage-error">${esc(details.vision_error)}</small>` : ''}`
       : `<p class="muted">该文件还没有内容描述。</p>${details.vision_error ? `<small class="stage-error">${esc(details.vision_error)}</small>` : ''}`;
     $('#manualCaption').value = details.manual_caption || '';
+    $('#transcriptEditor').hidden = !['audio', 'video'].includes(details.kind);
+    $('#manualTranscript').value = details.manual_transcript || details.extracted_text || '';
     $('#reindexFile').textContent = Number(details.terminal_error) ? '清除失败状态并手动重试' : '重新建立 AI 索引';
     $('#favoriteFile').classList.toggle('active', Boolean(details.favorite));
     $('#favoriteFile').textContent = details.favorite ? '★ 已收藏' : '☆ 收藏';
@@ -1970,9 +2015,11 @@ async function loadDeliveries() {
   } catch (error) { toast(error.message, true); }
 }
 
-// HTML5 video 拿不到精确帧率，逐帧步进统一按 25fps，需要调整时改这里
-const REVIEW_FPS = 25;
-const FRAME_STEP_SECONDS = 1 / REVIEW_FPS;
+function reviewFrameRate() {
+  const version = state.currentAsset?.versions?.find(item => Number(item.id) === Number(state.currentVersionId));
+  const value = Number(version?.frame_rate || 0);
+  return value > 0 && value <= 240 ? value : 25;
+}
 
 function reviewMedia() {
   return $('#reviewCanvas video, #reviewCanvas audio');
@@ -1982,13 +2029,15 @@ function stepReviewFrame(direction) {
   const media = reviewMedia();
   if (!media) return;
   media.pause();
-  media.currentTime = Math.max(0, Math.min(media.duration || Infinity, media.currentTime + direction * FRAME_STEP_SECONDS));
+  media.currentTime = Math.max(0, Math.min(media.duration || Infinity, media.currentTime + direction / reviewFrameRate()));
 }
 
 function updateReviewTimecode() {
   const media = reviewMedia();
   const seconds = Number(media?.currentTime || 0);
-  const frames = Math.floor(seconds * REVIEW_FPS) % REVIEW_FPS;
+  const fps = reviewFrameRate();
+  const displayFps = Math.max(1, Math.round(fps));
+  const frames = Math.floor((seconds - Math.floor(seconds)) * fps) % displayFps;
   const totalSeconds = Math.floor(seconds);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor(totalSeconds / 60) % 60;
@@ -2018,9 +2067,12 @@ function commentAttachmentHtml(file) {
   return `<a class="comment-attachment-link" href="${esc(file.url)}" target="_blank" rel="noopener">${label}</a>`;
 }
 
-async function uploadCommentAttachment(url, file) {
+async function uploadCommentAttachment(url, file, shareAccessCode = '') {
   const headers = { 'X-Filename': encodeURIComponent(file.name) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (shareAccessCode) headers['X-Share-Access-Code'] = shareAccessCode;
+  const csrf = document.cookie.split('; ').find(item => item.startsWith('nas_ai_csrf='))?.split('=').slice(1).join('=');
+  if (csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
   const response = await fetch(url, { method: 'POST', headers, body: file });
   if (!response.ok) {
     let detail = `附件上传失败 (${response.status})`;
@@ -2058,12 +2110,49 @@ function updateReviewActions(version) {
   lookButton.hidden = !canEdit || !['image', 'video'].includes(version.kind);
   lookButton.disabled = version.look_status === 'processing';
   lookButton.textContent = version.look_status === 'processing' ? 'LUT 生成中' : 'LUT 预览';
+  $('#compareVersions').hidden = (state.currentAsset?.versions?.length || 0) < 2;
+  $('#compareVersions').textContent = state.versionCompare ? '退出对比' : '版本对比';
+}
+
+async function toggleVersionCompare() {
+  if (!state.currentAsset || !state.currentVersionId) return;
+  if (state.versionCompare) {
+    state.versionCompare = false;
+    return loadReviewVersion(state.currentVersionId);
+  }
+  const current = state.currentAsset.versions.find(item => Number(item.id) === Number(state.currentVersionId));
+  const other = state.currentAsset.versions.find(item => Number(item.id) !== Number(state.currentVersionId));
+  if (!current || !other) return toast('至少需要两个版本才能对比', true);
+  try {
+    const [left, right] = await Promise.all([
+      api(`/api/asset-versions/${other.id}/ticket?variant=best`, { method: 'POST' }),
+      api(`/api/asset-versions/${current.id}/ticket?variant=best`, { method: 'POST' }),
+    ]);
+    state.versionCompare = true;
+    disposeReviewViewer();
+    const labels = `<div class="compare-label compare-left">V${other.version_number} · ${esc(other.label || other.file_name)}</div><div class="compare-label compare-right">V${current.version_number} · ${esc(current.label || current.file_name)}</div>`;
+    if (current.kind === 'image' && other.kind === 'image') {
+      $('#reviewCanvas').innerHTML = `<div class="version-compare overlay-compare"><img src="${esc(left.url)}" alt="旧版本"><div class="compare-overlay"><img src="${esc(right.url)}" alt="当前版本"></div>${labels}<input class="compare-slider" type="range" min="0" max="100" value="50" aria-label="版本对比范围"></div>`;
+      $('.compare-slider').addEventListener('input', event => {
+        $('.compare-overlay').style.clipPath = `inset(0 ${100 - Number(event.target.value)}% 0 0)`;
+      });
+    } else if (current.kind === 'video' && other.kind === 'video') {
+      $('#reviewCanvas').innerHTML = `<div class="version-compare side-compare"><div><span>V${other.version_number}</span><video controls preload="metadata" src="${esc(left.url)}"></video></div><div><span>V${current.version_number}</span><video controls preload="metadata" src="${esc(right.url)}"></video></div></div>`;
+    } else {
+      $('#reviewCanvas').innerHTML = `<div class="empty-state"><b>这两个版本无法画面对比</b><p>图片与视频需要选择相同媒体类型。</p></div>`;
+    }
+    $('#reviewFilmstrip').innerHTML = '';
+    $('#compareVersions').textContent = '退出对比';
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function loadReviewVersion(versionId, seekTime = null) {
   const version = state.currentAsset.versions.find(item => Number(item.id) === Number(versionId));
   if (!version) return;
   state.currentVersionId = Number(version.id);
+  state.versionCompare = false;
   updateReviewActions(version);
   if (!version.look_path) state.lookPreviewEnabled = false;
   state.annotationStrokes = [];
@@ -2688,6 +2777,38 @@ document.addEventListener('click', async event => {
     } catch (error) { toast(error.message, true); }
     return;
   }
+  if (event.target.closest('#checkIndexConsistency')) {
+    await loadIndexConsistency();
+    return;
+  }
+  if (event.target.closest('#repairIndexConsistency')) {
+    const count = Number(event.target.closest('#repairIndexConsistency').dataset.issueCount || 0);
+    if (!(await confirmDialog({
+      title: '修复索引一致性',
+      body: `将清理孤立向量，并把 ${fmtCount(count)} 个异常资料加入无损重建队列。继续吗？`,
+      confirmText: '开始修复',
+    }))) return;
+    try {
+      const result = await api('/api/operations/index-consistency/repair', { method: 'POST' });
+      toast(result.task_id ? '异常索引已加入修复队列' : '孤立向量已清理');
+      await loadIndexConsistency();
+      if (result.task_id) showView('tasks');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  if (event.target.closest('#compactDatabase')) {
+    if (!(await confirmDialog({
+      title: '压缩索引数据库',
+      body: '系统会先创建安全备份，再清理旧版冗余向量并回收空间。压缩期间请勿开始新的索引任务。',
+      confirmText: '备份并压缩',
+    }))) return;
+    try {
+      const result = await api('/api/operations/database/compact', { method: 'POST' });
+      toast(`数据库已压缩，回收 ${fmtBytes(result.reclaimed_bytes)}`);
+      loadOperations();
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
   if (event.target.closest('#addLibrary')) return openModal($('#libraryModal'));
   if (event.target.matches('[data-close]') || event.target.classList.contains('modal')) {
     const modal = event.target.closest('.modal');
@@ -2792,7 +2913,7 @@ document.addEventListener('click', async event => {
         method: 'POST',
         body: JSON.stringify({ limit }),
       });
-      toast(result.existing ? '已有图片描述升级任务在运行' : limit >= 100000 ? '已加入全部旧版图片描述的升级任务' : `已加入 ${limit} 张图片描述升级任务`);
+      toast(result.existing ? '已有图片描述升级任务在运行' : `已加入 ${limit} 张图片的无损描述升级任务`);
       showView('tasks');
     } catch (error) { toast(error.message, true); }
     return;
@@ -2965,6 +3086,18 @@ document.addEventListener('click', async event => {
         body: JSON.stringify({ caption: $('#manualCaption').value.trim() }),
       });
       toast('人工描述已保存，正在重建向量索引');
+      closeFileViewer();
+      showView('tasks');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  if (event.target.closest('#saveManualTranscript') && state.currentFile) {
+    try {
+      await api(`/api/files/${state.currentFile.id}/transcript`, {
+        method: 'PUT',
+        body: JSON.stringify({ transcript: $('#manualTranscript').value.trim() }),
+      });
+      toast('转写校正已保存，正在重建向量索引');
       closeFileViewer();
       showView('tasks');
     } catch (error) { toast(error.message, true); }
@@ -3151,6 +3284,7 @@ document.addEventListener('click', async event => {
   const review = event.target.closest('[data-review-asset]');
   if (review) return openAssetReview(review.dataset.reviewAsset, review.dataset.reviewTime === '' ? null : Number(review.dataset.reviewTime));
   if (event.target.closest('#closeAssetReview')) return closeReview();
+  if (event.target.closest('#compareVersions')) return toggleVersionCompare();
   if (event.target.closest('#openVersionModal')) {
     const form = $('#versionForm');
     form.reset();
@@ -3507,12 +3641,17 @@ $('#bootstrapForm').addEventListener('submit', async event => {
   }
   delete data.password_confirm;
   try {
-    const response = await api('/api/auth/bootstrap', { method: 'POST', body: JSON.stringify(data) });
+    const response = await api('/api/auth/bootstrap', {
+      method: 'POST',
+      headers: { 'X-Session-Cookie': '1' },
+      body: JSON.stringify(data),
+    });
+    if (!response.cookie_session || !response.user) throw new Error('登录会话创建失败');
     state.bootstrapRequired = false;
-    state.token = response.token;
+    state.token = '';
     state.user = response.user;
     state.authReady = true;
-    localStorage.setItem('nasAiToken', state.token);
+    localStorage.removeItem('nasAiToken');
     form.reset();
     closeModal($('#tokenModal'));
     toast(`设置完成，欢迎 ${response.user.display_name}`);
@@ -3525,11 +3664,16 @@ $('#loginForm').addEventListener('submit', async event => {
   const form = event.currentTarget;
   const data = Object.fromEntries(new FormData(form));
   try {
-    const response = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) });
-    state.token = response.token;
+    const response = await api('/api/auth/login', {
+      method: 'POST',
+      headers: { 'X-Session-Cookie': '1' },
+      body: JSON.stringify(data),
+    });
+    if (!response.cookie_session || !response.user) throw new Error('登录会话创建失败');
+    state.token = '';
     state.user = response.user;
     state.authReady = true;
-    localStorage.setItem('nasAiToken', state.token);
+    localStorage.removeItem('nasAiToken');
     form.reset();
     closeModal($('#tokenModal'));
     toast(`欢迎，${response.user.display_name}`);
@@ -3537,7 +3681,7 @@ $('#loginForm').addEventListener('submit', async event => {
     // 从“安全设置”齿轮进入的登录：登录完成后回到账号与安全面板
     if (state.reopenAuthAfterLogin) {
       state.reopenAuthAfterLogin = false;
-      $('#tokenForm [name=token]').value = state.user?.auth_type === 'api_token' ? state.token : '';
+      $('#tokenForm [name=token]').value = '';
       $('#authTitle').textContent = '账号与安全';
       openModal($('#tokenModal'));
     }
@@ -3849,8 +3993,9 @@ document.addEventListener('submit', async event => {
     const files = [...(form.elements.attachments?.files || [])];
     for (const file of files) {
       await uploadCommentAttachment(
-        `/api/public/shares/${encodeURIComponent(token)}/comments/${comment.id}/attachments?access_code=${encodeURIComponent(state.publicAccessCode)}`,
+        `/api/public/shares/${encodeURIComponent(token)}/comments/${comment.id}/attachments`,
         file,
+        state.publicAccessCode,
       );
     }
     form.reset();
@@ -3996,12 +4141,6 @@ async function boot() {
     $('#tokenDivider').hidden = false;
     $('#authCloseButton').hidden = false;
     $('#authEyebrow').textContent = '安全登录';
-    if (health.auth_enabled && !state.token) {
-      state.user = null;
-      applyRole();
-      openModal($('#tokenModal'));
-      return;
-    }
     state.user = await api('/api/auth/me');
     state.authReady = true;
     applyRole();

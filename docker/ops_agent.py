@@ -18,6 +18,7 @@ import json
 import os
 import re
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,6 +32,7 @@ CONTAINERS = {
     "app": "nas-ai-space-app-1",
     "vision": "nas-ai-space-vision-1",
     "embedding": "nas-ai-space-embedding-1",
+    "reranker": "nas-ai-space-reranker-1",
     "qdrant": "nas-ai-space-qdrant-1",
     "speech": "nas-ai-space-speech-1",
 }
@@ -128,7 +130,7 @@ def save_override(service: str, mb: int) -> None:
 def _docker_update_memory(container: str, mb: int) -> None:
     docker_request("POST", f"/containers/{container}/update", {
         "Memory": mb * 1024 * 1024,
-        "MemorySwap": -1,
+        "MemorySwap": mb * 2 * 1024 * 1024,
     })
 
 
@@ -141,25 +143,29 @@ def apply_overrides() -> None:
             continue
 
 
+def _container_snapshot(item: tuple[str, str]) -> dict:
+    service, container = item
+    info = docker_request("GET", f"/containers/{container}/json")
+    state = info.get("State") or {}
+    mem_usage = 0
+    if state.get("Running"):
+        stats = docker_request("GET", f"/containers/{container}/stats?stream=false")
+        mem_usage = int((stats.get("memory_stats") or {}).get("usage") or 0)
+    return {
+        "name": str(info.get("Name") or "").lstrip("/") or container,
+        "service": service,
+        "status": state.get("Status", "unknown"),
+        "mem_usage_bytes": mem_usage,
+        "mem_limit_bytes": int((info.get("HostConfig") or {}).get("Memory") or 0),
+        "memswap_limit_bytes": int((info.get("HostConfig") or {}).get("MemorySwap") or 0),
+        "restart_count": int(info.get("RestartCount") or 0),
+        "oom_killed": bool(state.get("OOMKilled")),
+    }
+
+
 def list_containers() -> list[dict]:
-    items = []
-    for service, container in CONTAINERS.items():
-        info = docker_request("GET", f"/containers/{container}/json")
-        state = info.get("State") or {}
-        mem_usage = 0
-        if state.get("Running"):
-            stats = docker_request("GET", f"/containers/{container}/stats?stream=false")
-            mem_usage = int((stats.get("memory_stats") or {}).get("usage") or 0)
-        items.append({
-            "name": str(info.get("Name") or "").lstrip("/") or container,
-            "service": service,
-            "status": state.get("Status", "unknown"),
-            "mem_usage_bytes": mem_usage,
-            "mem_limit_bytes": int((info.get("HostConfig") or {}).get("Memory") or 0),
-            "restart_count": int(info.get("RestartCount") or 0),
-            "oom_killed": bool(state.get("OOMKilled")),
-        })
-    return items
+    with ThreadPoolExecutor(max_workers=len(CONTAINERS)) as executor:
+        return list(executor.map(_container_snapshot, CONTAINERS.items()))
 
 
 def set_memory(service: str, mb: object) -> dict:

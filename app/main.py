@@ -43,6 +43,8 @@ from app.services.workspaces import COMMENT_ROLES, EDIT_ROLES, MANAGE_ROLES, Wor
 
 
 logger = logging.getLogger(__name__)
+SESSION_COOKIE = "nas_ai_session"
+CSRF_COOKIE = "nas_ai_csrf"
 
 
 class LibraryCreate(BaseModel):
@@ -104,11 +106,15 @@ class OpsMemoryRequest(BaseModel):
 
 
 class CaptionUpgradeRequest(BaseModel):
-    limit: int = Field(default=50, ge=1, le=100000)
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 class CaptionUpdate(BaseModel):
     caption: str = Field(default="", max_length=4000)
+
+
+class TranscriptUpdate(BaseModel):
+    transcript: str = Field(default="", max_length=200000)
 
 
 class FeedbackUpdate(BaseModel):
@@ -295,7 +301,7 @@ state = AppState()
 INDEX_KINDS = {"", "image", "video", "audio", "document", "archive", "other"}
 INDEX_ORDERS = {"balanced", "newest", "oldest", "smallest"}
 # 容器资源面板可操作的服务白名单（与 ops 边车各自独立校验）
-OPS_SERVICES = {"app", "vision", "embedding", "qdrant", "speech"}
+OPS_SERVICES = {"app", "vision", "reranker", "embedding", "qdrant", "speech"}
 COMMENT_ATTACHMENT_MIMES = {
     "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif",
     "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
@@ -344,7 +350,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -355,12 +361,25 @@ app = FastAPI(
 @app.middleware("http")
 async def production_headers(request: Request, call_next: Any) -> Any:
     request_id = request.headers.get("x-request-id", "").strip()[:128] or secrets.token_hex(12)
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.cookies.get(SESSION_COOKIE)
+        and not request.headers.get("authorization")
+        and not request.headers.get("x-api-token")
+        and not request.url.path.startswith(("/api/auth/login", "/api/auth/bootstrap", "/api/public/"))
+    ):
+        csrf_cookie = request.cookies.get(CSRF_COOKIE, "")
+        csrf_header = request.headers.get("x-csrf-token", "")
+        if not csrf_cookie or not csrf_header or not hmac.compare_digest(csrf_cookie, csrf_header):
+            return JSONResponse({"detail": "CSRF 校验失败"}, status_code=403)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; "
         "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
@@ -372,6 +391,7 @@ async def production_headers(request: Request, call_next: Any) -> Any:
 
 
 def require_auth(
+    request: Request,
     authorization: Annotated[Optional[str], Header()] = None,
     x_api_token: Annotated[Optional[str], Header()] = None,
     token: Optional[str] = Query(default=None),
@@ -379,6 +399,8 @@ def require_auth(
     candidate = x_api_token or (token if settings.allow_query_token else None) or ""
     if authorization and authorization.lower().startswith("bearer "):
         candidate = authorization[7:].strip()
+    if not candidate:
+        candidate = request.cookies.get(SESSION_COOKIE, "")
     if settings.api_token and candidate and hmac.compare_digest(candidate, settings.api_token):
         return {
             "user_id": None,
@@ -413,6 +435,32 @@ def require_auth(
 
 
 Auth = Annotated[dict[str, Any], Depends(require_auth)]
+
+
+def _set_session_cookies(response: Response, request: Request, token: str) -> str:
+    csrf = secrets.token_urlsafe(32)
+    if request.headers.get("x-session-cookie") != "1":
+        return csrf
+    secure = request.url.scheme == "https"
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=30 * 86400,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+    response.set_cookie(
+        CSRF_COOKIE,
+        csrf,
+        max_age=30 * 86400,
+        httponly=False,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+    return csrf
 
 
 def _library_ids(principal: dict[str, Any]) -> list[int] | None:
@@ -875,6 +923,16 @@ def health() -> dict[str, Any]:
 
 
 def _controller_status() -> dict[str, Any]:
+    policy = state.tasks.index_policy()
+    if policy.get("enabled"):
+        start = int(policy.get("start_hour") or 0)
+        end = int(policy.get("end_hour") or 0)
+        return {
+            "state": "scheduled",
+            "message": f"内置调度器已启用 · 每日 {start:02d}:00–{end:02d}:00",
+            "stale": False,
+            "age_seconds": 0,
+        }
     report = state.database.get_setting("index_controller_report", {})
     if not isinstance(report, dict) or not report:
         return {"state": "unknown", "message": "尚未收到外部调度器状态", "stale": True, "age_seconds": None}
@@ -899,14 +957,15 @@ def _index_overview(files: dict[str, Any] | None = None, stages: dict[str, Any] 
     retry_waiting = int(stages.get("retry_waiting") or 0)
     terminal_failures = int(stages.get("terminal_failures") or 0)
     caption_pending = state.database.caption_upgrade_count()
+    caption_failures = state.database.caption_upgrade_failure_summary()
     active = state.database.active_index_task()
     if active:
         status = "running" if active["status"] == "running" else "queued"
-    elif pending or repairable or caption_pending:
+    elif pending or repairable or caption_pending or caption_failures["retryable"]:
         status = "queued"
     elif retry_waiting:
         status = "backoff"
-    elif terminal_failures:
+    elif terminal_failures or caption_failures["terminal"]:
         status = "degraded"
     else:
         status = "complete"
@@ -922,6 +981,7 @@ def _index_overview(files: dict[str, Any] | None = None, stages: dict[str, Any] 
         "retry_waiting": retry_waiting,
         "terminal_failures": terminal_failures,
         "caption_pending": caption_pending,
+        "caption_failures": caption_failures,
         "active": active,
         "runtime": state.database.index_runtime_summary(),
         "controller": _controller_status(),
@@ -968,6 +1028,20 @@ def _production_readiness() -> dict[str, Any]:
     disk = shutil.disk_usage(settings.data_dir)
     disk_ok = disk.free >= 2 * 1024**3 and (not disk.total or disk.free / disk.total >= 0.02)
     add("storage", "ok" if disk_ok else "error", f"可用 {disk.free / 1024**3:.1f} GiB", True)
+    memory = memory_runtime()
+    available = memory["available_bytes"]
+    free_swap = max(0, memory["swap_total_bytes"] - memory["swap_used_bytes"])
+    memory_ok = not available or available >= settings.min_available_memory_bytes
+    swap_ok = (
+        not settings.min_free_swap_bytes
+        or not memory["swap_total_bytes"]
+        or free_swap >= settings.min_free_swap_bytes
+    )
+    add(
+        "memory_headroom",
+        "ok" if memory_ok and swap_ok else "warning",
+        f"可用内存 {available / 1024**3:.1f} GiB，Swap 剩余 {free_swap / 1024**3:.1f} GiB",
+    )
     backup_directory = settings.data_dir / "backups"
     backups = sorted(backup_directory.glob("nas-ai-space-*.db"), key=lambda path: path.stat().st_mtime, reverse=True)
     backup_age = time.time() - backups[0].stat().st_mtime if backups else None
@@ -977,6 +1051,12 @@ def _production_readiness() -> dict[str, Any]:
         "ok" if backup_ok else "warning",
         backups[0].name if backup_ok else "缺少 48 小时内的 SQLite 备份",
     )
+    vector_snapshots = state.vectors.list_snapshots()
+    add(
+        "vector_backup",
+        "ok" if vector_snapshots else "warning",
+        vector_snapshots[0]["name"] if vector_snapshots else "尚未创建 Qdrant 向量快照",
+    )
     sensitive_paths = [
         settings.data_dir,
         backup_directory,
@@ -985,7 +1065,7 @@ def _production_readiness() -> dict[str, Any]:
         *(backups[:1]),
         *[
             settings.vector_backup_dir / item["name"]
-            for item in state.vectors.list_snapshots()[:1]
+            for item in vector_snapshots[:1]
         ],
     ]
     insecure_paths = [
@@ -1016,9 +1096,19 @@ def _production_readiness() -> dict[str, Any]:
         add("caption_upgrades", "warning", f"{overview['caption_pending']} 张图片等待新版描述")
     else:
         add("caption_upgrades", "ok", "图片描述均为当前版本")
+    caption_failures = overview["caption_failures"]
+    if caption_failures["total"]:
+        add(
+            "caption_upgrade_failures",
+            "warning",
+            f"{caption_failures['retryable']} 张等待重试，{caption_failures['terminal']} 张需要人工检查；旧描述已保留",
+        )
+    else:
+        add("caption_upgrade_failures", "ok", "没有图片描述迁移失败")
     controller = overview["controller"]
     controller_required = bool(
-        overview["pending"] or overview["repairable"] or overview["retry_waiting"] or overview["caption_pending"]
+        overview["pending"] or overview["repairable"] or overview["retry_waiting"]
+        or overview["caption_pending"] or overview["caption_failures"]["retryable"]
     )
     add(
         "index_controller",
@@ -1035,8 +1125,10 @@ def _production_readiness() -> dict[str, Any]:
         add("task_heartbeat", "error" if stale_task else "ok", "任务心跳超过 15 分钟" if stale_task else "任务心跳正常", True)
     else:
         add("task_heartbeat", "ok", "当前没有运行中的索引任务")
+    ready = not any(item["critical"] and item["level"] == "error" for item in checks)
     return {
-        "ready": not any(item["critical"] and item["level"] == "error" for item in checks),
+        "ready": ready,
+        "status": "not_ready" if not ready else "degraded" if any(item["level"] == "warning" for item in checks) else "healthy",
         "checks": checks,
         "version": app.version,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1046,7 +1138,13 @@ def _production_readiness() -> dict[str, Any]:
 @app.get("/api/ready")
 def readiness() -> JSONResponse:
     report = _production_readiness()
-    return JSONResponse(report, status_code=200 if report["ready"] else 503)
+    public_report = {
+        "ready": report["ready"],
+        "status": report["status"],
+        "version": report["version"],
+        "checked_at": report["checked_at"],
+    }
+    return JSONResponse(public_report, status_code=200 if report["ready"] else 503)
 
 
 @app.get("/api/auth/bootstrap")
@@ -1055,7 +1153,7 @@ def bootstrap_status() -> dict[str, bool]:
 
 
 @app.post("/api/auth/bootstrap", status_code=201)
-def bootstrap_owner(payload: BootstrapRequest, request: Request) -> dict[str, Any]:
+def bootstrap_owner(payload: BootstrapRequest, request: Request, response: Response) -> dict[str, Any]:
     rate_key = _public_rate_key(request, "bootstrap")
     retry_after = _rate_retry_after(BOOTSTRAP_ATTEMPTS, PUBLIC_RATE_LIMIT_LOCK, rate_key, 5, 600)
     if retry_after:
@@ -1079,12 +1177,16 @@ def bootstrap_owner(payload: BootstrapRequest, request: Request) -> dict[str, An
     token = session_token()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(timespec="seconds")
     state.database.create_session(int(user["id"]), token_digest(token), expires_at)
+    _set_session_cookies(response, request, token)
     state.database.audit("auth.bootstrap", username, int(user["id"]), "user", str(user["id"]))
-    return {**user, "token": token, "expires_at": expires_at, "user": user}
+    result = {**user, "expires_at": expires_at, "user": user, "cookie_session": request.headers.get("x-session-cookie") == "1"}
+    if not result["cookie_session"]:
+        result["token"] = token
+    return result
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, request: Request) -> dict[str, Any]:
+def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, Any]:
     key = _login_failure_key(request, payload.username.strip())
     retry_after = _login_retry_after(key)
     if retry_after:
@@ -1107,9 +1209,13 @@ def login(payload: LoginRequest, request: Request) -> dict[str, Any]:
     token = session_token()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(timespec="seconds")
     state.database.create_session(int(credentials["id"]), token_digest(token), expires_at)
+    _set_session_cookies(response, request, token)
     state.database.audit("auth.login", credentials["username"], int(credentials["id"]), "user", str(credentials["id"]))
     user = state.database.get_user(int(credentials["id"])) or {}
-    return {"token": token, "expires_at": expires_at, "user": user}
+    result = {"expires_at": expires_at, "user": user, "cookie_session": request.headers.get("x-session-cookie") == "1"}
+    if not result["cookie_session"]:
+        result["token"] = token
+    return result
 
 
 @app.get("/api/auth/me")
@@ -1127,10 +1233,19 @@ def auth_me(principal: Auth) -> dict[str, Any]:
 @app.post("/api/auth/logout")
 def logout(
     principal: Auth,
+    request: Request,
+    response: Response,
     authorization: Annotated[Optional[str], Header()] = None,
 ) -> dict[str, bool]:
-    if principal["auth_type"] == "session" and authorization and authorization.lower().startswith("bearer "):
-        state.database.delete_session(token_digest(authorization[7:].strip()))
+    candidate = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        candidate = authorization[7:].strip()
+    if not candidate:
+        candidate = request.cookies.get(SESSION_COOKIE, "")
+    if principal["auth_type"] == "session" and candidate:
+        state.database.delete_session(token_digest(candidate))
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="strict")
+    response.delete_cookie(CSRF_COOKIE, path="/", samesite="strict")
     return {"ok": True}
 
 
@@ -1209,6 +1324,7 @@ def system(principal: Auth) -> dict[str, Any]:
             "embedding_model": settings.embedding_model,
             "vision_model": settings.vision_model,
             "chat_model": settings.chat_model,
+            "rerank_model": settings.rerank_model,
             "transcription_model": settings.transcription_model,
             "indexing": {
                 "task_workers": len(state.tasks.workers),
@@ -2164,7 +2280,7 @@ async def public_share_comment_attachment(
     token: str,
     comment_id: int,
     request: Request,
-    access_code: str = Query(default="", max_length=120),
+    x_share_access_code: Annotated[Optional[str], Header()] = None,
     x_filename: Annotated[Optional[str], Header()] = None,
 ) -> dict[str, Any]:
     rate_key = _public_rate_key(request, token)
@@ -2182,7 +2298,7 @@ async def public_share_comment_attachment(
             headers={"Retry-After": str(retry_after)},
         )
     try:
-        share = _share_context(token, access_code)
+        share = _share_context(token, str(x_share_access_code or "")[:120])
     except HTTPException as exc:
         if exc.status_code == 401:
             _record_rate_attempt(
@@ -2334,8 +2450,9 @@ def index_status(principal: Auth) -> dict[str, Any]:
         "pending": state.database.pending_summary(),
         "stages": stages,
         "caption_upgrades": {
-            "version": 3,
+            "version": 4,
             "pending": overview["caption_pending"],
+            "failures": overview["caption_failures"],
         },
         "policy": state.tasks.index_policy(),
         "active": overview["active"],
@@ -2952,6 +3069,9 @@ def purge_recycle(item_id: int, principal: Auth) -> dict[str, Any]:
 def file_details(file_id: int, principal: Auth) -> dict[str, Any]:
     row = _visible_file(file_id, principal)
     result = _public_file(row)
+    if row.get("kind") in {"audio", "video"}:
+        result["manual_transcript"] = str(row.get("manual_transcript") or "")[:200000]
+        result["extracted_text"] = str(row.get("extracted_text") or "")[:200000]
     result["chunks"] = state.database.fetchall(
         """SELECT chunk_index, content, start_offset, end_offset, start_time, end_time, source_label
            FROM content_chunks WHERE file_id = ? ORDER BY chunk_index LIMIT 100""",
@@ -3006,6 +3126,20 @@ async def update_file_caption(file_id: int, payload: CaptionUpdate, principal: A
     )
     _audit(principal, "file.caption", "file", str(file_id), {"manual": bool(payload.caption.strip())})
     return {"task_id": task_id, "existing": existing, "manual": bool(payload.caption.strip())}
+
+
+@app.put("/api/files/{file_id}/transcript", status_code=202)
+async def update_file_transcript(file_id: int, payload: TranscriptUpdate, principal: Auth) -> dict[str, Any]:
+    file = _visible_file(file_id, principal)
+    if file["kind"] not in {"audio", "video"}:
+        raise HTTPException(status_code=400, detail="只有音频和视频支持人工转写")
+    state.database.set_manual_transcript(file_id, payload.transcript)
+    task_id, existing = await state.tasks.submit_unique_file(
+        "index_files", file_id, {"file_ids": [file_id], "source": "manual_transcript"}, priority=9,
+        user_id=principal.get("user_id"),
+    )
+    _audit(principal, "file.transcript", "file", str(file_id), {"manual": bool(payload.transcript.strip())})
+    return {"task_id": task_id, "existing": existing, "manual": bool(payload.transcript.strip())}
 
 
 @app.post("/api/files/{file_id}/feedback")
@@ -3219,6 +3353,65 @@ def _search_filter_sql(
     return " AND ".join(clauses), params
 
 
+def _natural_date_filter(query: str, now: Optional[datetime] = None) -> tuple[str, str, str]:
+    current = (now or datetime.now().astimezone()).date()
+    start = current
+    end = current
+    matched = ""
+    year_month = re.search(r"(?P<year>20\d{2})年(?P<month>1[0-2]|0?[1-9])月", query)
+    year_only = re.search(r"(?P<year>20\d{2})年", query)
+    recent_days = re.search(r"(?:最近|近)(?P<days>\d{1,3})天", query)
+    if year_month:
+        year = int(year_month.group("year"))
+        month = int(year_month.group("month"))
+        start = current.replace(year=year, month=month, day=1)
+        next_month = start.replace(year=year + int(month == 12), month=1 if month == 12 else month + 1)
+        end = next_month - timedelta(days=1)
+        matched = year_month.group(0)
+    elif recent_days:
+        days = max(1, min(3660, int(recent_days.group("days"))))
+        start, end, matched = current - timedelta(days=days - 1), current, recent_days.group(0)
+    elif "前天" in query:
+        start = end = current - timedelta(days=2)
+        matched = "前天"
+    elif "昨天" in query:
+        start = end = current - timedelta(days=1)
+        matched = "昨天"
+    elif "今天" in query:
+        matched = "今天"
+    elif "上周" in query:
+        start = current - timedelta(days=current.weekday() + 7)
+        end = start + timedelta(days=6)
+        matched = "上周"
+    elif "本周" in query or "这周" in query:
+        start = current - timedelta(days=current.weekday())
+        matched = "本周" if "本周" in query else "这周"
+    elif "上个月" in query or "上月" in query:
+        end = current.replace(day=1) - timedelta(days=1)
+        start = end.replace(day=1)
+        matched = "上个月" if "上个月" in query else "上月"
+    elif "这个月" in query or "本月" in query:
+        start = current.replace(day=1)
+        matched = "这个月" if "这个月" in query else "本月"
+    elif "去年" in query:
+        start = current.replace(year=current.year - 1, month=1, day=1)
+        end = current.replace(year=current.year - 1, month=12, day=31)
+        matched = "去年"
+    elif "今年" in query:
+        start = current.replace(month=1, day=1)
+        matched = "今年"
+    elif year_only:
+        year = int(year_only.group("year"))
+        start = current.replace(year=year, month=1, day=1)
+        end = current.replace(year=year, month=12, day=31)
+        matched = year_only.group(0)
+    if not matched:
+        return "", "", query.strip()
+    cleaned = re.sub(r"\s+", " ", query.replace(matched, " ")).strip(" ，,。;；")
+    cleaned = re.sub(r"^的\s*", "", cleaned)
+    return start.isoformat(), end.isoformat(), cleaned or query.strip()
+
+
 @app.get("/api/search")
 def search(
     principal: Auth,
@@ -3237,12 +3430,20 @@ def search(
     favorite: bool = False,
     tag: str = "",
 ) -> dict[str, Any]:
+    effective_query = q.strip()
+    inferred_from = inferred_to = ""
+    if not date_from and not date_to:
+        inferred_from, inferred_to, effective_query = _natural_date_filter(effective_query)
+        date_from, date_to = inferred_from, inferred_to
     filter_sql = _search_filter_sql(
         principal, library_id, date_from, date_to, person_id, place_id, event_id, favorite, tag
     )
     result = state.search.search(
-        q.strip(), kind, limit, _library_ids(principal), precise, None, offset, semantic, filter_sql=filter_sql
+        effective_query, kind, limit, _library_ids(principal), precise, None, offset, semantic, filter_sql=filter_sql
     )
+    if inferred_from:
+        result["applied_filters"] = {"date_from": inferred_from, "date_to": inferred_to}
+        result["effective_query"] = effective_query
     if principal.get("user_id") is not None:
         user_id = int(principal["user_id"])
         for item in result["results"]:
@@ -3251,27 +3452,56 @@ def search(
     return result
 
 
-def _select_answer_sources(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _select_answer_sources(
+    candidates: list[dict[str, Any]], minimum_sources: int = 1, prefer_single: bool = False
+) -> list[dict[str, Any]]:
     if not candidates:
         return []
     reranked = [
         source for source in candidates
         if source.get("rerank_reason") or "精准重排" in source.get("sources", [])
     ]
-    if len(reranked) >= 2:
+    supported_reranked = [
+        source for source in reranked
+        if not any(
+            marker in str(source.get("rerank_reason") or "")
+            for marker in ("非生日", "非聚会", "不涉及", "不是", "不属于", "无关", "不符合", "完全无")
+        )
+    ]
+    if len(supported_reranked) >= 2:
+        candidates = supported_reranked
+    elif len(reranked) >= 2:
         candidates = reranked
+    best_confidence = max(float(source.get("confidence") or 0) for source in candidates)
+    confidence_floor = max(0.25, best_confidence * (0.5 if minimum_sources >= 2 else 0.65))
     best_coverage = max(float(source.get("coverage") or 0) for source in candidates)
     if best_coverage > 0:
         minimum_coverage = 0.5 if best_coverage >= 0.75 else max(0.35, best_coverage - 0.2)
         relevant = [
             source for source in candidates
-            if float(source.get("confidence") or 0) >= 0.3
+            if float(source.get("confidence") or 0) >= confidence_floor
             and float(source.get("coverage") or 0) >= minimum_coverage
         ]
+        if prefer_single and relevant:
+            best = relevant[0]
+            runner_up = relevant[1] if len(relevant) > 1 else None
+            if runner_up is None or (
+                float(best.get("coverage") or 0) - float(runner_up.get("coverage") or 0) >= 0.2
+            ):
+                return [best]
         if relevant:
-            return relevant[:8]
-    fallback = [source for source in candidates if float(source.get("confidence") or 0) >= 0.3]
-    return (fallback or candidates)[:4]
+            selected = relevant[:8]
+            if len(selected) >= minimum_sources:
+                return selected
+    fallback = [source for source in candidates if float(source.get("confidence") or 0) >= confidence_floor]
+    selected = fallback or candidates
+    if len(selected) < minimum_sources:
+        selected_refs = {id(source) for source in selected}
+        selected = selected + [
+            source for source in candidates
+            if id(source) not in selected_refs
+        ][:minimum_sources - len(selected)]
+    return selected[:max(4, minimum_sources)]
 
 
 def _focus_answer_evidence(source: dict[str, Any]) -> dict[str, Any]:
@@ -3317,11 +3547,25 @@ def ask(payload: AskRequest, principal: Auth) -> dict[str, Any]:
     )
     if previous_user and (len(question) <= 30 or any(marker in question for marker in followup_markers)):
         retrieval_question = f"{previous_user}；追问：{question}"
+    date_from, date_to, effective_question = _natural_date_filter(retrieval_question)
+    filter_sql = _search_filter_sql(principal, date_from=date_from, date_to=date_to)
     search_result = state.search.search(
-        retrieval_question, payload.kind, 24, _library_ids(principal), True
+        effective_question, payload.kind, 24, _library_ids(principal), True, filter_sql=filter_sql
     )
     candidates = search_result["results"]
-    sources = [_focus_answer_evidence(source) for source in _select_answer_sources(candidates)]
+    common_question = any(marker in question for marker in ("共同", "相同", "都有哪些", "都有什么", "都有"))
+    field_question = any(
+        marker in question
+        for marker in ("金额", "多少", "编号", "日期", "时间", "地址", "状态", "分别")
+    )
+    sources = [
+        _focus_answer_evidence(source)
+        for source in _select_answer_sources(
+            candidates,
+            minimum_sources=2 if common_question else 1,
+            prefer_single=field_question and not common_question,
+        )
+    ]
     if not sources:
         answer_text = "当前索引中没有找到足够相关的资料。"
         if conversation_id is not None:
@@ -3698,7 +3942,11 @@ def operations_status(principal: Auth) -> dict[str, Any]:
         },
         "runtime": runtime_metrics(),
         "people": faces,
-        "vision_captions": {"version": 3, "pending_upgrade": state.database.caption_upgrade_count()},
+        "vision_captions": {
+            "version": 4,
+            "pending_upgrade": state.database.caption_upgrade_count(),
+            "failures": state.database.caption_upgrade_failure_summary(),
+        },
         "feedback": state.database.feedback_counts(),
         "watcher": state.watcher.status(),
         "maintenance": state.tasks.maintenance_status(),
@@ -3711,6 +3959,82 @@ def operations_status(principal: Auth) -> dict[str, Any]:
         },
         "uploads": {"path": str(settings.upload_root), "max_file_bytes": settings.max_upload_bytes},
     }
+
+
+def _index_consistency_report() -> dict[str, Any]:
+    sql_rows = state.database.fetchall(
+        """SELECT c.file_id, COUNT(*) AS count FROM content_chunks c
+           JOIN files f ON f.id = c.file_id WHERE f.embedding_status = 'ready'
+           GROUP BY c.file_id"""
+    )
+    sql_counts = {int(row["file_id"]): int(row["count"]) for row in sql_rows}
+    vector_counts = state.vectors.file_point_counts()
+    known_ids = {
+        int(row["id"])
+        for row in state.database.fetchall("SELECT id FROM files")
+    }
+    missing_vectors = sorted(
+        file_id for file_id, count in sql_counts.items()
+        if count > 0 and vector_counts.get(file_id, 0) == 0
+    )
+    stale_vectors = sorted(file_id for file_id in vector_counts if file_id not in sql_counts or file_id not in known_ids)
+    count_mismatches = sorted(
+        file_id for file_id in sql_counts.keys() & vector_counts.keys()
+        if sql_counts[file_id] != vector_counts[file_id]
+    )
+    return {
+        "ok": not missing_vectors and not stale_vectors and not count_mismatches,
+        "sql_files": len(sql_counts),
+        "vector_files": len(vector_counts),
+        "missing_vectors": missing_vectors[:500],
+        "stale_vectors": stale_vectors[:500],
+        "count_mismatches": count_mismatches[:500],
+        "truncated": any(len(items) > 500 for items in (missing_vectors, stale_vectors, count_mismatches)),
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def _index_consistency_or_503() -> dict[str, Any]:
+    try:
+        return _index_consistency_report()
+    except Exception as exc:
+        logger.warning("Index consistency check unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="向量数据库不可用，暂时无法核对索引一致性") from exc
+
+
+@app.get("/api/operations/index-consistency")
+def index_consistency(principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    return _index_consistency_or_503()
+
+
+@app.post("/api/operations/index-consistency/repair", status_code=202)
+async def repair_index_consistency(principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    report = _index_consistency_or_503()
+    stale = [int(value) for value in report["stale_vectors"]]
+    if stale:
+        state.vectors.delete_files(stale)
+    rebuild = sorted({
+        *(int(value) for value in report["missing_vectors"]),
+        *(int(value) for value in report["count_mismatches"]),
+    })
+    task_id = None
+    if rebuild:
+        task_id, _ = await state.tasks.submit_unique(
+            "index_files",
+            {"file_ids": rebuild[:500], "source": "consistency_repair"},
+            priority=8,
+            user_id=principal["user_id"],
+        )
+    _audit(
+        principal,
+        "index.consistency.repair",
+        "task",
+        str(task_id or ""),
+        {"deleted_stale": len(stale), "rebuild": len(rebuild)},
+    )
+    return {"task_id": task_id, "deleted_stale": len(stale), "rebuild": len(rebuild)}
 
 
 @app.post("/api/operations/backups", status_code=201)
@@ -3734,6 +4058,22 @@ def create_backup(principal: Auth) -> dict[str, Any]:
         "bytes": destination.stat().st_size,
         "retained": settings.automatic_backup_retention,
     }
+
+
+@app.post("/api/operations/database/compact")
+def compact_database(principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    if state.database.active_task_count():
+        raise HTTPException(status_code=409, detail="请等待后台任务完成后再压缩数据库")
+    consistency = _index_consistency_or_503()
+    if not consistency["ok"]:
+        raise HTTPException(status_code=409, detail="SQLite 与向量索引尚不一致，请先执行索引一致性修复")
+    backup_directory = settings.data_dir / "backups"
+    filename = f"pre-compact-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+    state.database.backup(backup_directory / filename)
+    result = state.database.compact()
+    _audit(principal, "database.compact", "backup", filename, result)
+    return {**result, "backup": filename}
 
 
 @app.get("/api/operations/vector-snapshots")

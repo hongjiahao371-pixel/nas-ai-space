@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS files (
     extracted_text TEXT NOT NULL DEFAULT '',
     ai_caption TEXT NOT NULL DEFAULT '',
     manual_caption TEXT NOT NULL DEFAULT '',
+    manual_transcript TEXT NOT NULL DEFAULT '',
     metadata_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'pending',
     error TEXT NOT NULL DEFAULT '',
@@ -98,6 +99,19 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority DESC, id);
+
+CREATE TABLE IF NOT EXISTS caption_upgrade_attempts (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    target_version INTEGER NOT NULL DEFAULT 4,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    next_retry_at TEXT,
+    terminal INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_caption_upgrade_retry
+ON caption_upgrade_attempts(terminal, next_retry_at);
 
 CREATE TABLE IF NOT EXISTS content_chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -579,6 +593,7 @@ class Database:
                 "perceptual_hash": "ALTER TABLE files ADD COLUMN perceptual_hash TEXT NOT NULL DEFAULT ''",
                 "content_hash": "ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
                 "manual_caption": "ALTER TABLE files ADD COLUMN manual_caption TEXT NOT NULL DEFAULT ''",
+                "manual_transcript": "ALTER TABLE files ADD COLUMN manual_transcript TEXT NOT NULL DEFAULT ''",
                 "metadata_status": "ALTER TABLE files ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'ready'",
                 "vision_status": "ALTER TABLE files ADD COLUMN vision_status TEXT NOT NULL DEFAULT 'pending'",
                 "transcription_status": "ALTER TABLE files ADD COLUMN transcription_status TEXT NOT NULL DEFAULT 'pending'",
@@ -792,6 +807,25 @@ class Database:
             cursor = connection.execute(query, tuple(params))
             return int(cursor.lastrowid or 0)
 
+    def compact(self) -> dict[str, int | str]:
+        before = self.path.stat().st_size if self.path.exists() else 0
+        with self.connect() as connection:
+            cleared = connection.execute(
+                "UPDATE content_chunks SET embedding_json = NULL WHERE embedding_json IS NOT NULL"
+            ).rowcount
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+            check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+        after = self.path.stat().st_size if self.path.exists() else 0
+        return {
+            "before_bytes": before,
+            "after_bytes": after,
+            "reclaimed_bytes": max(0, before - after),
+            "legacy_vectors_cleared": max(0, int(cleared or 0)),
+            "quick_check": check,
+        }
+
     def create_library(self, name: str, path: str) -> dict[str, Any]:
         now = utc_now()
         library_id = self.execute(
@@ -984,10 +1018,12 @@ class Database:
     def caption_upgrade_file_ids(self, limit: int = 50) -> list[int]:
         try:
             rows = self.fetchall(
-                """SELECT id FROM files WHERE kind = 'image' AND status IN ('ready', 'partial') AND ai_caption != ''
-                   AND COALESCE(json_extract(metadata_json, '$.caption_version'), 0) < 3
-                   ORDER BY mtime_ns DESC, id LIMIT ?""",
-                (max(1, int(limit)),),
+                """SELECT f.id FROM files f LEFT JOIN caption_upgrade_attempts a ON a.file_id = f.id
+                   WHERE f.kind = 'image' AND f.status IN ('ready', 'partial') AND f.ai_caption != ''
+                   AND COALESCE(json_extract(f.metadata_json, '$.caption_version'), 0) < 4
+                   AND (a.file_id IS NULL OR (a.terminal = 0 AND (a.next_retry_at IS NULL OR a.next_retry_at <= ?)))
+                   ORDER BY COALESCE(a.attempts, 0), f.mtime_ns DESC, f.id LIMIT ?""",
+                (utc_now(), max(1, int(limit))),
             )
         except sqlite3.OperationalError:
             rows = self.fetchall(
@@ -997,11 +1033,108 @@ class Database:
             )
         return [int(row["id"]) for row in rows]
 
+    def record_caption_upgrade_failure(
+        self,
+        file_id: int,
+        error: str,
+        max_attempts: int = 3,
+        base_seconds: int = 300,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as connection:
+            previous = connection.execute(
+                "SELECT attempts FROM caption_upgrade_attempts WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+            attempts = int(previous["attempts"] or 0) + 1 if previous else 1
+            terminal = int(attempts >= max(1, max_attempts))
+            next_retry = None if terminal else (
+                datetime.now(timezone.utc) + timedelta(
+                    seconds=min(7 * 86400, max(30, base_seconds) * (2 ** max(0, attempts - 1)))
+                )
+            ).isoformat(timespec="seconds")
+            connection.execute(
+                """INSERT INTO caption_upgrade_attempts(
+                       file_id, target_version, attempts, error, next_retry_at, terminal, updated_at
+                   ) VALUES (?, 4, ?, ?, ?, ?, ?)
+                   ON CONFLICT(file_id) DO UPDATE SET attempts = excluded.attempts,
+                       error = excluded.error, next_retry_at = excluded.next_retry_at,
+                       terminal = excluded.terminal, updated_at = excluded.updated_at""",
+                (file_id, attempts, error[:2000], next_retry, terminal, now),
+            )
+        return {"attempts": attempts, "next_retry_at": next_retry, "terminal": bool(terminal)}
+
+    def clear_caption_upgrade_failure(self, file_id: int) -> None:
+        self.execute("DELETE FROM caption_upgrade_attempts WHERE file_id = ?", (file_id,))
+
+    def caption_upgrade_failure_summary(self) -> dict[str, int]:
+        row = self.fetchone(
+            """SELECT COUNT(*) AS total,
+               SUM(CASE WHEN terminal = 0 THEN 1 ELSE 0 END) AS retryable,
+               SUM(CASE WHEN terminal = 1 THEN 1 ELSE 0 END) AS terminal
+               FROM caption_upgrade_attempts"""
+        ) or {}
+        return {
+            "total": int(row.get("total") or 0),
+            "retryable": int(row.get("retryable") or 0),
+            "terminal": int(row.get("terminal") or 0),
+        }
+
+    def apply_caption_upgrade(
+        self,
+        file_id: int,
+        caption: str,
+        metadata: dict[str, Any],
+        chunks: list[dict[str, Any]],
+    ) -> None:
+        if not caption.strip() or not chunks or not all(chunk.get("embedding") for chunk in chunks):
+            raise ValueError("新版描述或向量不完整")
+        now = utc_now()
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT name, relative_path, extracted_text, transcription_status, transcription_error FROM files WHERE id = ?",
+                (file_id,),
+            ).fetchone()
+            if not row:
+                raise FileNotFoundError(file_id)
+            status = "partial" if str(row["transcription_status"] or "") in {"error", "missing", "blocked"} else "ready"
+            error = str(row["transcription_error"] or "") if status == "partial" else ""
+            connection.execute(
+                """UPDATE files SET ai_caption = ?, metadata_json = ?, status = ?, error = ?,
+                   vision_status = 'ready', embedding_status = 'ready', vision_error = '', embedding_error = '',
+                   retry_count = CASE WHEN ? = 'ready' THEN 0 ELSE retry_count END,
+                   last_attempt_at = ?, next_retry_at = CASE WHEN ? = 'ready' THEN NULL ELSE next_retry_at END,
+                   terminal_error = CASE WHEN ? = 'ready' THEN 0 ELSE terminal_error END,
+                   last_error_fingerprint = CASE WHEN ? = 'ready' THEN '' ELSE last_error_fingerprint END,
+                   indexed_at = ?, updated_at = ? WHERE id = ?""",
+                (
+                    caption.strip(), json.dumps(metadata, ensure_ascii=False), status, error,
+                    status, now, status, status, status, now, now, file_id,
+                ),
+            )
+            connection.execute("DELETE FROM content_chunks WHERE file_id = ?", (file_id,))
+            for index, chunk in enumerate(chunks):
+                connection.execute(
+                    """INSERT INTO content_chunks(file_id, chunk_index, content, start_offset, end_offset,
+                       start_time, end_time, source_label, embedding_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                    (
+                        file_id, index, str(chunk.get("content") or ""), chunk.get("start_offset"),
+                        chunk.get("end_offset"), chunk.get("start_time"), chunk.get("end_time"),
+                        str(chunk.get("source_label") or "画面描述"),
+                    ),
+                )
+            connection.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+            connection.execute(
+                "INSERT INTO files_fts(rowid, name, path, content, caption) VALUES (?, ?, ?, ?, ?)",
+                (file_id, row["name"], row["relative_path"], row["extracted_text"], caption.strip()),
+            )
+            connection.execute("DELETE FROM caption_upgrade_attempts WHERE file_id = ?", (file_id,))
+
     def caption_upgrade_count(self) -> int:
         try:
             row = self.fetchone(
                 """SELECT COUNT(*) AS count FROM files WHERE kind = 'image' AND status IN ('ready', 'partial')
-                   AND ai_caption != '' AND COALESCE(json_extract(metadata_json, '$.caption_version'), 0) < 3"""
+                   AND ai_caption != '' AND COALESCE(json_extract(metadata_json, '$.caption_version'), 0) < 4"""
             )
         except sqlite3.OperationalError:
             row = self.fetchone(
@@ -1189,8 +1322,7 @@ class Database:
                     (
                         file_id, index, chunk.get("content", ""), chunk.get("start_offset"), chunk.get("end_offset"),
                         chunk.get("start_time"), chunk.get("end_time"), chunk.get("source_label", ""),
-                        # embedding_json 已弃用：向量只写 Qdrant，不再为每 chunk 冗余存 15-20KB JSON。
-                        # 列保留不删以兼容旧 schema，旧数据不清理（如需回收空间可手动 VACUUM）。
+                        # Keep the legacy column for schema compatibility; compact() clears old values.
                         None,
                     ),
                 )
@@ -1786,11 +1918,19 @@ class Database:
     def set_manual_caption(self, file_id: int, caption: str) -> None:
         self.execute(
             """UPDATE files SET manual_caption = ?, status = 'pending', error = '',
-               vision_status = 'pending', embedding_status = 'pending',
                vision_error = '', embedding_error = '', retry_count = 0, last_attempt_at = NULL,
                next_retry_at = NULL, terminal_error = 0, last_error_fingerprint = '',
                updated_at = ? WHERE id = ?""",
             (caption.strip(), utc_now(), file_id),
+        )
+
+    def set_manual_transcript(self, file_id: int, transcript: str) -> None:
+        self.execute(
+            """UPDATE files SET manual_transcript = ?, status = 'pending', error = '',
+               transcription_error = '', embedding_error = '', retry_count = 0, last_attempt_at = NULL,
+               next_retry_at = NULL, terminal_error = 0, last_error_fingerprint = '',
+               updated_at = ? WHERE id = ?""",
+            (transcript.strip(), utc_now(), file_id),
         )
 
     def save_feedback(

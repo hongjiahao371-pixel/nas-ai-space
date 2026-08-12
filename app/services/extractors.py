@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -213,6 +214,15 @@ def _probe_media(path: Path) -> dict[str, Any]:
     audio = next((stream for stream in payload.get("streams", []) if stream.get("codec_type") == "audio"), {})
     format_data = payload.get("format", {})
     tags = format_data.get("tags", {})
+    frame_rate = 0.0
+    rate = str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "")
+    try:
+        numerator, separator, denominator = rate.partition("/")
+        frame_rate = float(numerator) / float(denominator) if separator else float(numerator)
+        if not math.isfinite(frame_rate) or frame_rate <= 0:
+            frame_rate = 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        frame_rate = 0.0
     return {
         "width": video.get("width"),
         "height": video.get("height"),
@@ -220,6 +230,7 @@ def _probe_media(path: Path) -> dict[str, Any]:
         "captured_at": _normalize_datetime(tags.get("creation_time")),
         "metadata": {
             "video_codec": video.get("codec_name"),
+            "frame_rate": round(frame_rate, 6) if frame_rate else None,
             "audio_codec": audio.get("codec_name"),
             "bit_rate": int(format_data.get("bit_rate", 0) or 0),
             "format": format_data.get("format_name"),
@@ -241,7 +252,8 @@ def _extract_audio(path: Path, destination: Path) -> None:
 def _extract_video_frames(path: Path, directory: Path, duration: float, count: int = 3) -> list[tuple[float, Path]]:
     if not shutil.which("ffmpeg") or duration <= 0:
         return []
-    timestamps = [max(0.0, duration * ratio) for ratio in (0.15, 0.5, 0.85)[:count]]
+    count = max(1, min(12, int(count)))
+    timestamps = [max(0.0, duration * (index + 1) / (count + 1)) for index in range(count)]
     fallback_timestamps = [0.0, min(1.0, duration)]
     output: list[tuple[float, Path]] = []
     for index, timestamp in enumerate(timestamps + fallback_timestamps):
@@ -442,6 +454,69 @@ def split_chunks(text: str, max_chars: int = 1200, overlap: int = 120) -> list[d
     return chunks
 
 
+def upgrade_image_caption(
+    file: dict[str, Any],
+    settings: Settings,
+    ai: LocalAIClient,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    if str(file.get("kind") or "") != "image":
+        raise ValueError("只有图片支持描述升级")
+    path = Path(str(file["path"]))
+    if not path.exists():
+        raise FileNotFoundError(path)
+    try:
+        metadata = json.loads(str(file.get("metadata_json") or "{}"))
+        if not isinstance(metadata, dict):
+            metadata = {}
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    manual_caption = str(file.get("manual_caption") or "").strip()
+    if manual_caption:
+        caption = manual_caption
+        source = "manual"
+    else:
+        prepared_path = path
+        temporary: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            try:
+                _image_info(path)
+            except (OSError, ValueError):
+                temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="caption-upgrade-")
+                prepared_path = Path(temporary.name) / "converted.jpg"
+                _convert_image(path, prepared_path)
+            if int(file.get("size") or 0) > 24 * 1024 * 1024 and prepared_path == path:
+                temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="caption-upgrade-large-")
+                prepared_path = Path(temporary.name) / "resized.jpg"
+                _convert_image(path, prepared_path)
+            caption = ai.caption_image(prepared_path).strip()
+        finally:
+            if temporary:
+                temporary.cleanup()
+        source = "ai"
+    if not caption:
+        raise RuntimeError("视觉模型未返回描述")
+    chunks = [{**chunk, "source_label": "画面描述"} for chunk in split_chunks(caption)]
+    if not chunks:
+        raise RuntimeError("新版描述无法切分")
+    for start in range(0, len(chunks), 32):
+        batch = chunks[start:start + 32]
+        embeddings = ai.embeddings([chunk["content"] for chunk in batch])
+        if len(embeddings) != len(batch):
+            raise RuntimeError("Embedding 返回数量不完整")
+        for chunk, embedding in zip(batch, embeddings):
+            if not embedding:
+                raise RuntimeError("Embedding 返回空向量")
+            chunk["embedding"] = embedding
+    errors = metadata.get("ai_errors")
+    if isinstance(errors, list):
+        metadata["ai_errors"] = [
+            str(error) for error in errors
+            if not str(error).startswith(("vision:", "embedding:"))
+        ]
+    metadata.update({"caption_version": 4, "caption_source": source})
+    return caption, metadata, chunks
+
+
 def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     path = Path(file["path"])
     if not path.exists():
@@ -462,6 +537,7 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
     }
     structured_chunks: list[dict[str, Any]] = []
     manual_caption = str(file.get("manual_caption") or "").strip()
+    manual_transcript = str(file.get("manual_transcript") or "").strip()
 
     if extension in TEXT_EXTENSIONS:
         raw = path.read_bytes()[:settings.max_extract_bytes]
@@ -506,12 +582,12 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
                 _convert_image(path, prepared_path)
             if manual_caption:
                 result["caption"] = manual_caption
-                result["metadata"].update({"caption_version": 3, "caption_source": "manual"})
+                result["metadata"].update({"caption_version": 4, "caption_source": "manual"})
                 result["stages"]["vision"] = {"status": "ready", "error": ""}
             elif settings.vision_base_url and settings.vision_model:
                 try:
                     result["caption"] = ai.caption_image(prepared_path)
-                    result["metadata"]["caption_version"] = 3
+                    result["metadata"]["caption_version"] = 4
                     result["metadata"]["caption_source"] = "ai"
                     result["stages"]["vision"] = {
                         "status": "ready" if result["caption"] else "missing",
@@ -530,19 +606,27 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
             temporary_path = Path(temporary)
             if kind == "video" and manual_caption:
                 result["caption"] = manual_caption
-                result["metadata"].update({"caption_version": 3, "caption_source": "manual"})
+                result["metadata"].update({"caption_version": 4, "caption_source": "manual"})
                 result["stages"]["vision"] = {"status": "ready", "error": ""}
             elif kind == "video" and settings.vision_base_url and settings.vision_model:
                 descriptions = []
-                for timestamp, frame in _extract_video_frames(path, temporary_path, result.get("duration") or 0):
+                duration = float(result.get("duration") or 0)
+                frame_count = min(settings.video_frame_count, max(3, math.ceil(duration / 180)))
+                visual_segments = []
+                for timestamp, frame in _extract_video_frames(path, temporary_path, duration, frame_count):
                     try:
-                        descriptions.append(f"[{timestamp:.1f}秒] {ai.caption_image(frame)}")
+                        description = ai.caption_image(frame).strip()
+                        if description:
+                            descriptions.append(f"[{timestamp:.1f}秒] {description}")
+                            visual_segments.append({"timestamp": timestamp, "content": description})
                     except Exception as exc:
                         error = f"vision: {exc}"
                         result["metadata"].setdefault("ai_errors", []).append(error)
                 result["caption"] = "\n".join(descriptions)
                 if descriptions:
-                    result["metadata"].update({"caption_version": 3, "caption_source": "ai"})
+                    result["visual_segments"] = visual_segments
+                    result["metadata"]["visual_frame_count"] = len(visual_segments)
+                    result["metadata"].update({"caption_version": 4, "caption_source": "ai"})
                     result["stages"]["vision"] = {"status": "ready", "error": ""}
                 else:
                     error = next(
@@ -552,7 +636,15 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
                     result["stages"]["vision"] = {"status": "error", "error": error}
             audio_codec = str(result.get("metadata", {}).get("audio_codec") or "")
             has_audio = kind == "audio" or bool(audio_codec)
-            if has_audio and settings.transcription_base_url and settings.transcription_model:
+            if manual_transcript:
+                result["text"] = manual_transcript
+                result["metadata"]["transcription_source"] = "manual"
+                result["stages"]["transcription"] = {"status": "ready", "error": ""}
+                structured_chunks = [
+                    {**chunk, "source_label": "人工转写"}
+                    for chunk in split_chunks(manual_transcript)
+                ]
+            elif has_audio and settings.transcription_base_url and settings.transcription_model:
                 try:
                     audio_path = temporary_path / "audio.mp3"
                     _extract_audio(path, audio_path)
@@ -584,7 +676,15 @@ def index_file(file: dict[str, Any], settings: Settings, ai: LocalAIClient) -> t
                 "end_time": segment.get("end"),
                 "source_label": f"{float(start_time or 0):.1f} 秒",
             })
-    if result["caption"]:
+    visual_segments = result.pop("visual_segments", [])
+    for segment in visual_segments:
+        timestamp = float(segment.get("timestamp") or 0)
+        chunks.append({
+            "content": str(segment.get("content") or "").strip(),
+            "start_time": timestamp,
+            "source_label": f"{timestamp:.1f} 秒画面",
+        })
+    if result["caption"] and not visual_segments:
         chunks.extend({**chunk, "source_label": "画面描述"} for chunk in split_chunks(result["caption"]))
     if not chunks and result["text"]:
         chunks = [{**chunk, "source_label": "全文"} for chunk in split_chunks(result["text"])]

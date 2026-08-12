@@ -51,13 +51,16 @@ services:
       NAS_AI_AUTOMATIC_BACKUP_RETENTION: ${NAS_AI_AUTOMATIC_BACKUP_RETENTION:-7}
       NAS_AI_FACE_WORKERS: ${NAS_AI_FACE_WORKERS:-4}
       NAS_AI_MAX_EXTRACT_MB: ${NAS_AI_MAX_EXTRACT_MB:-32}
+      NAS_AI_VIDEO_FRAME_COUNT: ${NAS_AI_VIDEO_FRAME_COUNT:-6}
       NAS_AI_INFERENCE_BACKEND: vulkan
       NAS_AI_EMBEDDING_URL: http://embedding:8080
       NAS_AI_VISION_URL: http://vision:8080
       NAS_AI_CHAT_URL: http://vision:8080
+      NAS_AI_RERANK_URL: http://reranker:8080
       NAS_AI_EMBEDDING_MODEL: qwen3-embedding:0.6b
       NAS_AI_VISION_MODEL: qwen3-vl:2b
       NAS_AI_CHAT_MODEL: qwen3-vl:2b
+      NAS_AI_RERANK_MODEL: ${NAS_AI_RERANK_MODEL:-qwen3:0.6b}
       NAS_AI_TRANSCRIPTION_URL: http://speech:8000
       NAS_AI_TRANSCRIPTION_MODEL: ${NAS_AI_TRANSCRIPTION_MODEL:-Systran/faster-whisper-tiny}
       NAS_AI_QDRANT_URL: http://qdrant:6333
@@ -81,6 +84,8 @@ services:
       embedding:
         condition: service_healthy
       vision:
+        condition: service_healthy
+      reranker:
         condition: service_healthy
       speech:
         condition: service_healthy
@@ -143,8 +148,10 @@ services:
       - 0.0.0.0
       - --port
       - "8080"
+      - --image-min-tokens
+      - "${NAS_AI_VISION_IMAGE_MIN_TOKENS:-1024}"
       - --image-max-tokens
-      - "${NAS_AI_VISION_IMAGE_MAX_TOKENS:-768}"
+      - "${NAS_AI_VISION_IMAGE_MAX_TOKENS:-1024}"
       - --ctx-size
       - "${NAS_AI_VISION_CTX_SIZE:-8192}"
       - --cache-type-k
@@ -169,6 +176,8 @@ services:
       - "on"
     environment:
       GGML_VK_VISIBLE_DEVICES: ${GGML_VK_VISIBLE_DEVICES:-0}
+      MESA_SHADER_CACHE_DIR: /tmp/mesa-shader-cache
+      MESA_SHADER_CACHE_MAX_SIZE: 128M
     volumes:
       - ./runtime/llama:/opt/llama:ro
       - ./models:/models:ro
@@ -188,6 +197,7 @@ services:
     tmpfs:
       - /tmp:size=256m
     mem_limit: ${NAS_AI_VISION_MEM_LIMIT:-4096m}
+    memswap_limit: ${NAS_AI_VISION_MEMSWAP_LIMIT:-8192m}
     logging: *logging-default
 
   embedding:
@@ -247,6 +257,61 @@ services:
     mem_limit: ${NAS_AI_EMBEDDING_MEM_LIMIT:-1024m}
     logging: *logging-default
 
+  reranker:
+    build:
+      context: .
+      dockerfile: Dockerfile.llamacpp
+      args:
+        NAS_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
+    image: nas-ai-llamacpp:local
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/Qwen3-0.6B-Q8_0.gguf
+      - --alias
+      - ${NAS_AI_RERANK_MODEL:-qwen3:0.6b}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --parallel
+      - "1"
+      - --ctx-size
+      - "2048"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --batch-size
+      - "64"
+      - --ubatch-size
+      - "32"
+      - --threads
+      - "6"
+      - --threads-batch
+      - "8"
+      - --n-gpu-layers
+      - "0"
+    volumes:
+      - ./runtime/llama:/opt/llama:ro
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m
+    mem_limit: ${NAS_AI_RERANK_MEM_LIMIT:-2048m}
+    memswap_limit: ${NAS_AI_RERANK_MEMSWAP_LIMIT:-4096m}
+    logging: *logging-default
+
   speech:
     build:
       context: .
@@ -304,6 +369,11 @@ services:
     tmpfs:
       - /tmp:size=32m
     mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     logging: *logging-default
 
 volumes:
