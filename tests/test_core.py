@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec, module_from_spec, spec_from_file_location
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 
@@ -67,6 +67,7 @@ from app.services.local_ai import (
 )
 from app.services.organizer import _similar_components, analyze_duplicates, analyze_similar
 from app.services.proxy import generate_look_preview, generate_proxy
+from app.services.productivity import ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.scanner import scan_library
 from app.services.search import SearchService, _partial_coverage_cap, _query_groups
@@ -124,6 +125,12 @@ class SemanticAI:
     @staticmethod
     def embedding_query(query):
         return f"Instruct: test\nQuery: {query}"
+
+
+class ArtifactAI:
+    @staticmethod
+    def generate_artifact(instruction, artifact_type, title, sources):
+        return f"# {title}\n\n{instruction}\n\n资料结论：{sources[0]['evidence']} [1]"
 
 
 def _make_test_font(path: Path) -> None:
@@ -1202,6 +1209,242 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(self.database.quick_check(), "ok")
 
+    def test_productivity_spaces_artifacts_and_reversible_agent(self) -> None:
+        first_path = self.library_path / "meeting-notes.txt"
+        second_path = self.library_path / "budget.csv"
+        first_path.write_text("会议确定下周完成产品方案。", encoding="utf-8")
+        second_path.write_text("item,amount\nprototype,1200", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        files = self.database.fetchall("SELECT * FROM files ORDER BY id")
+        for file in files:
+            self.database.execute(
+                """INSERT INTO content_chunks(file_id, chunk_index, content, source_label)
+                   VALUES (?, 0, ?, '正文')""",
+                (file["id"], Path(file["path"]).read_text(encoding="utf-8")),
+            )
+        user = self.database.create_user("productivity-owner", "生产力用户", "hash", "owner", [])
+        configured = replace(
+            self.local_settings,
+            upload_root=Path(self.temp.name) / "uploads",
+            ingest_root=Path(self.temp.name) / "uploads" / "inbox",
+        )
+        service = ProductivityService(self.database, configured, ArtifactAI())
+        space = service.create_space("产品发布", "项目资料", user["id"])
+        self.assertEqual(service.add_space_files(space["id"], [files[0]["id"]], user["id"]), 1)
+        self.assertEqual(len(service.space_files(space["id"])), 1)
+
+        artifact = service.create_artifact("发布简报", "brief", user["id"], space_id=space["id"])
+        version = service.generate_artifact_version(
+            artifact["id"], "整理决策和待办", [files[0]["id"]], user["id"]
+        )
+        self.assertEqual(version["version_number"], 1)
+        self.assertTrue(Path(version["file_path"]).is_file())
+        self.assertIn("[1]", Path(version["file_path"]).read_text(encoding="utf-8"))
+
+        run = service.create_agent_run(
+            user["id"],
+            "整理会议材料",
+            [
+                {"type": "tag", "tags": ["待办"]},
+                {"type": "copy_to_output", "target_folder": "发布包"},
+            ],
+            [files[0]["id"]],
+        )
+        with self.assertRaisesRegex(ValueError, "确认文本不匹配"):
+            service.approve_agent_run(run["id"], user["id"], "执行")
+        service.approve_agent_run(run["id"], user["id"], run["confirmation"])
+        completed = service.execute_agent_run(run["id"])
+        copied_path = Path(completed["actions"][1]["result"]["copied"][0]["path"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertTrue(copied_path.is_file())
+        self.assertEqual(self.database.file_tag_names(user["id"], files[0]["id"]), ["待办"])
+        undone = service.undo_agent_run(run["id"], user["id"])
+        self.assertEqual(undone["status"], "undone")
+        self.assertFalse(copied_path.exists())
+        self.assertEqual(self.database.file_tag_names(user["id"], files[0]["id"]), [])
+        with self.assertRaisesRegex(ValueError, "不支持的 Agent 动作"):
+            service.create_agent_run(
+                user["id"], "运行命令", [{"type": "shell", "command": "rm -rf /"}], [],
+            )
+
+    def test_productivity_file_arrival_automation(self) -> None:
+        document = self.library_path / "incoming.md"
+        document.write_text("自动化测试资料", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file = self.database.fetchone("SELECT * FROM files WHERE name = ?", (document.name,))
+        user = self.database.create_user(
+            "automation-owner", "自动化用户", "hash", "owner", [self.library["id"]]
+        )
+        configured = replace(
+            self.local_settings,
+            upload_root=Path(self.temp.name) / "uploads",
+            ingest_root=Path(self.temp.name) / "uploads" / "inbox",
+        )
+        service = ProductivityService(self.database, configured, ArtifactAI())
+        space = service.create_space("自动入库", "", user["id"])
+        workflow = service.create_workflow(
+            user["id"], "文档自动归档", "", "file_arrived", {},
+            [{"field": "kind", "value": "document"}],
+            [{"type": "add_to_space", "space_id": space["id"]}], True,
+        )
+        run_ids = service.create_file_arrival_runs([file["id"]])
+        self.assertEqual(len(run_ids), 1)
+        result = service.execute_automation_run(run_ids[0])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([item["id"] for item in service.space_files(space["id"])], [file["id"]])
+        self.assertTrue(service.workflow(workflow["id"], user["id"])["last_run_at"])
+
+        resumed_run_id = service.create_automation_run(workflow["id"], [file["id"]], "manual")
+        resumed_agent = service.create_agent_run(
+            user["id"], "恢复中的自动化",
+            [{"type": "add_to_space", "space_id": space["id"]}], [file["id"]],
+        )
+        self.database.execute(
+            "UPDATE agent_runs SET status = 'approved', approved_at = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"), resumed_agent["id"]),
+        )
+        self.database.execute(
+            "UPDATE automation_runs SET status = 'running', result_json = ? WHERE id = ?",
+            (json.dumps({"agent_run_id": resumed_agent["id"]}), resumed_run_id),
+        )
+        resumed = service.execute_automation_run(resumed_run_id)
+        self.assertEqual(resumed["agent_run_id"], resumed_agent["id"])
+        self.assertEqual(resumed["status"], "completed")
+
+    def test_productivity_agent_undo_guards_and_artifact_cleanup(self) -> None:
+        document = self.library_path / "source.txt"
+        document.write_text("需要生成总结的本地资料", encoding="utf-8")
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file = self.database.fetchone("SELECT * FROM files WHERE name = ?", (document.name,))
+        self.database.execute(
+            "INSERT INTO content_chunks(file_id, chunk_index, content, source_label) VALUES (?, 0, ?, '正文')",
+            (file["id"], "需要生成总结的本地资料"),
+        )
+        user = self.database.create_user("undo-owner", "撤销测试", "hash", "owner", [])
+        configured = replace(
+            self.local_settings,
+            upload_root=Path(self.temp.name) / "uploads",
+            ingest_root=Path(self.temp.name) / "uploads" / "inbox",
+        )
+        service = ProductivityService(self.database, configured, ArtifactAI())
+
+        copy_run = service.create_agent_run(
+            user["id"], "复制资料", [{"type": "copy_to_output", "target_folder": "交付"}], [file["id"]]
+        )
+        service.approve_agent_run(copy_run["id"], user["id"], copy_run["confirmation"])
+        copied = service.execute_agent_run(copy_run["id"])
+        copied_path = Path(copied["actions"][0]["result"]["copied"][0]["path"])
+        copied_path.write_text("用户已经修改成果", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "成果文件已变化"):
+            service.undo_agent_run(copy_run["id"], user["id"])
+        self.assertTrue(copied_path.is_file())
+
+        tag_run = service.create_agent_run(
+            user["id"], "添加标签", [{"type": "tag", "tags": ["AI整理"]}], [file["id"]]
+        )
+        service.approve_agent_run(tag_run["id"], user["id"], tag_run["confirmation"])
+        service.execute_agent_run(tag_run["id"])
+        self.database.set_file_tags(user["id"], file["id"], ["AI整理", "人工补充"])
+        with self.assertRaisesRegex(ValueError, "标签已变化"):
+            service.undo_agent_run(tag_run["id"], user["id"])
+        self.assertEqual(
+            self.database.file_tag_names(user["id"], file["id"]), ["AI整理", "人工补充"]
+        )
+
+        artifact_run = service.create_agent_run(
+            user["id"],
+            "生成总结",
+            [{
+                "type": "generate_artifact",
+                "title": "资料总结",
+                "artifact_type": "summary",
+                "prompt": "提炼重点",
+            }],
+            [file["id"]],
+        )
+        service.approve_agent_run(artifact_run["id"], user["id"], artifact_run["confirmation"])
+        generated = service.execute_agent_run(artifact_run["id"])
+        artifact_id = generated["actions"][0]["result"]["artifact_id"]
+        version_path = Path(
+            self.database.fetchone(
+                "SELECT file_path FROM artifact_versions WHERE artifact_id = ?", (artifact_id,)
+            )["file_path"]
+        )
+        self.assertTrue(version_path.is_file())
+        original_content = version_path.read_text(encoding="utf-8")
+        version_path.write_text("用户修改后的成果", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "成果文件已变化"):
+            service.undo_agent_run(artifact_run["id"], user["id"])
+        version_path.write_text(original_content, encoding="utf-8")
+        service.undo_agent_run(artifact_run["id"], user["id"])
+        self.assertFalse(version_path.exists())
+        self.assertIsNone(self.database.fetchone("SELECT id FROM artifacts WHERE id = ?", (artifact_id,)))
+
+        failing_ai = Mock()
+        failing_ai.generate_artifact.side_effect = RuntimeError("模型暂时不可用")
+        failing_service = ProductivityService(self.database, configured, failing_ai)
+        failed_run = failing_service.create_agent_run(
+            user["id"],
+            "失败成果不留孤儿记录",
+            [{"type": "generate_artifact", "title": "失败成果", "artifact_type": "summary"}],
+            [file["id"]],
+        )
+        failing_service.approve_agent_run(
+            failed_run["id"], user["id"], failed_run["confirmation"]
+        )
+        with self.assertRaisesRegex(RuntimeError, "模型暂时不可用"):
+            failing_service.execute_agent_run(failed_run["id"])
+        self.assertIsNone(self.database.fetchone("SELECT id FROM artifacts WHERE title = '失败成果'"))
+        failed_action = self.database.fetchone(
+            "SELECT status, error FROM agent_actions WHERE run_id = ?", (failed_run["id"],)
+        )
+        self.assertEqual(failed_action["status"], "failed")
+        self.assertIn("模型暂时不可用", failed_action["error"])
+
+    def test_productivity_automation_safety_and_schedule_deduplication(self) -> None:
+        configured = replace(
+            self.local_settings,
+            upload_root=Path(self.temp.name) / "uploads",
+            ingest_root=Path(self.temp.name) / "uploads" / "inbox",
+        )
+        user = self.database.create_user("schedule-owner", "计划任务", "hash", "owner", [])
+        service = ProductivityService(self.database, configured, ArtifactAI())
+        output_document = service.output_root / "generated.md"
+        output_document.write_text("这是工作成果，不应再次触发自动化", encoding="utf-8")
+        output_library = self.database.create_library("成果目录", str(service.output_root))
+        scan_library(self.database, output_library, lambda *_: None, lambda: False)
+        output_file = self.database.fetchone("SELECT * FROM files WHERE path = ?", (str(output_document),))
+        service.create_workflow(
+            user["id"], "新文件标记", "", "file_arrived", {}, [],
+            [{"type": "tag", "tags": ["新文件"]}], True,
+        )
+        self.assertEqual(service.create_file_arrival_runs([output_file["id"]]), [])
+
+        with self.assertRaisesRegex(ValueError, "必须指定项目或知识空间"):
+            service.create_workflow(
+                user["id"], "无范围定时任务", "", "schedule", {"hour": 8, "minute": 0}, [],
+                [{"type": "tag", "tags": ["每日"]}], True,
+            )
+        space = service.create_space("每日范围", "", user["id"])
+        workflow = service.create_workflow(
+            user["id"], "每日任务", "", "schedule", {"hour": 8, "minute": 30}, [],
+            [{"type": "tag", "tags": ["每日"]}], True, space_id=space["id"],
+        )
+        due = datetime(2026, 8, 12, 8, 30).astimezone()
+        self.assertEqual(len(service.create_due_schedule_runs(due)), 1)
+        self.assertEqual(service.create_due_schedule_runs(due), [])
+        agent = service.create_agent_run(
+            user["id"], "停用后不得执行", [{"type": "tag", "tags": ["禁止"]}], [output_file["id"]]
+        )
+        service.approve_agent_run(agent["id"], user["id"], agent["confirmation"])
+        self.database.execute("UPDATE users SET enabled = 0 WHERE id = ?", (user["id"],))
+        with self.assertRaisesRegex(PermissionError, "用户已停用"):
+            service.execute_agent_run(agent["id"])
+        self.assertEqual(service.agent_run(agent["id"], user["id"])["status"], "failed")
+        next_day = datetime(2026, 8, 13, 8, 30).astimezone()
+        self.assertEqual(service.create_due_schedule_runs(next_day), [])
+        self.assertEqual(service.workflow(workflow["id"], user["id"])["last_trigger_key"], due.strftime("%Y-%m-%dT%H:%M"))
+
     def test_project_owner_role_invariant_and_migration_repair(self) -> None:
         owner = self.database.create_user("role-owner", "项目所有者", "hash", "owner", [])
         reviewer = self.database.create_user("role-reviewer", "项目成员", "hash", "member", [])
@@ -1379,6 +1622,12 @@ class APITests(unittest.TestCase):
         self.assertIn("compactDatabase", homepage.text)
         self.assertIn("projectInboxButton", homepage.text)
         self.assertIn("lookModal", homepage.text)
+        self.assertIn("view-knowledge", homepage.text)
+        self.assertIn("view-agents", homepage.text)
+        self.assertIn("view-automations", homepage.text)
+        self.assertIn("view-artifacts", homepage.text)
+        self.assertIn("本地 AI 生产力平台", homepage.text)
+        self.assertIn("loadProductivityDashboard", script.text)
         model_viewer = self.client.get("/assets/model-viewer.js")
         self.assertEqual(model_viewer.status_code, 200)
         self.assertIn("mountModelViewer", model_viewer.text)
@@ -1390,6 +1639,104 @@ class APITests(unittest.TestCase):
         self.assertNotIn("uvicorn", health.headers.get("server", "").lower())
         self.assertNotIn("swagger-ui", self.client.get("/docs").text.lower())
         self.assertEqual(self.client.get("/openapi.json").headers["content-type"].split(";")[0], "text/html")
+
+    def test_productivity_api_scope_plan_and_automation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nas-ai-productivity-api-") as directory:
+            root = Path(directory)
+            library_path = root / "library"
+            library_path.mkdir()
+            document = library_path / "brief.md"
+            document.write_text("产品发布的关键结论", encoding="utf-8")
+            database = Database(root / "index.db")
+            database.initialize()
+            library = database.create_library("生产力资料", str(library_path))
+            scan_library(database, library, lambda *_: None, lambda: False)
+            configured = replace(
+                settings,
+                data_dir=root / "data",
+                database_path=root / "index.db",
+                scan_root=library_path,
+                scan_roots=(library_path,),
+                upload_root=root / "uploads",
+                ingest_root=root / "uploads" / "inbox",
+            )
+            productivity = ProductivityService(database, configured, ArtifactAI())
+            with (
+                patch.object(state, "database", database),
+                patch.object(state, "productivity", productivity),
+                patch.object(state.tasks, "submit", new=AsyncMock(return_value=991)),
+            ):
+                owner = self.client.post("/api/auth/bootstrap", json={
+                    "username": "productivity-api-owner",
+                    "display_name": "生产力 API",
+                    "password": "productivity-password",
+                })
+                self.assertEqual(owner.status_code, 201)
+                headers = {"Authorization": f"Bearer {owner.json()['token']}"}
+                file_id = database.fetchone("SELECT id FROM files WHERE name = ?", (document.name,))["id"]
+                space = self.client.post(
+                    "/api/knowledge-spaces", headers=headers,
+                    json={"name": "发布知识库", "description": "", "project_id": None},
+                )
+                self.assertEqual(space.status_code, 201)
+                space_id = space.json()["id"]
+                added = self.client.post(
+                    f"/api/knowledge-spaces/{space_id}/files", headers=headers,
+                    json={"file_ids": [file_id]},
+                )
+                self.assertEqual(added.json()["added"], 1)
+                plan = self.client.post(
+                    "/api/agent-runs", headers=headers,
+                    json={
+                        "prompt": "标记发布资料",
+                        "file_ids": [file_id],
+                        "actions": [{"type": "tag", "tags": ["发布"]}],
+                        "space_id": space_id,
+                    },
+                )
+                self.assertEqual(plan.status_code, 201)
+                self.assertEqual(plan.json()["status"], "draft")
+                rejected = self.client.post(
+                    f"/api/agent-runs/{plan.json()['id']}/execute", headers=headers,
+                    json={"confirmation": "错误确认"},
+                )
+                self.assertEqual(rejected.status_code, 409)
+                workflow = self.client.post(
+                    "/api/automations", headers=headers,
+                    json={
+                        "name": "文档自动归档",
+                        "trigger_type": "file_arrived",
+                        "conditions": [{"field": "kind", "value": "document"}],
+                        "actions": [{"type": "add_to_space", "space_id": space_id}],
+                        "enabled": True,
+                    },
+                )
+                self.assertEqual(workflow.status_code, 201)
+                self.assertTrue(workflow.json()["enabled"])
+                invalid_schedule = self.client.post(
+                    "/api/automations", headers=headers,
+                    json={
+                        "name": "缺少范围的定时任务",
+                        "trigger_type": "schedule",
+                        "trigger": {"hour": 8, "minute": 0},
+                        "actions": [{"type": "tag", "tags": ["每日"]}],
+                        "enabled": True,
+                    },
+                )
+                self.assertEqual(invalid_schedule.status_code, 400)
+                artifact = self.client.post(
+                    "/api/artifacts", headers=headers,
+                    json={
+                        "title": "发布简报",
+                        "artifact_type": "brief",
+                        "prompt": "整理关键结论",
+                        "file_ids": [file_id],
+                        "space_id": space_id,
+                    },
+                )
+                self.assertEqual(artifact.status_code, 202)
+                self.assertEqual(artifact.json()["task_id"], 991)
+                self.assertEqual(self.client.get("/api/productivity/dashboard", headers=headers).status_code, 200)
 
     def test_discover_and_batched_index_api(self) -> None:
         folder = SCAN_ROOT / f"batch-{time.time_ns()}"
@@ -2133,6 +2480,24 @@ class APITests(unittest.TestCase):
         )
         self.assertEqual(len(task_notifications), 1)
         self.assertIn("完成", task_notifications[0]["title"])
+
+        failed_task_id = state.database.create_task("unknown_for_notification_test", {}, user_id=user_id)
+        state.database.fail_task(failed_task_id, "等待重试")
+        failed_retry = self.client.post(f"/api/tasks/{failed_task_id}/retry", headers=headers)
+        self.assertEqual(failed_retry.status_code, 202)
+        failed_status = "pending"
+        for _ in range(100):
+            failed_status = state.database.get_task(failed_task_id)["status"]
+            if failed_status in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.03)
+        self.assertEqual(failed_status, "failed")
+        failure_notifications = state.database.fetchall(
+            "SELECT * FROM notifications WHERE user_id = ? AND type = 'task.finished' AND target_id = ?",
+            (user_id, str(failed_task_id)),
+        )
+        self.assertEqual(len(failure_notifications), 1)
+        self.assertIn("失败", failure_notifications[0]["title"])
 
         deleted = self.client.delete(f"/api/comments/{external_id}", headers=headers)
         self.assertEqual(deleted.status_code, 200)

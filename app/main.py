@@ -33,6 +33,7 @@ from app.services.extractors import create_thumbnail
 from app.services.hardware import detect_hardware, memory_runtime, runtime_metrics
 from app.services.ingest import project_inbox
 from app.services.local_ai import LocalAIClient
+from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
 from app.services.watcher import LibraryWatcher
@@ -56,6 +57,9 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=2000)
     kind: str = ""
     conversation_id: Optional[int] = None
+    space_id: Optional[int] = None
+    project_id: Optional[int] = None
+    file_ids: list[int] = Field(default_factory=list, max_length=500)
 
 
 class LoginRequest(BaseModel):
@@ -284,6 +288,67 @@ class PublicReviewComment(BaseModel):
     time_end: Optional[float] = Field(default=None, ge=0)
 
 
+class KnowledgeSpaceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    project_id: Optional[int] = None
+
+
+class KnowledgeSpaceUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+
+
+class KnowledgeSpaceFiles(BaseModel):
+    file_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class ArtifactCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    artifact_type: str = Field(default="report")
+    prompt: str = Field(min_length=2, max_length=4000)
+    file_ids: list[int] = Field(min_length=1, max_length=12)
+    project_id: Optional[int] = None
+    space_id: Optional[int] = None
+
+
+class ArtifactVersionCreate(BaseModel):
+    prompt: str = Field(min_length=2, max_length=4000)
+    file_ids: list[int] = Field(min_length=1, max_length=12)
+
+
+class AgentPlanCreate(BaseModel):
+    prompt: str = Field(min_length=2, max_length=4000)
+    file_ids: list[int] = Field(default_factory=list, max_length=500)
+    actions: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+    project_id: Optional[int] = None
+    space_id: Optional[int] = None
+
+
+class AgentConfirm(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=120)
+
+
+class AutomationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    trigger_type: str = Field(default="manual")
+    trigger: dict[str, Any] = Field(default_factory=dict)
+    conditions: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    actions: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+    enabled: bool = False
+    project_id: Optional[int] = None
+    space_id: Optional[int] = None
+
+
+class AutomationEnabled(BaseModel):
+    enabled: bool
+
+
+class AutomationRunCreate(BaseModel):
+    file_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
 class AppState:
     database: Database
     ai: LocalAIClient
@@ -293,6 +358,7 @@ class AppState:
     watcher: LibraryWatcher
     recycle: RecycleBin
     workspaces: WorkspaceService
+    productivity: ProductivityService
     media_tickets: dict[str, tuple[int, float]]
     workspace_tickets: dict[str, tuple[str, str, str, float, bool, str]]
 
@@ -336,6 +402,7 @@ async def lifespan(_: FastAPI):
     state.vectors = VectorStore(settings)
     state.search = SearchService(state.database, state.ai, state.vectors)
     state.tasks = TaskManager(state.database, settings, state.ai, state.vectors)
+    state.productivity = state.tasks.productivity
     state.recycle = RecycleBin(state.database, settings, state.vectors)
     state.workspaces = WorkspaceService(state.database)
     state.media_tickets = {}
@@ -350,7 +417,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -543,6 +610,66 @@ def _project_context(
     if roles is not None and role not in roles:
         raise HTTPException(status_code=403, detail="当前项目角色没有此操作权限")
     return project, role
+
+
+def _space_context(
+    space_id: int,
+    principal: dict[str, Any],
+) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    space = state.productivity.space_access(space_id, user_id, _is_admin(principal))
+    if not space:
+        raise HTTPException(status_code=404, detail="知识空间不存在")
+    return space
+
+
+def _validate_productivity_scope(
+    principal: dict[str, Any],
+    project_id: int | None,
+    space_id: int | None,
+    edit: bool = False,
+) -> None:
+    if project_id is not None:
+        _project_context(project_id, principal, EDIT_ROLES if edit else None)
+    if space_id is not None:
+        space = _space_context(space_id, principal)
+        if edit and int(space["owner_id"]) != _personal_user_id(principal) and not _is_admin(principal):
+            if not space.get("project_id"):
+                raise HTTPException(status_code=403, detail="只有知识空间所有者可以修改")
+            _project_context(int(space["project_id"]), principal, EDIT_ROLES)
+
+
+def _validate_file_ids(file_ids: list[int], principal: dict[str, Any]) -> list[int]:
+    values = list(dict.fromkeys(int(value) for value in file_ids))
+    for file_id in values:
+        _visible_file(file_id, principal)
+    return values
+
+
+def _validate_scope_file_ids(
+    file_ids: list[int],
+    project_id: int | None,
+    space_id: int | None,
+) -> None:
+    if project_id is None and space_id is None:
+        return
+    allowed = set(state.productivity.scope_file_ids(space_id, project_id) or [])
+    if any(file_id not in allowed for file_id in file_ids):
+        raise HTTPException(status_code=400, detail="所选资料不属于指定的工作范围")
+
+
+def _validate_agent_actions(
+    actions: list[dict[str, Any]],
+    default_file_ids: list[int],
+    principal: dict[str, Any],
+) -> None:
+    for action in actions:
+        file_ids = [int(value) for value in action.get("file_ids") or default_file_ids]
+        _validate_file_ids(file_ids, principal)
+        if action.get("space_id"):
+            _validate_productivity_scope(principal, None, int(action["space_id"]), edit=True)
+        if action.get("project_id"):
+            _validate_productivity_scope(principal, int(action["project_id"]), None, edit=True)
 
 
 def _asset_context(
@@ -1391,6 +1518,381 @@ def dashboard(principal: Auth) -> dict[str, Any]:
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
     return result
+
+
+@app.get("/api/productivity/dashboard")
+def productivity_dashboard(principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    spaces = state.productivity.list_spaces(user_id, _is_admin(principal))
+    artifacts = state.productivity.list_artifacts(user_id, _is_admin(principal))
+    agent_runs = state.productivity.list_agent_runs(user_id, _is_admin(principal))
+    workflows = state.productivity.list_workflows(user_id, _is_admin(principal))
+    return {
+        "counts": {
+            "spaces": len(spaces),
+            "artifacts": len(artifacts),
+            "agent_runs": len(agent_runs),
+            "active_automations": sum(int(item["enabled"]) for item in workflows),
+        },
+        "spaces": spaces[:6],
+        "artifacts": artifacts[:8],
+        "agent_runs": agent_runs[:8],
+        "workflows": workflows[:6],
+    }
+
+
+@app.get("/api/knowledge-spaces")
+def list_knowledge_spaces(principal: Auth) -> list[dict[str, Any]]:
+    return state.productivity.list_spaces(_personal_user_id(principal), _is_admin(principal))
+
+
+@app.post("/api/knowledge-spaces", status_code=201)
+def create_knowledge_space(payload: KnowledgeSpaceCreate, principal: Auth) -> dict[str, Any]:
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="知识空间名称不能为空")
+    user_id = _personal_user_id(principal)
+    _validate_productivity_scope(principal, payload.project_id, None, edit=True)
+    space = state.productivity.create_space(
+        payload.name, payload.description, user_id, payload.project_id
+    )
+    _audit(principal, "knowledge_space.create", "knowledge_space", str(space["id"]), {"name": space["name"]})
+    return space
+
+
+@app.get("/api/knowledge-spaces/{space_id}")
+def get_knowledge_space(space_id: int, principal: Auth) -> dict[str, Any]:
+    space = _space_context(space_id, principal)
+    space["files"] = state.productivity.space_files(
+        space_id, _personal_user_id(principal), _is_admin(principal)
+    )
+    return space
+
+
+@app.put("/api/knowledge-spaces/{space_id}")
+def update_knowledge_space(
+    space_id: int, payload: KnowledgeSpaceUpdate, principal: Auth
+) -> dict[str, Any]:
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="知识空间名称不能为空")
+    _validate_productivity_scope(principal, None, space_id, edit=True)
+    state.productivity.update_space(space_id, payload.name, payload.description)
+    _audit(principal, "knowledge_space.update", "knowledge_space", str(space_id))
+    return get_knowledge_space(space_id, principal)
+
+
+@app.delete("/api/knowledge-spaces/{space_id}")
+def delete_knowledge_space(space_id: int, principal: Auth) -> dict[str, bool]:
+    space = _space_context(space_id, principal)
+    if int(space["owner_id"]) != _personal_user_id(principal) and not _is_admin(principal):
+        raise HTTPException(status_code=403, detail="只有知识空间所有者可以删除")
+    state.database.execute("DELETE FROM knowledge_spaces WHERE id = ?", (space_id,))
+    _audit(principal, "knowledge_space.delete", "knowledge_space", str(space_id))
+    return {"ok": True}
+
+
+@app.post("/api/knowledge-spaces/{space_id}/files")
+def add_knowledge_space_files(
+    space_id: int, payload: KnowledgeSpaceFiles, principal: Auth
+) -> dict[str, Any]:
+    _validate_productivity_scope(principal, None, space_id, edit=True)
+    file_ids = _validate_file_ids(payload.file_ids, principal)
+    added = state.productivity.add_space_files(space_id, file_ids, _personal_user_id(principal))
+    _audit(
+        principal, "knowledge_space.files.add", "knowledge_space", str(space_id),
+        {"file_ids": file_ids, "added": added},
+    )
+    return {
+        "added": added,
+        "files": state.productivity.space_files(
+            space_id, _personal_user_id(principal), _is_admin(principal)
+        ),
+    }
+
+
+@app.delete("/api/knowledge-spaces/{space_id}/files/{file_id}")
+def remove_knowledge_space_file(space_id: int, file_id: int, principal: Auth) -> dict[str, bool]:
+    _validate_productivity_scope(principal, None, space_id, edit=True)
+    state.productivity.remove_space_file(space_id, file_id)
+    _audit(principal, "knowledge_space.files.remove", "knowledge_space", str(space_id), {"file_id": file_id})
+    return {"ok": True}
+
+
+@app.get("/api/artifacts")
+def list_artifacts(principal: Auth) -> list[dict[str, Any]]:
+    return state.productivity.list_artifacts(_personal_user_id(principal), _is_admin(principal))
+
+
+@app.post("/api/artifacts", status_code=202)
+async def create_artifact(payload: ArtifactCreate, principal: Auth) -> dict[str, Any]:
+    if payload.artifact_type not in ARTIFACT_TYPES:
+        raise HTTPException(status_code=400, detail="不支持的成果类型")
+    if not payload.title.strip() or not payload.prompt.strip():
+        raise HTTPException(status_code=400, detail="成果标题和生成要求不能为空")
+    user_id = _personal_user_id(principal)
+    _validate_productivity_scope(principal, payload.project_id, payload.space_id, edit=True)
+    file_ids = _validate_file_ids(payload.file_ids, principal)
+    _validate_scope_file_ids(file_ids, payload.project_id, payload.space_id)
+    artifact = state.productivity.create_artifact(
+        payload.title, payload.artifact_type, user_id, payload.project_id, payload.space_id
+    )
+    try:
+        task_id = await state.tasks.submit(
+            "generate_artifact",
+            {
+                "artifact_id": artifact["id"],
+                "prompt": payload.prompt,
+                "file_ids": file_ids,
+                "user_id": user_id,
+            },
+            priority=8,
+            user_id=user_id,
+        )
+    except Exception as exc:
+        state.productivity.fail_artifact(int(artifact["id"]))
+        raise HTTPException(status_code=503, detail="成果任务暂时无法提交") from exc
+    _audit(
+        principal, "artifact.generate", "artifact", str(artifact["id"]),
+        {"task_id": task_id, "file_ids": file_ids},
+    )
+    return {"artifact": artifact, "task_id": task_id}
+
+
+@app.get("/api/artifacts/{artifact_id}")
+def get_artifact(artifact_id: int, principal: Auth) -> dict[str, Any]:
+    artifact = state.productivity.artifact(
+        artifact_id, _personal_user_id(principal), _is_admin(principal)
+    )
+    if not artifact:
+        raise HTTPException(status_code=404, detail="成果不存在")
+    return artifact
+
+
+@app.post("/api/artifacts/{artifact_id}/versions", status_code=202)
+async def create_artifact_version(
+    artifact_id: int, payload: ArtifactVersionCreate, principal: Auth
+) -> dict[str, Any]:
+    if not payload.prompt.strip():
+        raise HTTPException(status_code=400, detail="生成要求不能为空")
+    artifact = get_artifact(artifact_id, principal)
+    _validate_productivity_scope(principal, artifact.get("project_id"), artifact.get("space_id"), edit=True)
+    file_ids = _validate_file_ids(payload.file_ids, principal)
+    _validate_scope_file_ids(file_ids, artifact.get("project_id"), artifact.get("space_id"))
+    active = state.database.fetchone(
+        """SELECT id FROM tasks WHERE type = 'generate_artifact' AND status IN ('pending', 'running')
+           AND json_extract(payload_json, '$.artifact_id') = ? ORDER BY id DESC LIMIT 1""",
+        (artifact_id,),
+    )
+    if active:
+        raise HTTPException(status_code=409, detail=f"该成果已有生成任务 #{active['id']} 正在运行")
+    user_id = _personal_user_id(principal)
+    previous_status = str(artifact.get("status") or "ready")
+    state.database.execute(
+        "UPDATE artifacts SET status = 'processing', updated_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(timespec="seconds"), artifact_id),
+    )
+    try:
+        task_id = await state.tasks.submit(
+            "generate_artifact",
+            {"artifact_id": artifact_id, "prompt": payload.prompt, "file_ids": file_ids, "user_id": user_id},
+            priority=8,
+            user_id=user_id,
+        )
+    except Exception as exc:
+        state.database.execute(
+            "UPDATE artifacts SET status = ?, updated_at = ? WHERE id = ?",
+            (previous_status, datetime.now(timezone.utc).isoformat(timespec="seconds"), artifact_id),
+        )
+        raise HTTPException(status_code=503, detail="成果版本任务暂时无法提交") from exc
+    _audit(principal, "artifact.version.generate", "artifact", str(artifact_id), {"task_id": task_id})
+    return {"artifact_id": artifact_id, "task_id": task_id}
+
+
+@app.get("/api/artifacts/{artifact_id}/versions/{version_id}/download")
+def download_artifact_version(artifact_id: int, version_id: int, principal: Auth) -> FileResponse:
+    path = state.productivity.artifact_file(
+        artifact_id, version_id, _personal_user_id(principal), _is_admin(principal)
+    )
+    if not path:
+        raise HTTPException(status_code=404, detail="成果文件不存在")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=path.name)
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+def delete_artifact(artifact_id: int, principal: Auth) -> dict[str, bool]:
+    artifact = get_artifact(artifact_id, principal)
+    if int(artifact["created_by"]) != _personal_user_id(principal) and not _is_admin(principal):
+        raise HTTPException(status_code=403, detail="只有成果创建者可以删除")
+    state.productivity.delete_artifact(
+        artifact_id, _personal_user_id(principal), _is_admin(principal)
+    )
+    _audit(principal, "artifact.delete", "artifact", str(artifact_id))
+    return {"ok": True}
+
+
+@app.get("/api/agent-runs")
+def list_agent_runs(principal: Auth) -> list[dict[str, Any]]:
+    return state.productivity.list_agent_runs(_personal_user_id(principal), _is_admin(principal))
+
+
+@app.post("/api/agent-runs", status_code=201)
+def create_agent_plan(payload: AgentPlanCreate, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    _validate_productivity_scope(principal, payload.project_id, payload.space_id, edit=True)
+    file_ids = _validate_file_ids(payload.file_ids, principal)
+    _validate_scope_file_ids(file_ids, payload.project_id, payload.space_id)
+    _validate_agent_actions(payload.actions, file_ids, principal)
+    try:
+        run = state.productivity.create_agent_run(
+            user_id, payload.prompt, payload.actions, file_ids, payload.project_id, payload.space_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(principal, "agent.plan", "agent_run", str(run["id"]), {"risk_level": run["risk_level"]})
+    return run
+
+
+@app.get("/api/agent-runs/{run_id}")
+def get_agent_run(run_id: int, principal: Auth) -> dict[str, Any]:
+    run = state.productivity.agent_run(
+        run_id, _personal_user_id(principal), _is_admin(principal)
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="AI 任务不存在")
+    return run
+
+
+@app.post("/api/agent-runs/{run_id}/execute", status_code=202)
+async def execute_agent_plan(run_id: int, payload: AgentConfirm, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    try:
+        state.productivity.approve_agent_run(run_id, user_id, payload.confirmation)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        task_id = await state.tasks.submit(
+            "agent_run", {"run_id": run_id}, priority=7, user_id=user_id
+        )
+    except Exception as exc:
+        state.productivity.reset_agent_approval(run_id, user_id)
+        raise HTTPException(status_code=503, detail="AI 任务暂时无法提交") from exc
+    _audit(principal, "agent.execute", "agent_run", str(run_id), {"task_id": task_id})
+    return {"run_id": run_id, "task_id": task_id, "status": "approved"}
+
+
+@app.post("/api/agent-runs/{run_id}/undo")
+def undo_agent_plan(run_id: int, principal: Auth) -> dict[str, Any]:
+    try:
+        run = state.productivity.undo_agent_run(run_id, _personal_user_id(principal))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _audit(principal, "agent.undo", "agent_run", str(run_id))
+    return run
+
+
+@app.get("/api/automations")
+def list_automations(principal: Auth) -> list[dict[str, Any]]:
+    return state.productivity.list_workflows(_personal_user_id(principal), _is_admin(principal))
+
+
+@app.post("/api/automations", status_code=201)
+def create_automation(payload: AutomationCreate, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    _validate_productivity_scope(principal, payload.project_id, payload.space_id, edit=True)
+    _validate_agent_actions(payload.actions, [], principal)
+    try:
+        workflow = state.productivity.create_workflow(
+            user_id, payload.name, payload.description, payload.trigger_type, payload.trigger,
+            payload.conditions, payload.actions, payload.enabled, payload.project_id, payload.space_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(principal, "automation.create", "automation", str(workflow["id"]), {"enabled": payload.enabled})
+    return workflow
+
+
+@app.get("/api/automations/{workflow_id}")
+def get_automation(workflow_id: int, principal: Auth) -> dict[str, Any]:
+    workflow = state.productivity.workflow(
+        workflow_id, _personal_user_id(principal), _is_admin(principal)
+    )
+    if not workflow:
+        raise HTTPException(status_code=404, detail="自动化不存在")
+    return workflow
+
+
+@app.put("/api/automations/{workflow_id}")
+def update_automation(
+    workflow_id: int, payload: AutomationCreate, principal: Auth
+) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    get_automation(workflow_id, principal)
+    _validate_productivity_scope(principal, payload.project_id, payload.space_id, edit=True)
+    _validate_agent_actions(payload.actions, [], principal)
+    try:
+        workflow = state.productivity.update_workflow(
+            workflow_id, user_id, payload.name, payload.description, payload.trigger_type,
+            payload.trigger, payload.conditions, payload.actions, payload.enabled,
+            payload.project_id, payload.space_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(principal, "automation.update", "automation", str(workflow_id))
+    return workflow
+
+
+@app.put("/api/automations/{workflow_id}/enabled")
+def set_automation_enabled(
+    workflow_id: int, payload: AutomationEnabled, principal: Auth
+) -> dict[str, Any]:
+    try:
+        state.productivity.set_workflow_enabled(
+            workflow_id, _personal_user_id(principal), payload.enabled
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit(principal, "automation.enabled", "automation", str(workflow_id), {"enabled": payload.enabled})
+    return get_automation(workflow_id, principal)
+
+
+@app.post("/api/automations/{workflow_id}/run", status_code=202)
+async def run_automation(
+    workflow_id: int, payload: AutomationRunCreate, principal: Auth
+) -> dict[str, Any]:
+    workflow = get_automation(workflow_id, principal)
+    file_ids = _validate_file_ids(payload.file_ids, principal)
+    if not file_ids and not workflow.get("project_id") and not workflow.get("space_id"):
+        raise HTTPException(status_code=400, detail="请为本次运行选择资料或给工作流设置默认范围")
+    _validate_scope_file_ids(file_ids, workflow.get("project_id"), workflow.get("space_id"))
+    try:
+        automation_run_id = state.productivity.create_automation_run(workflow_id, file_ids, "manual")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        task_id = await state.tasks.submit(
+            "automation_run", {"automation_run_id": automation_run_id}, priority=6,
+            user_id=_personal_user_id(principal),
+        )
+    except Exception as exc:
+        state.database.execute(
+            "UPDATE automation_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+            ("任务队列暂时不可用", datetime.now(timezone.utc).isoformat(timespec="seconds"), automation_run_id),
+        )
+        raise HTTPException(status_code=503, detail="自动化任务暂时无法提交") from exc
+    _audit(
+        principal, "automation.run", "automation", str(workflow_id),
+        {"automation_run_id": automation_run_id, "task_id": task_id},
+    )
+    return {"workflow_id": workflow["id"], "automation_run_id": automation_run_id, "task_id": task_id}
+
+
+@app.delete("/api/automations/{workflow_id}")
+def delete_automation(workflow_id: int, principal: Auth) -> dict[str, bool]:
+    workflow = get_automation(workflow_id, principal)
+    if int(workflow["user_id"]) != _personal_user_id(principal) and not _is_admin(principal):
+        raise HTTPException(status_code=403, detail="只有自动化所有者可以删除")
+    state.database.execute("DELETE FROM automation_workflows WHERE id = ?", (workflow_id,))
+    _audit(principal, "automation.delete", "automation", str(workflow_id))
+    return {"ok": True}
 
 
 @app.get("/api/projects")
@@ -3528,6 +4030,18 @@ def _focus_answer_evidence(source: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/ask")
 def ask(payload: AskRequest, principal: Auth) -> dict[str, Any]:
     question = payload.question.strip()
+    if payload.space_id is not None and payload.project_id is not None:
+        raise HTTPException(status_code=400, detail="知识空间和项目范围不能同时指定")
+    scoped_file_ids: list[int] | None = None
+    if payload.space_id is not None or payload.project_id is not None:
+        _validate_productivity_scope(principal, payload.project_id, payload.space_id)
+        scoped_file_ids = state.productivity.scope_file_ids(payload.space_id, payload.project_id) or []
+    if payload.file_ids:
+        selected_file_ids = _validate_file_ids(payload.file_ids, principal)
+        scoped_file_ids = (
+            [file_id for file_id in selected_file_ids if file_id in set(scoped_file_ids)]
+            if scoped_file_ids is not None else selected_file_ids
+        )
     conversation_id = payload.conversation_id
     history: list[dict[str, Any]] = []
     if conversation_id is not None:
@@ -3549,8 +4063,13 @@ def ask(payload: AskRequest, principal: Auth) -> dict[str, Any]:
         retrieval_question = f"{previous_user}；追问：{question}"
     date_from, date_to, effective_question = _natural_date_filter(retrieval_question)
     filter_sql = _search_filter_sql(principal, date_from=date_from, date_to=date_to)
-    search_result = state.search.search(
-        effective_question, payload.kind, 24, _library_ids(principal), True, filter_sql=filter_sql
+    search_result = (
+        state.search.search(
+            effective_question, payload.kind, 24, _library_ids(principal), True,
+            file_ids=scoped_file_ids, filter_sql=filter_sql,
+        )
+        if scoped_file_ids is None or scoped_file_ids
+        else {"results": []}
     )
     candidates = search_result["results"]
     common_question = any(marker in question for marker in ("共同", "相同", "都有哪些", "都有什么", "都有"))

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#131519">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
-  <title>NAS AI Space · AI 媒体资产工作台</title>
+  <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=41">
+  <link rel="stylesheet" href="/assets/styles.css?v=43">
 </head>
 <body>
   <div class="app-shell">
@@ -16,17 +16,36 @@
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32"><path d="M8 9.5 16 5l8 4.5v9L16 23l-8-4.5z"/><path d="m8 13.5 8 4.5 8-4.5M16 18v9"/></svg>
         </span>
-        <span class="brand-copy"><b>NAS AI Space</b><small>AI 媒体资产工作台</small></span>
+        <span class="brand-copy"><b>NAS AI Space</b><small>本地 AI 生产力平台</small></span>
       </div>
 
       <div class="workspace-pill"><span>私有空间</span><i>LOCAL</i></div>
 
       <nav id="nav" aria-label="主导航">
         <div class="nav-group">
-          <span class="nav-label">个人空间</span>
+          <span class="nav-label">AI 生产力</span>
           <button class="nav-item active" data-view="home">
-            <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm10 7h6v-9h-6zm0-16v3h6V4zM4 20h6v-3H4z"/></svg><span>总览</span>
+            <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm10 7h6v-9h-6zm0-16v3h6V4zM4 20h6v-3H4z"/></svg><span>AI 工作台</span>
           </button>
+          <button class="nav-item" data-view="search">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><span>智能搜索</span><kbd>⌘K</kbd>
+          </button>
+          <button class="nav-item" data-view="ask">
+            <svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z"/></svg><span>AI 对话</span>
+          </button>
+          <button class="nav-item personal-only" data-view="knowledge">
+            <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M9 4v16M12 8h4m-4 4h4m-4 4h3"/></svg><span>知识空间</span>
+          </button>
+          <button class="nav-item personal-only" data-view="agents">
+            <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h3"/><path d="m15 15 2 2 3-4"/></svg><span>AI 任务</span>
+          </button>
+          <button class="nav-item personal-only" data-view="automations">
+            <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="18" r="2"/><path d="M8 6h3a4 4 0 0 1 4 4M8 18h3a4 4 0 0 0 4-4"/></svg><span>自动化</span>
+          </button>
+          <button class="nav-item personal-only" data-view="artifacts">
+            <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 12h6m-6 4h6"/></svg><span>工作成果</span>
+          </button>
+          <span class="nav-label">项目协作</span>
           <button class="nav-item" data-view="projects">
             <svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v11H4z"/><path d="M8 12h8m-8 4h5"/></svg><span>项目</span>
           </button>
@@ -36,17 +55,12 @@
           <button class="nav-item" data-view="deliveries">
             <svg viewBox="0 0 24 24"><path d="M4 7h16v12H4z"/><path d="M8 4h8v3M9 13h6m-3-3v6"/></svg><span>分享与交付</span>
           </button>
-          <button class="nav-item" data-view="search">
-            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><span>智能搜索</span><kbd>⌘K</kbd>
-          </button>
-          <button class="nav-item" data-view="ask">
-            <svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z"/></svg><span>问资料</span>
-          </button>
+          <span class="nav-label">内容资产</span>
           <button class="nav-item" data-view="library">
-            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg><span>浏览</span>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg><span>素材库</span>
           </button>
           <button class="nav-item" data-view="albums">
-            <svg viewBox="0 0 24 24"><path d="M4 6h16v13H4z"/><path d="m7 15 3-3 2 2 2-2 3 3M8 9h.01"/></svg><span>相册与发现</span>
+            <svg viewBox="0 0 24 24"><path d="M4 6h16v13H4z"/><path d="m7 15 3-3 2 2 2-2 3 3M8 9h.01"/></svg><span>媒体发现</span>
           </button>
           <button class="nav-item nav-section-toggle" id="systemNavToggle">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3A1.7 1.7 0 0 0 14 21v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9A1.7 1.7 0 0 0 21 10h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span>系统管理</span><b>⌄</b>
@@ -54,7 +68,7 @@
         </div>
         <div class="nav-group system-nav" id="systemNav" hidden>
           <button class="nav-item" data-view="libraries">
-            <svg viewBox="0 0 24 24"><path d="M4 7.5h16v11H4z"/><path d="M7 4h10l2 3.5H5z"/></svg><span>媒体库</span>
+            <svg viewBox="0 0 24 24"><path d="M4 7.5h16v11H4z"/><path d="M7 4h10l2 3.5H5z"/></svg><span>数据源</span>
           </button>
           <button class="nav-item" data-view="tasks">
             <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M21 5v7h-7"/></svg><span>任务中心</span><i class="nav-count" id="taskCount">0</i>
@@ -100,7 +114,7 @@
         <button class="menu-button" id="menuButton" aria-label="打开导航">
           <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
         </button>
-        <div class="page-context"><strong id="pageTitle">数据总览</strong><small id="pageSubtitle">你的私有数据，只在本地流动</small></div>
+        <div class="page-context"><strong id="pageTitle">AI 工作台</strong><small id="pageSubtitle">从本地资料到可交付成果</small></div>
         <button class="top-search" data-go="search" aria-label="打开搜索">
           <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
           <span>搜索所有资料</span><kbd>⌘ K</kbd>
@@ -116,13 +130,20 @@
 
       <div class="content">
         <section class="view active" id="view-home">
-          <!-- 阶段四（仪表盘）：首屏数据优先——紧凑问候行 + 指标行置顶，营销式欢迎语移除 -->
           <div class="dash-head">
             <span class="eyebrow" id="dayGreeting">欢迎回来</span>
-            <h1>数据总览</h1>
+            <h1>AI 工作台</h1>
+            <p>让 NAS 中的资料直接变成知识、任务和可交付成果。</p>
           </div>
 
-          <div class="stats-grid dash-stats" id="dashboardStats"></div>
+          <div class="productivity-launcher personal-only">
+            <button data-go="knowledge"><span>01</span><b>建立知识空间</b><small>围绕客户或项目组织上下文</small></button>
+            <button data-go="ask"><span>02</span><b>分析与问答</b><small>限定范围并逐条追溯来源</small></button>
+            <button data-go="agents"><span>03</span><b>执行 AI 任务</b><small>预演、确认、审计和撤销</small></button>
+            <button data-go="artifacts"><span>04</span><b>生成工作成果</b><small>报告、简报、纪要和清单</small></button>
+          </div>
+
+          <div class="stats-grid dash-stats personal-only" id="productivityStats"></div>
 
           <div class="command-card">
             <form class="hero-search" data-search-form>
@@ -133,10 +154,25 @@
             <div class="quick-prompts"><span>试着搜索</span><button data-query="去年夏天的海边照片">去年夏天的海边照片</button><button data-query="包含发票的 PDF">包含发票的 PDF</button><button data-query="视频里提到的待办">视频里提到的待办</button></div>
           </div>
 
+          <div class="productivity-home-grid personal-only">
+            <article class="panel">
+              <div class="panel-head compact-head"><div><span class="eyebrow">持续上下文</span><h2>知识空间</h2></div><button class="text-button" data-go="knowledge">管理</button></div>
+              <div class="productivity-feed" id="homeKnowledgeSpaces"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head compact-head"><div><span class="eyebrow">版本化输出</span><h2>最近成果</h2></div><button class="text-button" data-go="artifacts">查看全部</button></div>
+              <div class="productivity-feed" id="homeArtifacts"></div>
+            </article>
+          </div>
+
+          <details class="platform-status">
+            <summary>数据与算力状态</summary>
+            <div class="stats-grid dash-stats" id="dashboardStats"></div>
+
           <div class="dashboard-grid">
             <article class="panel libraries-panel">
               <div class="panel-head">
-                <div><span class="eyebrow">数据源</span><h2>媒体库<span class="help-dot" title="已授权 AI 建立索引的只读目录，不会改动原始文件">?</span></h2></div>
+                <div><span class="eyebrow">数据源</span><h2>本地资料<span class="help-dot" title="已授权 AI 建立索引的只读目录，不会改动原始文件">?</span></h2></div>
                 <button class="text-button" data-go="libraries">查看全部<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
               </div>
               <div id="homeLibraries" class="library-list"></div>
@@ -157,11 +193,110 @@
               <button class="panel-link" data-go="hardware">查看执行计划<svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button>
             </article>
           </div>
+          </details>
 
           <article class="panel recent-panel">
             <div class="panel-head compact-head"><div><span class="eyebrow">处理队列</span><h2>最近任务</h2></div><button class="text-button" data-go="tasks">任务中心</button></div>
             <div id="homeTasks" class="home-task-list"></div>
           </article>
+        </section>
+
+        <section class="view productivity-view personal-only" id="view-knowledge">
+          <div class="section-heading"><div><span class="eyebrow">可复用的工作上下文</span><h1>知识空间</h1><p>把项目、客户或专题资料收进独立范围，让搜索、问答与生成更准确。</p></div></div>
+          <div class="productivity-split">
+            <aside class="productivity-side panel">
+              <form id="knowledgeSpaceForm" class="stack-form">
+                <h2>新建知识空间</h2>
+                <label>名称<input name="name" maxlength="120" required placeholder="例如：新品发布"></label>
+                <label>说明<textarea name="description" rows="3" placeholder="这个空间要解决什么问题"></textarea></label>
+                <label>关联项目<select name="project_id" id="knowledgeProject"><option value="">不关联项目</option></select></label>
+                <button class="primary">创建空间</button>
+              </form>
+              <div class="space-list" id="knowledgeSpaceList"></div>
+            </aside>
+            <section class="panel productivity-detail" id="knowledgeSpaceDetail">
+              <div class="empty-state"><b>选择一个知识空间</b><p>可以向其中加入资料，并限定 AI 对话和成果生成的范围。</p></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view productivity-view personal-only" id="view-agents">
+          <div class="section-heading"><div><span class="eyebrow">受控文件执行</span><h1>AI 任务</h1><p>先生成执行计划，再明确确认；所有变更进入审计并尽可能支持撤销。</p></div><span class="safety-badge">不执行任意命令</span></div>
+          <div class="productivity-split agent-layout">
+            <form id="agentPlanForm" class="panel stack-form productivity-composer">
+              <h2>创建执行计划</h2>
+              <label>任务说明<textarea name="prompt" rows="3" required placeholder="例如：把这些会议资料标记为待办并复制到交付目录"></textarea></label>
+              <label>查找目标资料<div class="inline-field"><input name="query" placeholder="文件名或内容"><button type="button" class="secondary" id="agentFindFiles">查找</button></div></label>
+              <div class="file-picker-results" id="agentFilePicker"><span>先搜索并选择要处理的资料</span></div>
+              <label>执行动作<select name="action_type" id="agentActionType"><option value="tag">添加标签</option><option value="copy_to_output">复制到成果目录</option><option value="add_to_space">加入知识空间</option><option value="generate_artifact">生成成果</option></select></label>
+              <label data-agent-field="tag">标签<input name="tags" placeholder="例如：待办, 已审阅"></label>
+              <label data-agent-field="copy_to_output" hidden>成果子目录<input name="target_folder" placeholder="例如：客户A/交付包"></label>
+              <label data-agent-field="add_to_space" hidden>知识空间<select name="space_id" id="agentSpace"><option value="">请选择</option></select></label>
+              <div data-agent-field="generate_artifact" class="agent-artifact-fields" hidden>
+                <label>成果标题<input name="artifact_title" placeholder="项目简报"></label>
+                <label>成果类型<select name="artifact_type"><option value="report">报告</option><option value="summary">摘要</option><option value="brief">简报</option><option value="minutes">会议纪要</option><option value="script">脚本</option><option value="checklist">行动清单</option></select></label>
+                <label>归属知识空间<select name="artifact_space_id" id="agentArtifactSpace"><option value="">不归属空间</option></select></label>
+                <label>生成要求<textarea name="artifact_prompt" rows="2" placeholder="提取关键决策、风险与下一步"></textarea></label>
+              </div>
+              <button class="primary">预演计划</button>
+            </form>
+            <section class="panel productivity-detail">
+              <div class="panel-head compact-head"><div><span class="eyebrow">待确认与历史</span><h2>执行记录</h2></div><button class="secondary" id="refreshAgentRuns">刷新</button></div>
+              <div id="agentPlanPreview" class="agent-plan-preview"></div>
+              <div id="agentRunList" class="productivity-feed"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view productivity-view personal-only" id="view-automations">
+          <div class="section-heading"><div><span class="eyebrow">触发器 · 条件 · 动作</span><h1>自动化</h1><p>文件进入 NAS 或到达计划时间后，自动执行经过白名单约束的生产流程。</p></div></div>
+          <div class="productivity-split agent-layout">
+            <form id="automationForm" class="panel stack-form productivity-composer">
+              <h2>创建工作流</h2>
+              <label>名称<input name="name" required placeholder="例如：会议资料自动归档"></label>
+              <label>触发方式<select name="trigger_type" id="automationTrigger"><option value="manual">手动触发</option><option value="file_arrived">文件进入目录</option><option value="schedule">定时触发</option></select></label>
+              <div class="automation-schedule" id="automationSchedule" hidden><label>小时<input name="hour" type="number" min="0" max="23" value="1"></label><label>分钟<input name="minute" type="number" min="0" max="59" value="0"></label></div>
+              <label>默认工作范围<select name="workflow_space_id" id="automationScope"><option value="">由触发文件决定</option></select></label>
+              <label>文件条件<select name="condition_kind"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option><option value="document">文档</option></select></label>
+              <label>执行动作<select name="action_type" id="automationActionType"><option value="tag">添加标签</option><option value="copy_to_output">复制到成果目录</option><option value="add_to_space">加入知识空间</option><option value="generate_artifact">生成成果</option></select></label>
+              <label data-automation-field="tag">标签<input name="tags" placeholder="自动归档"></label>
+              <label data-automation-field="copy_to_output" hidden>成果子目录<input name="target_folder" placeholder="自动交付"></label>
+              <label data-automation-field="add_to_space" hidden>知识空间<select name="space_id" id="automationSpace"><option value="">请选择</option></select></label>
+              <div data-automation-field="generate_artifact" class="agent-artifact-fields" hidden>
+                <label>成果标题<input name="artifact_title" placeholder="自动摘要"></label>
+                <label>成果类型<select name="artifact_type"><option value="summary">摘要</option><option value="report">报告</option><option value="brief">简报</option><option value="minutes">会议纪要</option><option value="checklist">行动清单</option></select></label>
+                <label>归属知识空间<select name="artifact_space_id" id="automationArtifactSpace"><option value="">不归属空间</option></select></label>
+                <label>生成要求<textarea name="artifact_prompt" rows="2" placeholder="概括重点并列出行动项"></textarea></label>
+              </div>
+              <label class="check-row"><input name="enabled" type="checkbox"><span>创建后立即启用</span></label>
+              <button class="primary">保存工作流</button>
+            </form>
+            <section class="panel productivity-detail">
+              <div class="panel-head compact-head"><div><span class="eyebrow">本机持续运行</span><h2>工作流</h2></div><button class="secondary" id="refreshAutomations">刷新</button></div>
+              <div id="automationList" class="automation-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view productivity-view personal-only" id="view-artifacts">
+          <div class="section-heading"><div><span class="eyebrow">可引用、可版本化、可下载</span><h1>工作成果</h1><p>从选定资料生成报告、摘要、简报、纪要、脚本和行动清单。</p></div></div>
+          <div class="productivity-split agent-layout">
+            <form id="artifactForm" class="panel stack-form productivity-composer">
+              <h2>生成新成果</h2>
+              <label>标题<input name="title" maxlength="160" required placeholder="例如：客户调研结论"></label>
+              <label>类型<select name="artifact_type"><option value="report">报告</option><option value="summary">摘要</option><option value="brief">项目简报</option><option value="minutes">会议纪要</option><option value="script">脚本</option><option value="checklist">行动清单</option></select></label>
+              <label>知识空间<select name="space_id" id="artifactSpace"><option value="">不限定空间</option></select></label>
+              <label>生成要求<textarea name="prompt" rows="4" required placeholder="说明结构、重点、受众和需要回答的问题"></textarea></label>
+              <label>查找资料<div class="inline-field"><input name="query" placeholder="搜索用于生成的资料"><button type="button" class="secondary" id="artifactFindFiles">查找</button></div></label>
+              <div class="file-picker-results" id="artifactFilePicker"><span>搜索并选择 1–12 份资料</span></div>
+              <button class="primary">生成成果</button>
+            </form>
+            <section class="panel productivity-detail">
+              <div class="panel-head compact-head"><div><span class="eyebrow">Markdown 输出</span><h2>成果库</h2></div><button class="secondary" id="refreshArtifacts">刷新</button></div>
+              <div id="artifactList" class="artifact-list"></div>
+              <article id="artifactDetail" class="artifact-detail" hidden></article>
+            </section>
+          </div>
         </section>
 
         <section class="view" id="view-projects">
@@ -267,6 +402,7 @@
         <section class="view" id="view-ask">
           <div class="ask-layout">
             <div class="section-heading simple-heading"><div><span class="eyebrow">基于资料回答</span><h1>问你的资料</h1></div><span class="grounded-badge"><i></i>已启用来源追溯</span></div>
+            <div class="ask-scope personal-only"><span>回答范围</span><select id="askSpaceScope"><option value="">全部可访问资料</option></select><select id="askProjectScope"><option value="">不限定项目</option></select><small>选择知识空间或项目后，AI 只会使用该范围内的资料。</small></div>
             <div class="conversation-toolbar personal-only"><select id="conversationSelect"><option value="">新对话</option></select><button class="secondary" id="newConversation">新对话</button><button class="text-danger compact-danger" id="deleteConversation" hidden>删除当前对话</button></div>
             <div class="suggestions"><button>去年有哪些重要旅行？</button><button>汇总最近的发票内容</button><button>找出视频里提到的待办</button></div>
             <div class="conversation" id="conversation"><div class="assistant-message"><span class="avatar"><svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/></svg></span><div>你可以直接提问。我会先检索本地资料，再给出带来源的回答。</div></div></div>
@@ -462,6 +598,6 @@
   <!-- 阶段二：通用确认 / 输入弹窗（替代原生 confirm/prompt） -->
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" id="dialogModal"><div class="modal-card compact-modal"><span class="eyebrow" id="dialogEyebrow">确认操作</span><h2 id="dialogTitle"></h2><p id="dialogBody"></p><label id="dialogField" hidden><span id="dialogLabel"></span><input id="dialogInput"></label><div class="dialog-actions"><button class="secondary" id="dialogCancel" type="button">取消</button><button class="primary" id="dialogConfirm" type="button">确定</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=41"></script>
+  <script src="/assets/app.js?v=43"></script>
 </body>
 </html>

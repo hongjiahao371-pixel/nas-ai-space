@@ -1,54 +1,67 @@
-# NAS AI Space 部署与改造进度记录
+# NAS AI Space 发布进度
 
-> 更新时间：2026-08-05 11:30（北京时间）· 记录人：Kimi CLI 会话
+> 更新时间：2026-08-13（北京时间）
 
-## 一、部署现状
+## 产品定位
 
-- **访问地址**：http://192.168.5.29:8766 （应用版本 1.1.0，健康检查 ok:true）
-- **NAS**：绿联 DXP4800 Pro（i3-1315U / 15GB 内存 / Intel 核显 Vulkan）
-- **部署目录**：`/volume1/docker/nas-ai-space`（compose：`compose.nas-intel.yml`，媒体库 `/volume1/photo`）
-- **运行栈**（6 容器，全部 healthy）：
-  - app（主应用，限 1.5GB）
-  - vision（Qwen3-VL-2B **Q4_K_M** + mmproj Q8，**限 5GB**——OOM 调过两轮：3G→4G→5G）
-  - embedding（Qwen3-Embedding-0.6B Q8 纯 CPU，限 1GB）
-  - qdrant（限 768MB）· speech（faster-whisper-tiny，限 768MB）
-  - ops（资源代理边车，唯一挂 docker socket，限 128MB）
-- **GitHub**：hongjiahao371-pixel/nas-ai-space（私有），最新提交 `a21a670`，三方（GitHub/NAS/本地）完全同步
-- **本地工作区**：`/tmp/nas-ai-deploy/nas-ai-space`（git 工作区，干净无未提交改动）
+NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链路是把私有资料组织成知识空间，通过范围化检索与问答形成判断，再由受控 Agent、自动化和版本化成果完成执行与交付。图片、人物、地点和事件识别仍然保留，但属于资料理解底座，不是产品主线。
 
-## 二、完成的大的里程碑
+## 当前生产基线
 
-1. **部署**：旧版原地升级到 v1.0.6（保留全部数据），后升至 1.1.0
-2. **六项新功能**：评论附件、评论可见范围、通知中心、PSD/AI/字体预览、GLB 3D 预览、视频逐帧步进
-3. **安全 19 项**：分享限流统一、XSS 强制下载、PSD 炸弹防护、附件权限、账号体系 6 项加固（匿名 owner 兜底、会话节流、防喷洒、任务去重、system 脱敏、多标签同步）
-4. **性能 11 项**：搜索 LIKE 兜底、扫描批量写、过滤下推、N+1、Qdrant 连接复用、embedding_json 弃用、index status 单扫、相册节流等
-5. **配置调优**：Q8→Q4 视觉模型、并发砍半、容器内存上限、夜间自动索引（0-7 点）
-6. **UI 八轮**：字级/对比度/亮暗主题 → 三栏工作台 → 仪表盘 → 控件规格统一 → hash 路由/弹窗/焦点 → 用户管理重排 → checkbox 根因修复 → 上传区样式
-7. **运维面板**：容器资源面板（实时占用/上限/重启/OOM + 在线调内存 + 重启）
-8. **测试**：从 77 → 126 个单元测试全过
+- 生产设备：Intel i3-1315U、约 16 GB 内存、Intel 核显
+- 部署目录：`/volume1/docker/nas-ai-space`
+- 服务端口：`8766`
+- 运行栈：app、ops、vision、embedding、reranker、qdrant、speech
+- 当前已部署版本：v1.3.0；数据库、模型、向量索引和媒体数据均为持久化卷
+- 代码托管：私有 GitHub 仓库 `hongjiahao371-pixel/nas-ai-space`
 
-## 三、关键运维知识（换会话必读）
+## v1.3.0 实现范围
 
-- **部署流程**：本地改代码 → 全量测试 → tar 包 scp 到 NAS home → 远端 rsync 同步（排除 .env/data/models/runtime/uploads/backups）→ **`chmod -R a+rX` 必须在 rsync 之后**（/volume1 默认 ACL 会把新文件压成 600）→ `sudo docker compose --env-file .env -f compose.nas-intel.yml up -d --build`（nohup 后台跑，日志 ~/deploy-*.log）
-- **SSH**：`jvsheng@192.168.5.29`，密码在对话记录中；expect 脚本在 `/tmp/nas-ai-deploy/nas_ssh.exp`、`nas_scp.exp`（scp 必须用 `-O` 传统协议）
-- **截图验证**：`/tmp/nas-ai-deploy/shot.mjs`（node CDP 驱动 headless Chrome），token 在 `/tmp/nas-ai-deploy/.token`；用法见文件头注释
-- **静态资源缓存**：改前端必须 bump `index.html` 里的 `?v=` 版本号
-- **测试**：`/tmp/nas-ai-deploy/venv311/bin/python -m unittest discover -s tests`（系统 python3 缺依赖）
-- **ops 面板 API**：`POST /api/ops/containers/{service}/memory {"mb":N}` 在线调内存，持久化在 ops-data volume
+- [x] 统一 AI 工作台与生产力导向侧栏层级
+- [x] 知识空间创建、关联项目、资料增删和范围复用
+- [x] 知识空间 / 项目 / 指定文件范围化问答
+- [x] 报告、摘要、简报、会议纪要、脚本和行动清单生成
+- [x] 成果 Markdown 落盘、来源记录、多版本与下载
+- [x] 受控 Agent 计划、精确确认、持久化执行记录与撤销
+- [x] 标签、成果目录复制、加入知识空间、生成成果四类白名单动作
+- [x] 手动、文件到达、定时三类自动化触发器
+- [x] 自动化条件、启停、手动执行、运行记录与定时去重
+- [x] 账号/媒体库/项目/知识空间权限执行前二次校验
+- [x] 成果目录递归触发防护、成果并发生成保护和任务重启恢复
+- [x] 新数据库表自动迁移与前端真实浏览器桌面/移动端验收
+- [x] 完整测试矩阵与依赖安全复核
+- [x] 生产 NAS 备份、部署和真实数据闭环验收
+- [ ] 私有 GitHub 提交与同步
 
-## 四、进行中 / 待观察
+## v1.3.0 生产验收结果
 
-- 夜间自动索引（0-7 点）持续消化：待修复 ~546 个、旧版描述升级 ~7000+ 张，预计需数日
-- vision 5GB 是否还 OOM（运维页容器面板看重启次数）
-- ETA 已修正为真实值（升级队列已计入）
+- 本地回归：145 项通过，1 项仅因 macOS 环境没有 FFmpeg 跳过；Python 编译、JavaScript、Shell、Git diff 和八种 Compose 组合均通过。
+- 依赖审计：`pip check` 无冲突，`pip-audit` 无已知漏洞。
+- NAS 镜像回归：145 项全部通过，耗时 311.663 秒；NAS 上的 FFmpeg、图片、视频、权限、检索、生产力 API 和安全用例均真实执行，无跳过。
+- 容器测试在较慢的 NAS 上发现“任务完成状态先于通知可见”的竞态，现已将任务终态和完成通知合并为同一 SQLite 事务，并在修复后的 NAS 镜像上完整复测通过。
+- 上线前已创建并校验 SQLite 在线备份 `nas-ai-space-20260812-152754.db`，以及独立源码回滚包 `/volume1/docker/.codex-backup-20260812-152805-pre-v130.tgz`。
+- 当前 app、ops、vision、embedding、reranker、qdrant、speech 七个服务全部 healthy；应用返回 v1.3.0，SQLite `quick_check=ok`。
+- 生产库保持 11,509 个文件全部 pipeline ready，partial 为 0；9,915 张旧图片仍等待夜间无损升级到最新描述版本，因此 `/api/ready` 为 `ready=true/status=degraded`，不影响现有检索和生产力主链路。
+- 真实资料闭环已通过：精确文件名搜索召回目标，2 份资料加入知识空间，范围问答返回带来源答案，生成 1 个带来源和版本的 Markdown 成果；Agent 错误确认被拒绝、正确执行后复制成果并安全撤销；手动自动化执行完成，关联标签动作成功撤销。
+- 闭环结束后已删除临时知识空间、成果、工作流、标签、复制文件、会话与测试账号，数据库再次通过 `quick_check`。
+- Intel 核显实测：成果生成期间 `llama-server` 频率峰值约 1,248 MHz，Render/3D 客户端采样峰值约 113%（短采样归一化可略高于 100%），GPU 功耗峰值约 9.1 W，确认本地模型实际使用核显。
+- NAS 真实浏览器终验：四个生产力主界面均正确渲染；知识空间创建/删除成功；桌面布局正常，390×844 移动端 `scrollWidth=390`，控制台 warning/error 为 0。
 
-## 五、待办 / 悬而未决
+## 发布门槛
 
-> 2026-08-05 补充：UI 全部八轮改造完成（视觉/交互/三栏工作台/仪表盘/控件规格/宽屏自适应/问资料吸底/审阅工具区），最新提交 4e28547，126 测试全过；Safari 按钮问题靠 appearance:none + 内联样式闭环；静态资源缓存策略已加（index no-cache + ?v= 版本号）。
+v1.3.0 只有在以下条件全部满足后才能标记完成：
 
-- [ ] 用户吊销 GitHub token（对话中明文出现过）——push 已改用无 token remote，需新 token 时再说
-- [ ] 用户修改 NAS 密码（同样明文出现过）
-- [ ] EPS 预览需在镜像加 ghostscript（代码已就绪）
-- [ ] Draco 压缩 GLB 不支持（需 vendor draco decoder）
-- [ ] 登录成功清零账号级限流桶（可选，防喷洒的误伤权衡）
-- [ ] 项目 ticket 与库授权语义（当前=项目即显式授权，如需收紧再议）
+1. 全量单元/API 测试、JavaScript 语法、Shell 脚本和 Compose 配置全部通过。
+2. 本地浏览器完成知识空间、Agent、自动化和成果页面的桌面/移动端交互检查，控制台无错误。
+3. NAS 部署前建立 SQLite 在线备份与代码回滚点，部署后所有容器恢复 healthy。
+4. 在 NAS 真实资料上完成“加入知识空间 → 范围问答 → 生成成果 → Agent 执行/撤销 → 自动化手动触发”闭环。
+5. 验证成果只写入独立上传卷，原始媒体仍保持只读；错误确认、越权范围和修改后撤销均被拒绝。
+6. 验证 SQLite `quick_check`、生产就绪接口、搜索/问答、模型推理和 Intel 核显实际利用率。
+7. 代码、部署版本和私有 GitHub 主分支一致，并保留可验证回滚点。
+
+## 外部依赖边界
+
+- EPS 预览仍需要镜像提供 Ghostscript。
+- Draco 压缩 GLB 仍需要本地 vendor 解码器。
+- AI 输出质量受本地模型规模和真实语义索引覆盖率约束；模型服务可用不等于全库已完成深度索引。
+- 公网访问必须由 NAS 反向代理提供 HTTPS 与来源网络限制，不能直接暴露应用端口。

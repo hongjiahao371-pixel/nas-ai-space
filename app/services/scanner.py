@@ -56,6 +56,7 @@ def scan_library(
     scan_token = uuid.uuid4().hex
     values_batch: list[dict[str, Any]] = []
     changed = 0
+    changed_file_ids: list[int] = []
     unchanged = 0
     errors = 0
     scanned = 0
@@ -65,6 +66,7 @@ def scan_library(
         nonlocal changed, unchanged, scanned
         results = database.upsert_files(values_batch, finalize=finalize)
         changed += sum(int(was_changed) for _, was_changed in results)
+        changed_file_ids.extend(int(file_id) for file_id, was_changed in results if was_changed)
         unchanged += sum(int(not was_changed) for _, was_changed in results)
         scanned += len(results)
         values_batch.clear()
@@ -121,6 +123,7 @@ def scan_library(
     return {
         "scanned": scanned,
         "changed": changed,
+        "changed_file_ids": changed_file_ids,
         "unchanged": unchanged,
         "removed": len(removed_ids),
         "removed_file_ids": removed_ids,

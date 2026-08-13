@@ -544,6 +544,138 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, id DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_spaces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_spaces_owner ON knowledge_spaces(owner_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_spaces_project ON knowledge_spaces(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_space_files (
+    space_id INTEGER NOT NULL REFERENCES knowledge_spaces(id) ON DELETE CASCADE,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(space_id, file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_space_files_file ON knowledge_space_files(file_id, space_id);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    artifact_type TEXT NOT NULL DEFAULT 'report',
+    status TEXT NOT NULL DEFAULT 'draft',
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    space_id INTEGER REFERENCES knowledge_spaces(id) ON DELETE SET NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_user ON artifacts(created_by, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_space ON artifacts(space_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS artifact_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    format TEXT NOT NULL DEFAULT 'markdown',
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    file_path TEXT NOT NULL DEFAULT '',
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(artifact_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_versions_artifact
+ON artifact_versions(artifact_id, version_number DESC);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    space_id INTEGER REFERENCES knowledge_spaces(id) ON DELETE SET NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    risk_level TEXT NOT NULL DEFAULT 'low',
+    plan_json TEXT NOT NULL DEFAULT '[]',
+    undo_json TEXT NOT NULL DEFAULT '[]',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    approved_at TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    undone_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_user ON agent_runs(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status, id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    action_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    input_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(run_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_actions_run ON agent_actions(run_id, sequence);
+
+CREATE TABLE IF NOT EXISTS automation_workflows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    space_id INTEGER REFERENCES knowledge_spaces(id) ON DELETE SET NULL,
+    trigger_type TEXT NOT NULL DEFAULT 'manual',
+    trigger_json TEXT NOT NULL DEFAULT '{}',
+    conditions_json TEXT NOT NULL DEFAULT '[]',
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_trigger_key TEXT NOT NULL DEFAULT '',
+    last_run_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_automation_workflows_user
+ON automation_workflows(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_workflows_trigger
+ON automation_workflows(enabled, trigger_type, id);
+
+CREATE TABLE IF NOT EXISTS automation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL REFERENCES automation_workflows(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    trigger_payload_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_automation_runs_workflow
+ON automation_runs(workflow_id, id DESC);
 """
 
 
@@ -1459,6 +1591,29 @@ class Database:
             (message[:1000], now, now, task_id),
         )
 
+    def finish_task_with_notification(
+        self,
+        task_id: int,
+        user_id: int | None,
+        message: str = "完成",
+        title: str = "后台任务已完成",
+    ) -> None:
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """UPDATE tasks SET status = 'completed', progress = 1, message = ?, finished_at = ?,
+                   heartbeat_at = ?, work_done = CASE WHEN work_total > 0 THEN work_total ELSE work_done END
+                   WHERE id = ?""",
+                (message[:1000], now, now, task_id),
+            )
+            if user_id is not None:
+                connection.execute(
+                    """INSERT INTO notifications(user_id, type, title, body, target_type, target_id, created_at)
+                       SELECT ?, 'task.finished', ?, ?, 'task', ?, ?
+                       WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)""",
+                    (user_id, title, message[:240], str(task_id), now, user_id),
+                )
+
     def mark_task_cancelled(self, task_id: int) -> None:
         now = utc_now()
         self.execute(
@@ -1473,6 +1628,27 @@ class Database:
             "UPDATE tasks SET status = 'failed', error = ?, finished_at = ?, heartbeat_at = ? WHERE id = ?",
             (error[:4000], now, now, task_id),
         )
+
+    def fail_task_with_notification(
+        self,
+        task_id: int,
+        user_id: int | None,
+        error: str,
+        title: str = "后台任务失败",
+    ) -> None:
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET status = 'failed', error = ?, finished_at = ?, heartbeat_at = ? WHERE id = ?",
+                (error[:4000], now, now, task_id),
+            )
+            if user_id is not None:
+                connection.execute(
+                    """INSERT INTO notifications(user_id, type, title, body, target_type, target_id, created_at)
+                       SELECT ?, 'task.finished', ?, ?, 'task', ?, ?
+                       WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)""",
+                    (user_id, title, error[:240], str(task_id), now, user_id),
+                )
 
     def cancel_task(self, task_id: int) -> None:
         # 等待中的任务还没被 worker 领取，直接标记取消即时生效；

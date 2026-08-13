@@ -30,6 +30,12 @@ const state = {
   eventsOffset: 0,
   currentConversationId: null,
   conversations: [],
+  knowledgeSpaces: [],
+  currentKnowledgeSpaceId: null,
+  artifacts: [],
+  currentArtifactId: null,
+  agentRuns: [],
+  automations: [],
   smartAlbums: [],
   currentSmartAlbumId: null,
   currentSearchFeedbackQuery: '',
@@ -179,6 +185,9 @@ const taskTitle = task => ({
   generate_proxy: '生成审阅代理媒体',
   generate_look_preview: '生成 LUT 审阅预览',
   collect_project_inbox: '收集 NAS 项目入库箱',
+  generate_artifact: '生成工作成果',
+  agent_run: '执行 AI 任务',
+  automation_run: '运行自动化工作流',
 }[task.type] || task.type);
 const taskStatus = status => ({ pending: '等待中', running: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消' }[status] || status);
 const stageLabel = status => ({
@@ -340,11 +349,15 @@ async function api(path, options = {}) {
 }
 
 const titles = {
-  home: ['数据总览', '你的私有数据，只在本地流动'],
+  home: ['AI 工作台', '从本地资料到可交付成果'],
   search: ['智能搜索', '全文与语义融合检索'],
-  ask: ['问你的资料', '回答均可追溯到原始文件'],
-  library: ['浏览', '统一浏览所有文件与索引状态'],
-  albums: ['相册与发现', '时间、人物、地点、事件与智能相册'],
+  ask: ['AI 对话', '限定工作范围，回答均可追溯到原始文件'],
+  knowledge: ['知识空间', '按项目、客户或专题建立可复用上下文'],
+  agents: ['AI 任务', '预演、确认、执行、审计与撤销'],
+  automations: ['自动化', '通过触发器、条件和动作持续运行'],
+  artifacts: ['工作成果', '将本地资料转为版本化交付物'],
+  library: ['素材库', '统一浏览所有文件与索引状态'],
+  albums: ['媒体发现', '内容资产的时间、人物、地点与事件视图'],
   timeline: ['时间线', '按拍摄日期浏览照片与视频'],
   people: ['人物相册', '本地识别并聚类照片中的人物'],
   places: ['地点相册', '按 GPS 元数据在本机聚类'],
@@ -375,6 +388,10 @@ function showView(view) {
     openModal($('#tokenModal'));
     return;
   }
+  if (new Set(['knowledge', 'agents', 'automations', 'artifacts']).has(view) && !state.user?.id) {
+    toast('请使用本地账号登录后使用生产力工作区', true);
+    return;
+  }
   const systemViews = new Set(['libraries', 'tasks', 'organizer', 'people', 'events', 'recycle', 'hardware', 'users', 'operations']);
   if (systemViews.has(view)) {
     $('#systemNav').hidden = false;
@@ -388,8 +405,13 @@ function showView(view) {
   $$('.workbench.rail-open').forEach(workbench => workbench.classList.remove('rail-open'));
   if (view === 'home') {
     loadDashboard(true);
+    if (state.user?.id) loadProductivityDashboard();
     loadTasks(true);
   }
+  if (view === 'knowledge') loadKnowledgeSpaces();
+  if (view === 'agents') loadAgentRuns();
+  if (view === 'automations') loadAutomations();
+  if (view === 'artifacts') loadArtifacts();
   if (view === 'libraries') loadLibraries();
   if (view === 'library') loadLibraryFiles(true);
   if (view === 'albums') loadSmartAlbums();
@@ -410,7 +432,7 @@ function showView(view) {
   if (view === 'project' && state.currentProjectId) loadProjectWorkspace(state.currentProjectId);
   if (view === 'reviews') loadAllReviewTasks();
   if (view === 'deliveries') loadDeliveries();
-  if (view === 'ask') loadConversations();
+  if (view === 'ask') { loadConversations(); refreshProductivitySelects(); }
   if (view === 'search') setTimeout(() => $('#mainSearchInput').focus(), 80);
   // 切换视图时若审阅弹窗仍开着，统一走 closeReview 停掉媒体
   if ($('#assetReviewModal').classList.contains('open')) closeReview();
@@ -482,6 +504,206 @@ async function loadDashboard(quiet = false) {
     $('#indexHealthMeta').textContent = '实时状态暂时不可用，保留上次数据';
     if (!quiet) toast(error.message, true);
   }
+}
+
+const artifactTypeLabel = value => ({
+  report: '报告', summary: '摘要', brief: '项目简报', minutes: '会议纪要',
+  script: '脚本', checklist: '行动清单',
+}[value] || value);
+
+const agentActionLabel = value => ({
+  tag: '添加标签', copy_to_output: '复制到成果目录', add_to_space: '加入知识空间',
+  generate_artifact: '生成工作成果',
+}[value] || value);
+
+function refreshProductivitySelects() {
+  const spaceOptions = state.knowledgeSpaces.map(item => `<option value="${item.id}">${esc(item.name)} · ${fmtCount(item.file_count)} 份资料</option>`).join('');
+  [
+    ['#agentSpace', '<option value="">请选择</option>'],
+    ['#automationSpace', '<option value="">请选择</option>'],
+    ['#agentArtifactSpace', '<option value="">不归属空间</option>'],
+    ['#automationArtifactSpace', '<option value="">不归属空间</option>'],
+    ['#artifactSpace', '<option value="">不限定空间</option>'],
+    ['#automationScope', '<option value="">由触发文件决定</option>'],
+    ['#askSpaceScope', '<option value="">全部可访问资料</option>'],
+  ].forEach(([selector, empty]) => {
+    const select = $(selector);
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = empty + spaceOptions;
+    if ([...select.options].some(option => option.value === current)) select.value = current;
+  });
+  const projectOptions = state.projects.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('');
+  [
+    ['#knowledgeProject', '<option value="">不关联项目</option>'],
+    ['#askProjectScope', '<option value="">不限定项目</option>'],
+  ].forEach(([selector, empty]) => {
+    const select = $(selector);
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = empty + projectOptions;
+    if ([...select.options].some(option => option.value === current)) select.value = current;
+  });
+}
+
+function productivityFeed(items, type) {
+  if (!items.length) return '<div class="empty-state compact"><b>暂无内容</b><p>从上方入口开始创建。</p></div>';
+  return items.map(item => {
+    if (type === 'space') return `<button class="productivity-feed-row" data-space="${item.id}"><b>${esc(item.name)}</b><span>${fmtCount(item.file_count)} 份</span><small>${esc(item.description || '独立工作上下文')}</small></button>`;
+    return `<button class="productivity-feed-row" data-artifact="${item.id}"><b>${esc(item.title)}</b><span>${esc(item.status)}</span><small>${esc(artifactTypeLabel(item.artifact_type))} · ${esc(fmtTime(item.updated_at))}</small></button>`;
+  }).join('');
+}
+
+async function loadProductivityDashboard() {
+  if (!state.user?.id) return;
+  try {
+    const data = await api('/api/productivity/dashboard');
+    $('#productivityStats').innerHTML = [
+      statsCard('知识空间', fmtCount(data.counts.spaces), '可复用工作上下文', 'library'),
+      statsCard('工作成果', fmtCount(data.counts.artifacts), '保留生成版本和引用', 'document'),
+      statsCard('AI 任务', fmtCount(data.counts.agent_runs), '执行前预演确认', 'task'),
+      statsCard('运行中自动化', fmtCount(data.counts.active_automations), '在本机持续执行', 'activity'),
+    ].join('');
+    $('#homeKnowledgeSpaces').innerHTML = productivityFeed(data.spaces, 'space');
+    $('#homeArtifacts').innerHTML = productivityFeed(data.artifacts, 'artifact');
+  } catch (error) {
+    $('#productivityStats').innerHTML = '';
+  }
+}
+
+function pickerMarkup(items) {
+  if (!items.length) return '<span>没有找到可用资料</span>';
+  return items.map(item => `<label class="file-picker-item"><input type="checkbox" data-picker-file="${item.id}" checked><span><b>${esc(item.name)}</b><small>${esc(item.relative_path || item.path || '')} · ${esc(item.kind || '')}</small></span></label>`).join('');
+}
+
+function selectedPickerFiles(container) {
+  return $$('[data-picker-file]:checked', container).map(input => Number(input.dataset.pickerFile));
+}
+
+async function findPickerFiles(query, container, spaceId = null, limit = 30) {
+  const value = String(query || '').trim();
+  if (!value && !spaceId) return toast('请输入资料搜索词', true);
+  container.innerHTML = '<span>正在查找资料…</span>';
+  try {
+    let items;
+    if (spaceId) {
+      const space = await api(`/api/knowledge-spaces/${spaceId}`);
+      const lower = value.toLowerCase();
+      items = (space.files || [])
+        .filter(item => !lower || `${item.name} ${item.relative_path} ${item.manual_caption || item.ai_caption || ''}`.toLowerCase().includes(lower))
+        .slice(0, limit);
+    } else {
+      const data = await api(`/api/search?q=${encodeURIComponent(value)}&limit=${limit}&precise=false`);
+      items = data.results || [];
+    }
+    container.innerHTML = pickerMarkup(items);
+  } catch (error) {
+    container.innerHTML = '<span>资料查找失败</span>';
+    toast(error.message, true);
+  }
+}
+
+function renderKnowledgeSpaceList() {
+  $('#knowledgeSpaceList').innerHTML = state.knowledgeSpaces.length
+    ? state.knowledgeSpaces.map(item => `<button class="${Number(item.id) === Number(state.currentKnowledgeSpaceId) ? 'active' : ''}" data-space="${item.id}"><b>${esc(item.name)}</b><small>${fmtCount(item.file_count)} 份资料${item.project_id ? ' · 已关联项目' : ''}</small></button>`).join('')
+    : '<div class="empty-state compact"><b>还没有知识空间</b><p>先建立一个可重复使用的工作上下文。</p></div>';
+}
+
+async function loadKnowledgeSpaces(openFirst = true) {
+  if (!state.user?.id) return;
+  try {
+    state.knowledgeSpaces = await api('/api/knowledge-spaces');
+    refreshProductivitySelects();
+    renderKnowledgeSpaceList();
+    const target = state.currentKnowledgeSpaceId || (openFirst ? state.knowledgeSpaces[0]?.id : null);
+    if (target) await openKnowledgeSpace(target);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function openKnowledgeSpace(spaceId) {
+  try {
+    const data = await api(`/api/knowledge-spaces/${spaceId}`);
+    state.currentKnowledgeSpaceId = Number(spaceId);
+    renderKnowledgeSpaceList();
+    $('#knowledgeSpaceDetail').innerHTML = `
+      <div class="space-detail-head"><div><span class="eyebrow">知识空间</span><h2>${esc(data.name)}</h2><p>${esc(data.description || '尚未添加说明')}</p></div><div class="card-actions"><button class="secondary" data-space-ask="${data.id}">在此空间对话</button><button class="danger" data-space-delete="${data.id}">删除</button></div></div>
+      <div class="space-file-tools"><div class="inline-field"><input id="spaceFileQuery" placeholder="查找要加入的资料"><button class="secondary" id="spaceFindFiles">查找</button><button class="primary" id="spaceAddFiles">加入所选</button></div><div class="file-picker-results" id="spaceFilePicker"><span>搜索 NAS 资料后加入当前空间</span></div></div>
+      <div class="panel-head compact-head"><div><span class="eyebrow">上下文资料</span><h2>${fmtCount(data.files.length)} 份资料</h2></div></div>
+      <div class="space-file-list">${data.files.length ? data.files.map(file => `<div class="space-file-row"><b>${esc(file.name)}</b><small>${esc(file.relative_path)} · ${esc(file.kind)}</small><button class="text-danger" data-space-file-remove="${file.id}">移除</button></div>`).join('') : '<div class="empty-state compact"><b>这个空间还是空的</b><p>搜索并加入资料后，即可限定 AI 工作范围。</p></div>'}</div>`;
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function renderAgentPlan(run) {
+  $('#agentPlanPreview').innerHTML = `<article class="agent-confirm-card"><span class="eyebrow">执行前预演 · ${esc(run.risk_level)} 风险</span><h3>${esc(run.prompt)}</h3>${run.plan.map((action, index) => `<p>${index + 1}. ${esc(agentActionLabel(action.type))} · ${fmtCount(action.file_ids?.length || 0)} 个文件</p>`).join('')}<p>确认时请输入：</p><code>${esc(run.confirmation)}</code><div class="card-actions"><button class="primary" data-agent-execute="${run.id}" data-confirmation="${esc(run.confirmation)}">确认并执行</button></div></article>`;
+}
+
+async function loadAgentRuns() {
+  if (!state.user?.id) return;
+  try {
+    state.agentRuns = await api('/api/agent-runs');
+    $('#agentRunList').innerHTML = state.agentRuns.length
+      ? state.agentRuns.map(run => `<button class="productivity-feed-row" data-agent-run="${run.id}"><b>${esc(run.prompt)}</b><span class="run-status ${esc(run.status)}">${esc(run.status)}</span><small>${fmtCount(run.plan.length)} 个动作 · ${esc(fmtTime(run.created_at))}</small></button>`).join('')
+      : '<div class="empty-state compact"><b>还没有 AI 任务</b><p>创建任务后，执行计划和历史会显示在这里。</p></div>';
+  } catch (error) { toast(error.message, true); }
+}
+
+async function openAgentRun(runId) {
+  try {
+    const run = await api(`/api/agent-runs/${runId}`);
+    if (run.status === 'draft') return renderAgentPlan(run);
+    $('#agentPlanPreview').innerHTML = `<article class="agent-confirm-card"><span class="eyebrow">AI 任务 ${run.id}</span><h3>${esc(run.prompt)}</h3><p>状态：${esc(run.status)} · ${fmtCount(run.actions.length)} 个动作</p>${run.error ? `<p>${esc(run.error)}</p>` : ''}<div class="card-actions">${['completed', 'failed'].includes(run.status) && run.undo?.length ? `<button class="danger" data-agent-undo="${run.id}">撤销已完成变更</button>` : ''}</div></article>`;
+  } catch (error) { toast(error.message, true); }
+}
+
+function actionFromForm(form) {
+  const type = form.elements.action_type.value;
+  const action = { type };
+  if (type === 'tag') action.tags = form.elements.tags.value.split(/[,，]/).map(value => value.trim()).filter(Boolean);
+  if (type === 'copy_to_output') action.target_folder = form.elements.target_folder.value.trim();
+  if (type === 'add_to_space') action.space_id = Number(form.elements.space_id.value);
+  if (type === 'generate_artifact') Object.assign(action, {
+    title: form.elements.artifact_title.value.trim() || 'AI 工作成果',
+    artifact_type: form.elements.artifact_type.value,
+    prompt: form.elements.artifact_prompt.value.trim() || '根据所选资料生成结构清晰的工作成果',
+    space_id: form.elements.artifact_space_id?.value ? Number(form.elements.artifact_space_id.value) : null,
+  });
+  return action;
+}
+
+async function loadAutomations() {
+  if (!state.user?.id) return;
+  try {
+    state.automations = await api('/api/automations');
+    $('#automationList').innerHTML = state.automations.length
+      ? state.automations.map(item => `<article class="automation-card"><div><b>${esc(item.name)}</b><p>${esc({ manual: '手动触发', file_arrived: '文件进入目录', schedule: '定时触发' }[item.trigger_type] || item.trigger_type)} · ${item.actions.map(action => esc(agentActionLabel(action.type))).join('、')}</p></div><span class="run-status ${item.enabled ? 'completed' : ''}">${item.enabled ? '已启用' : '已停用'}</span><div class="card-actions"><button class="secondary" data-automation-toggle="${item.id}" data-enabled="${item.enabled ? '0' : '1'}">${item.enabled ? '停用' : '启用'}</button><button class="primary" data-automation-run="${item.id}" ${item.enabled ? '' : 'disabled'}>立即运行</button><button class="danger" data-automation-delete="${item.id}">删除</button></div></article>`).join('')
+      : '<div class="empty-state"><b>还没有自动化</b><p>创建“触发器 → 条件 → 动作”工作流，让 NAS 持续处理新资料。</p></div>';
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadArtifacts() {
+  if (!state.user?.id) return;
+  try {
+    state.artifacts = await api('/api/artifacts');
+    $('#artifactList').innerHTML = state.artifacts.length
+      ? state.artifacts.map(item => `<button class="artifact-row" data-artifact="${item.id}"><b>${esc(item.title)}</b><span class="run-status ${esc(item.status)}">${esc(item.status)}</span><small>${esc(artifactTypeLabel(item.artifact_type))} · ${item.latest_version ? `V${item.latest_version.version_number} · ${fmtCount(item.latest_version.source_count)} 个来源` : '正在生成'} · ${esc(fmtTime(item.updated_at))}</small></button>`).join('')
+      : '<div class="empty-state"><b>还没有工作成果</b><p>选择资料并说明目标，AI 会生成带引用的 Markdown 成果。</p></div>';
+    if (state.currentArtifactId) await openArtifact(state.currentArtifactId);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function openArtifact(artifactId) {
+  try {
+    const artifact = await api(`/api/artifacts/${artifactId}`);
+    state.currentArtifactId = Number(artifactId);
+    const version = artifact.versions?.[0];
+    const detail = $('#artifactDetail');
+    detail.hidden = false;
+    detail.innerHTML = `<div class="space-detail-head"><div><span class="eyebrow">${esc(artifactTypeLabel(artifact.artifact_type))} · ${esc(artifact.status)}</span><h2>${esc(artifact.title)}</h2><p>${fmtCount(artifact.versions.length)} 个版本 · ${esc(fmtTime(artifact.updated_at))}</p></div><div class="card-actions">${version ? `<button class="secondary" data-artifact-download="${artifact.id}" data-version="${version.id}" data-name="${esc(artifact.title)}-V${version.version_number}.md">下载 Markdown</button>` : ''}<button class="danger" data-artifact-delete="${artifact.id}">删除</button></div></div>${version ? `<div class="artifact-content">${esc(version.content)}</div><div class="citation-list">${(version.sources || []).map((source, index) => `<button data-file="${source.id}">[${index + 1}] ${esc(source.path || source.name)}</button>`).join('')}</div>` : '<div class="empty-state compact"><b>成果正在生成</b><p>完成后会自动出现在这里。</p></div>'}`;
+  } catch (error) { toast(error.message, true); }
 }
 
 function libraryRow(item) {
@@ -1774,7 +1996,12 @@ async function ask(question) {
   try {
     const data = await api('/api/ask', {
       method: 'POST',
-      body: JSON.stringify({ question, conversation_id: state.currentConversationId }),
+      body: JSON.stringify({
+        question,
+        conversation_id: state.currentConversationId,
+        space_id: $('#askSpaceScope').value ? Number($('#askSpaceScope').value) : null,
+        project_id: $('#askProjectScope').value ? Number($('#askProjectScope').value) : null,
+      }),
     });
     if (data.conversation_id) {
       state.currentConversationId = Number(data.conversation_id);
@@ -1827,6 +2054,7 @@ async function loadProjects(quiet = false) {
   try {
     const projects = await api('/api/projects');
     state.projects = projects;
+    refreshProductivitySelects();
     const assets = projects.reduce((sum, item) => sum + Number(item.asset_count || 0), 0);
     const memberSeats = projects.reduce((sum, item) => sum + Number(item.member_count || 0), 0);
     const openComments = projects.reduce((sum, item) => sum + Number(item.open_comment_count || 0), 0);
@@ -3481,6 +3709,193 @@ document.addEventListener('click', async event => {
   }
 });
 
+document.addEventListener('click', async event => {
+  const spaceButton = event.target.closest('[data-space]');
+  if (spaceButton) {
+    showView('knowledge');
+    await openKnowledgeSpace(spaceButton.dataset.space);
+    return;
+  }
+  const artifactButton = event.target.closest('[data-artifact]');
+  if (artifactButton) {
+    showView('artifacts');
+    await openArtifact(artifactButton.dataset.artifact);
+    return;
+  }
+  const spaceAsk = event.target.closest('[data-space-ask]');
+  if (spaceAsk) {
+    $('#askSpaceScope').value = spaceAsk.dataset.spaceAsk;
+    $('#askProjectScope').value = '';
+    showView('ask');
+    return;
+  }
+  const spaceDelete = event.target.closest('[data-space-delete]');
+  if (spaceDelete) {
+    const confirmed = await confirmDialog({
+      title: '删除这个知识空间？',
+      body: '原始文件不会删除，但空间范围和关联会被移除。',
+      danger: true,
+      confirmText: '删除空间',
+    });
+    if (!confirmed) return;
+    try {
+      await api(`/api/knowledge-spaces/${spaceDelete.dataset.spaceDelete}`, { method: 'DELETE' });
+      state.currentKnowledgeSpaceId = null;
+      await Promise.all([loadKnowledgeSpaces(), loadProductivityDashboard()]);
+      toast('知识空间已删除');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  if (event.target.closest('#spaceFindFiles')) {
+    await findPickerFiles($('#spaceFileQuery').value, $('#spaceFilePicker'));
+    return;
+  }
+  if (event.target.closest('#spaceAddFiles')) {
+    const fileIds = selectedPickerFiles($('#spaceFilePicker'));
+    if (!fileIds.length) return toast('请选择要加入的资料', true);
+    try {
+      await api(`/api/knowledge-spaces/${state.currentKnowledgeSpaceId}/files`, {
+        method: 'POST', body: JSON.stringify({ file_ids: fileIds }),
+      });
+      await Promise.all([openKnowledgeSpace(state.currentKnowledgeSpaceId), loadKnowledgeSpaces(false)]);
+      toast(`已加入 ${fileIds.length} 份资料`);
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  const spaceRemove = event.target.closest('[data-space-file-remove]');
+  if (spaceRemove) {
+    try {
+      await api(`/api/knowledge-spaces/${state.currentKnowledgeSpaceId}/files/${spaceRemove.dataset.spaceFileRemove}`, { method: 'DELETE' });
+      await Promise.all([openKnowledgeSpace(state.currentKnowledgeSpaceId), loadKnowledgeSpaces(false)]);
+      toast('资料已移出知识空间');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  if (event.target.closest('#agentFindFiles')) {
+    await findPickerFiles($('#agentPlanForm').elements.query.value, $('#agentFilePicker'));
+    return;
+  }
+  if (event.target.closest('#artifactFindFiles')) {
+    const form = $('#artifactForm');
+    await findPickerFiles(
+      form.elements.query.value,
+      $('#artifactFilePicker'),
+      form.elements.space_id.value ? Number(form.elements.space_id.value) : null,
+      12,
+    );
+    return;
+  }
+  if (event.target.closest('#refreshAgentRuns')) return loadAgentRuns();
+  if (event.target.closest('#refreshAutomations')) return loadAutomations();
+  if (event.target.closest('#refreshArtifacts')) return loadArtifacts();
+  const agentRun = event.target.closest('[data-agent-run]');
+  if (agentRun) return openAgentRun(agentRun.dataset.agentRun);
+  const executeAgent = event.target.closest('[data-agent-execute]');
+  if (executeAgent) {
+    const required = executeAgent.dataset.confirmation;
+    const value = await promptDialog({
+      eyebrow: '高影响操作确认',
+      title: '确认执行 AI 任务',
+      body: '系统将按照上方计划执行白名单动作，并记录审计日志。',
+      label: `请输入：${required}`,
+      value: '',
+      confirmText: '确认执行',
+    });
+    if (value === null) return;
+    try {
+      await api(`/api/agent-runs/${executeAgent.dataset.agentExecute}/execute`, {
+        method: 'POST', body: JSON.stringify({ confirmation: value }),
+      });
+      $('#agentPlanPreview').innerHTML = '';
+      await Promise.all([loadAgentRuns(), loadTasks(true)]);
+      toast('AI 任务已进入执行队列');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  const undoAgent = event.target.closest('[data-agent-undo]');
+  if (undoAgent) {
+    const confirmed = await confirmDialog({
+      title: '撤销这次 AI 任务？', body: '仅撤销仍满足安全校验的变更。已被人工修改的成果文件不会被删除。',
+      danger: true, confirmText: '执行撤销',
+    });
+    if (!confirmed) return;
+    try {
+      await api(`/api/agent-runs/${undoAgent.dataset.agentUndo}/undo`, { method: 'POST' });
+      await Promise.all([openAgentRun(undoAgent.dataset.agentUndo), loadAgentRuns()]);
+      toast('可撤销变更已恢复');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  const automationToggle = event.target.closest('[data-automation-toggle]');
+  if (automationToggle) {
+    try {
+      await api(`/api/automations/${automationToggle.dataset.automationToggle}/enabled`, {
+        method: 'PUT', body: JSON.stringify({ enabled: automationToggle.dataset.enabled === '1' }),
+      });
+      await Promise.all([loadAutomations(), loadProductivityDashboard()]);
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  const automationRun = event.target.closest('[data-automation-run]');
+  if (automationRun) {
+    const workflow = state.automations.find(item => Number(item.id) === Number(automationRun.dataset.automationRun));
+    let fileIds = [];
+    if (!workflow?.space_id && !workflow?.project_id) {
+      const query = await promptDialog({
+        title: '选择本次运行资料', label: '输入资料搜索词', value: '', confirmText: '查找并运行',
+      });
+      if (!query?.trim()) return;
+      try {
+        const result = await api(`/api/search?q=${encodeURIComponent(query.trim())}&limit=30&precise=false`);
+        fileIds = (result.results || []).map(item => Number(item.id));
+      } catch (error) { return toast(error.message, true); }
+      if (!fileIds.length) return toast('没有找到可用于本次运行的资料', true);
+    }
+    const confirmed = await confirmDialog({
+      title: '立即运行自动化？',
+      body: fileIds.length ? `本次将处理 ${fileIds.length} 份资料。` : '本次将使用工作流设定的默认范围。',
+      confirmText: '开始运行',
+    });
+    if (!confirmed) return;
+    try {
+      await api(`/api/automations/${automationRun.dataset.automationRun}/run`, {
+        method: 'POST', body: JSON.stringify({ file_ids: fileIds }),
+      });
+      await loadTasks(true);
+      toast('自动化已进入执行队列');
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  const automationDelete = event.target.closest('[data-automation-delete]');
+  if (automationDelete) {
+    const confirmed = await confirmDialog({ title: '删除自动化？', body: '历史运行记录也会一并删除。', danger: true, confirmText: '删除' });
+    if (!confirmed) return;
+    try {
+      await api(`/api/automations/${automationDelete.dataset.automationDelete}`, { method: 'DELETE' });
+      await Promise.all([loadAutomations(), loadProductivityDashboard()]);
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
+  const artifactDownload = event.target.closest('[data-artifact-download]');
+  if (artifactDownload) {
+    return downloadAuthenticated(
+      `/api/artifacts/${artifactDownload.dataset.artifactDownload}/versions/${artifactDownload.dataset.version}/download`,
+      artifactDownload.dataset.name,
+    );
+  }
+  const artifactDelete = event.target.closest('[data-artifact-delete]');
+  if (artifactDelete) {
+    const confirmed = await confirmDialog({ title: '删除这项工作成果？', body: '所有生成版本将一并删除，原始资料不会变化。', danger: true, confirmText: '删除成果' });
+    if (!confirmed) return;
+    try {
+      await api(`/api/artifacts/${artifactDelete.dataset.artifactDelete}`, { method: 'DELETE' });
+      state.currentArtifactId = null;
+      $('#artifactDetail').hidden = true;
+      await Promise.all([loadArtifacts(), loadProductivityDashboard()]);
+    } catch (error) { toast(error.message, true); }
+  }
+});
+
 document.addEventListener('pointerdown', event => {
   if (event.target.id !== 'annotationLayer' || !state.drawingActive) return;
   const rect = event.target.getBoundingClientRect();
@@ -3551,6 +3966,122 @@ $('#askForm').addEventListener('submit', event => {
     input.value = '';
     ask(question);
   }
+});
+
+$('#knowledgeSpaceForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form));
+  try {
+    const space = await api('/api/knowledge-spaces', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: values.name,
+        description: values.description,
+        project_id: values.project_id ? Number(values.project_id) : null,
+      }),
+    });
+    form.reset();
+    state.currentKnowledgeSpaceId = Number(space.id);
+    await Promise.all([loadKnowledgeSpaces(false), loadProductivityDashboard()]);
+    toast('知识空间已创建');
+  } catch (error) { toast(error.message, true); }
+});
+
+$('#agentActionType').addEventListener('change', event => {
+  $$('[data-agent-field]').forEach(field => { field.hidden = field.dataset.agentField !== event.currentTarget.value; });
+});
+
+$('#automationActionType').addEventListener('change', event => {
+  $$('[data-automation-field]').forEach(field => { field.hidden = field.dataset.automationField !== event.currentTarget.value; });
+});
+
+$('#automationTrigger').addEventListener('change', event => {
+  $('#automationSchedule').hidden = event.currentTarget.value !== 'schedule';
+});
+
+$('#askSpaceScope').addEventListener('change', event => {
+  if (event.currentTarget.value) $('#askProjectScope').value = '';
+});
+
+$('#askProjectScope').addEventListener('change', event => {
+  if (event.currentTarget.value) $('#askSpaceScope').value = '';
+});
+
+$('#artifactSpace').addEventListener('change', () => {
+  $('#artifactFilePicker').innerHTML = '<span>工作范围已变化，请重新查找资料</span>';
+});
+
+$('#agentPlanForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const fileIds = selectedPickerFiles($('#agentFilePicker'));
+  if (!fileIds.length) return toast('请至少选择一份目标资料', true);
+  try {
+    const run = await api('/api/agent-runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: form.elements.prompt.value.trim(),
+        file_ids: fileIds,
+        actions: [actionFromForm(form)],
+      }),
+    });
+    renderAgentPlan(run);
+    await loadAgentRuns();
+    toast('执行计划已生成，请核对后确认');
+  } catch (error) { toast(error.message, true); }
+});
+
+$('#automationForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const conditionKind = form.elements.condition_kind.value;
+  const triggerType = form.elements.trigger_type.value;
+  const trigger = triggerType === 'schedule'
+    ? { hour: Number(form.elements.hour.value), minute: Number(form.elements.minute.value) }
+    : {};
+  try {
+    await api('/api/automations', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: form.elements.name.value.trim(),
+        description: '',
+        trigger_type: triggerType,
+        trigger,
+        conditions: conditionKind ? [{ field: 'kind', value: conditionKind }] : [],
+        actions: [actionFromForm(form)],
+        enabled: form.elements.enabled.checked,
+        space_id: form.elements.workflow_space_id.value ? Number(form.elements.workflow_space_id.value) : null,
+      }),
+    });
+    form.reset();
+    $('#automationSchedule').hidden = true;
+    $('#automationActionType').dispatchEvent(new Event('change'));
+    await Promise.all([loadAutomations(), loadProductivityDashboard()]);
+    toast('自动化工作流已保存');
+  } catch (error) { toast(error.message, true); }
+});
+
+$('#artifactForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const fileIds = selectedPickerFiles($('#artifactFilePicker'));
+  if (!fileIds.length) return toast('请至少选择一份用于生成的资料', true);
+  try {
+    const result = await api('/api/artifacts', {
+      method: 'POST',
+      body: JSON.stringify({
+        title: form.elements.title.value.trim(),
+        artifact_type: form.elements.artifact_type.value,
+        prompt: form.elements.prompt.value.trim(),
+        file_ids: fileIds,
+        space_id: form.elements.space_id.value ? Number(form.elements.space_id.value) : null,
+      }),
+    });
+    state.currentArtifactId = Number(result.artifact.id);
+    await Promise.all([loadArtifacts(), loadTasks(true)]);
+    toast('成果生成任务已提交');
+  } catch (error) { toast(error.message, true); }
 });
 
 const hourOptions = Array.from({ length: 24 }, (_, hour) => `<option value="${hour}">${String(hour).padStart(2, '0')}:00</option>`).join('');
@@ -4078,9 +4609,17 @@ setInterval(() => {
 setInterval(() => {
   if (state.authReady && !state.publicMode && !document.hidden && $('#view-home').classList.contains('active')) {
     loadDashboard(true);
+    if (state.user?.id) loadProductivityDashboard();
     loadTasks(true);
   }
 }, 10000);
+
+setInterval(() => {
+  if (!state.authReady || state.publicMode || document.hidden || !state.user?.id) return;
+  if ($('#view-agents').classList.contains('active')) loadAgentRuns();
+  if ($('#view-automations').classList.contains('active')) loadAutomations();
+  if ($('#view-artifacts').classList.contains('active')) loadArtifacts();
+}, 8000);
 
 setInterval(() => {
   if (state.authReady && !state.publicMode && !document.hidden && $('#view-operations').classList.contains('active')) loadOperations();
@@ -4100,6 +4639,7 @@ document.addEventListener('visibilitychange', () => {
   loadNotifications();
   if ($('#view-home').classList.contains('active')) {
     loadDashboard(true);
+    if (state.user?.id) loadProductivityDashboard();
     loadTasks(true);
   }
   if ($('#view-tasks').classList.contains('active')) {
@@ -4151,6 +4691,8 @@ async function boot() {
       loadTasks(),
       loadSearchFacets(),
       loadProjects(true),
+      state.user?.id ? loadKnowledgeSpaces(false) : Promise.resolve(),
+      state.user?.id ? loadProductivityDashboard() : Promise.resolve(),
       state.user?.id ? loadNotifications() : Promise.resolve(),
       state.user?.id ? loadConversations() : Promise.resolve(),
       isAdmin() ? loadIndexStatus(true) : Promise.resolve(),

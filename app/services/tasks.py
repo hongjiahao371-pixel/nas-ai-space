@@ -19,6 +19,7 @@ from app.services.local_ai import LocalAIClient
 from app.services.albums import analyze_events, analyze_places
 from app.services.organizer import analyze_duplicates, analyze_similar
 from app.services.proxy import generate_look_preview, generate_proxy
+from app.services.productivity import ProductivityService
 from app.services.scanner import scan_library
 from app.services.vectors import VectorStore
 
@@ -32,6 +33,7 @@ class TaskManager:
         self.settings = settings
         self.ai = ai
         self.vectors = vectors
+        self.productivity = ProductivityService(database, settings, ai)
         self.queue: asyncio.PriorityQueue[tuple[int, int]] = asyncio.PriorityQueue()
         self.light_queue: asyncio.PriorityQueue[tuple[int, int]] = asyncio.PriorityQueue()
         self.workers: list[asyncio.Task] = []
@@ -251,20 +253,64 @@ class TaskManager:
                         f"新增 {result['assets_added']:,} 个素材；"
                         f"{index_message}"
                     )
+                elif task["type"] == "generate_artifact":
+                    artifact_id = int(task["payload"]["artifact_id"])
+                    artifact = self.database.fetchone(
+                        "SELECT status FROM artifacts WHERE id = ?", (artifact_id,)
+                    )
+                    if artifact and artifact["status"] == "ready":
+                        version = self.database.fetchone(
+                            """SELECT version_number FROM artifact_versions
+                               WHERE artifact_id = ? ORDER BY version_number DESC LIMIT 1""",
+                            (artifact_id,),
+                        )
+                        message = f"成果版本 V{int((version or {}).get('version_number') or 1)} 已生成"
+                    else:
+                        self.database.update_task(task_id, 0.1, "正在整理资料并生成成果")
+                        try:
+                            version = await asyncio.to_thread(
+                                self.productivity.generate_artifact_version,
+                                artifact_id,
+                                str(task["payload"]["prompt"]),
+                                [int(value) for value in task["payload"].get("file_ids", [])],
+                                int(task["payload"]["user_id"]),
+                            )
+                        except Exception:
+                            self.productivity.fail_artifact(artifact_id)
+                            raise
+                        message = f"成果版本 V{version['version_number']} 已生成"
+                elif task["type"] == "agent_run":
+                    run = await asyncio.to_thread(
+                        self.productivity.execute_agent_run, int(task["payload"]["run_id"])
+                    )
+                    message = f"AI 任务 {run['id']} 已执行，共 {len(run['actions'])} 个动作"
+                elif task["type"] == "automation_run":
+                    result = await asyncio.to_thread(
+                        self.productivity.execute_automation_run,
+                        int(task["payload"]["automation_run_id"]),
+                    )
+                    message = f"自动化已完成，关联 AI 任务 {result['agent_run_id']}"
                 else:
                     raise ValueError(f"未知任务类型：{task['type']}")
                 if self.database.is_task_cancelled(task_id):
                     self.database.mark_task_cancelled(task_id)
                 else:
-                    self.database.finish_task(task_id, message)
-                    self._notify_user(task, "后台任务已完成", message)
+                    self.database.finish_task_with_notification(
+                        task_id,
+                        int(task["user_id"]) if task.get("user_id") is not None else None,
+                        message,
+                    )
             except InterruptedError:
                 self.database.mark_task_cancelled(task_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.database.fail_task(task_id, f"{type(exc).__name__}: {exc}")
-                self._notify_user(task, "后台任务失败", f"{type(exc).__name__}: {exc}")
+                error = f"{type(exc).__name__}: {exc}"
+                self.database.fail_task_with_notification(
+                    task_id,
+                    int(task["user_id"]) if task.get("user_id") is not None else None,
+                    error,
+                )
             finally:
                 self.completed_since_prune += 1
                 if self.completed_since_prune >= 100:
@@ -317,6 +363,13 @@ class TaskManager:
                 progress,
                 lambda: self.database.is_task_cancelled(task_id),
             )
+            automation_run_ids = self.productivity.create_file_arrival_runs(
+                [int(value) for value in result.get("changed_file_ids", [])]
+            )
+            for automation_run_id in automation_run_ids:
+                await self.submit(
+                    "automation_run", {"automation_run_id": automation_run_id}, priority=3
+                )
             try:
                 await asyncio.to_thread(self.vectors.delete_files, result.get("removed_file_ids", []))
             except Exception as exc:
@@ -710,6 +763,10 @@ class TaskManager:
         await asyncio.sleep(15)
         while not self.stopping:
             try:
+                for automation_run_id in self.productivity.create_due_schedule_runs():
+                    await self.submit(
+                        "automation_run", {"automation_run_id": automation_run_id}, priority=2
+                    )
                 policy = self.index_policy()
                 memory = memory_runtime()
                 available = memory["available_bytes"]
