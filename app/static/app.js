@@ -56,6 +56,8 @@ const state = {
   activeStroke: null,
   publicAccessCode: '',
   publicVersionIds: {},
+  publicShareNextOffset: 0,
+  publicShareHasMore: false,
   // 阶段三（布局重构）：浏览 / 搜索工作台的布局模式（grid|list，localStorage 记忆）与右栏检查器状态
   browseLayout: localStorage.getItem('nasAiViewLayout') === 'list' ? 'list' : 'grid',
   inspectorFileId: null,
@@ -172,6 +174,7 @@ const fmtDate = value => value ? new Intl.DateTimeFormat('zh-CN', { year: 'numer
 const taskTitle = task => ({
   scan_library: '扫描并索引媒体库',
   scan_only: '快速扫描媒体库',
+  reindex_all: '全量重建索引',
   index_pending: '索引待处理文件',
   index_files: '重新索引文件',
   restore_file: '恢复并重建文件索引',
@@ -1790,7 +1793,11 @@ async function loadOperations() {
       ? snapshots.items.map(item => `<div class="snapshot-row"><span>${icon('vector')}</span><div><b>${esc(item.name)}</b><small>${fmtBytes(item.bytes)} · ${esc(fmtTime(item.created_at))}</small></div><button class="secondary" data-restore-snapshot="${esc(item.name)}">恢复</button><button class="danger" data-delete-snapshot="${esc(item.name)}">删除</button></div>`).join('')
       : '<div class="empty-state compact"><b>尚无向量快照</b><p>完成一批索引后创建，可用于 Qdrant 集合灾难恢复。</p></div>';
     $('#snapshotList').dataset.collection = snapshots.collection;
-    $('#visionUpgradeStatus').innerHTML = `<span>当前描述版本 v${data.vision_captions.version}</span><b>${fmtCount(data.vision_captions.pending_upgrade)} 张旧版图片等待升级</b>`;
+    const captionRuntime = data.vision_captions.runtime || {};
+    const captionScheduler = data.indexing.scheduler || {};
+    const throughput = Number(captionRuntime.images_per_hour || 0);
+    const runtimeText = throughput ? ` · 最近 ${throughput.toFixed(1)} 张/小时` : '';
+    $('#visionUpgradeStatus').innerHTML = `<span>当前描述版本 v${data.vision_captions.version} · ${esc(captionScheduler.reason || '等待调度器采样')}${runtimeText}</span><b>${fmtCount(data.vision_captions.pending_upgrade)} 张旧版图片等待升级</b>`;
     $('#auditList').innerHTML = audit.length
       ? audit.map(item => `<div class="audit-row"><span>${esc(item.actor)}</span><b>${esc(item.action)}</b><small>${esc(item.target_type)} ${esc(item.target_id)}</small><time>${esc(fmtTime(item.created_at))}</time></div>`).join('')
       : '<div class="empty-state compact"><b>暂无操作记录</b></div>';
@@ -2601,11 +2608,11 @@ function publicStage(version, assetId) {
   return `<a class="secondary" href="${esc(version.media_url)}" target="_blank" rel="noopener">打开 ${esc(version.file_name)}</a>`;
 }
 
-function renderPublicShare(data) {
+function renderPublicShare(data, append = false) {
   $('#publicBrand').textContent = data.share.brand_name || 'NAS AI Space';
   $('#publicShareTitle').textContent = data.share.name;
   $('#publicShareDescription').textContent = data.share.project_description || data.share.project_name;
-  $('#publicAssets').innerHTML = data.assets.map(asset => {
+  const markup = data.assets.map(asset => {
     const selectedId = state.publicVersionIds[asset.id];
     const current = asset.versions.find(version => Number(version.id) === Number(selectedId)) || asset.versions[0];
     if (current) state.publicVersionIds[asset.id] = Number(current.id);
@@ -2615,15 +2622,23 @@ function renderPublicShare(data) {
       <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p>${(comment.attachments || []).length ? `<div class="comment-attachments">${comment.attachments.map(commentAttachmentHtml).join('')}</div>` : ''}</article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><label class="attachment-picker"><span class="attach-btn">添加附件</span><input name="attachments" type="file" accept="image/*,video/*" multiple><span class="attach-name">未选择文件</span></label><button class="primary">发布意见</button></form>` : ''}</div></div>
     </article>`;
   }).join('');
-  state.publicShareData = data;
+  if (append) $('#publicAssets').insertAdjacentHTML('beforeend', markup);
+  else $('#publicAssets').innerHTML = markup;
+  const pagination = data.pagination || { total: data.assets.length, offset: 0, has_more: false };
+  state.publicShareNextOffset = Number(pagination.offset || 0) + data.assets.length;
+  state.publicShareHasMore = Boolean(pagination.has_more);
+  $('#publicLoadMore').hidden = !state.publicShareHasMore;
+  state.publicShareData = append && state.publicShareData
+    ? { ...data, assets: [...state.publicShareData.assets, ...data.assets] }
+    : data;
 }
 
-async function loadPublicShare(accessCode = '') {
+async function loadPublicShare(accessCode = '', offset = 0, append = false) {
   const token = decodeURIComponent(location.pathname.split('/').filter(Boolean)[1] || '');
   const response = await fetch(`/api/public/shares/${encodeURIComponent(token)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ access_code: accessCode }),
+    body: JSON.stringify({ access_code: accessCode, limit: 200, offset }),
   });
   if (response.status === 401) {
     $('#publicAccessForm').hidden = false;
@@ -2638,7 +2653,7 @@ async function loadPublicShare(accessCode = '') {
   }
   state.publicAccessCode = accessCode;
   $('#publicAccessForm').hidden = true;
-  renderPublicShare(await response.json());
+  renderPublicShare(await response.json(), append);
 }
 
 function bootPublicShare() {
@@ -4495,6 +4510,19 @@ $('#shareForm').addEventListener('submit', async event => {
 $('#publicAccessForm').addEventListener('submit', event => {
   event.preventDefault();
   loadPublicShare(new FormData(event.currentTarget).get('access_code'));
+});
+
+$('#publicLoadMore').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  if (!state.publicShareHasMore || button.disabled) return;
+  button.disabled = true;
+  button.textContent = '正在加载…';
+  try {
+    await loadPublicShare(state.publicAccessCode, state.publicShareNextOffset, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = '加载更多素材';
+  }
 });
 
 document.addEventListener('submit', async event => {

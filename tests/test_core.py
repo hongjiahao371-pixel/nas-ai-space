@@ -43,6 +43,7 @@ from app.main import (
     _controller_status,
     _focus_answer_evidence,
     _natural_date_filter,
+    _publish_upload,
     _production_readiness,
     _select_answer_sources,
     app,
@@ -54,6 +55,7 @@ from app.services.extractors import (
     _extract_video_frames,
     create_thumbnail,
     index_file,
+    prepare_caption_upgrade_image,
     split_chunks,
 )
 from app.services.hardware import GPU, _make_plan
@@ -64,6 +66,7 @@ from app.services.local_ai import (
     _parse_json_object,
     _parse_rerank_values,
     _render_common_answer,
+    _sanitize_answer_citations,
 )
 from app.services.organizer import _similar_components, analyze_duplicates, analyze_similar
 from app.services.proxy import generate_look_preview, generate_proxy
@@ -576,6 +579,236 @@ class CoreTests(unittest.TestCase):
         self.assertIn("保留旧版", message)
         self.assertEqual(self.database.caption_upgrade_failure_summary()["retryable"], 1)
 
+    def test_caption_upgrade_prepares_bounded_image(self) -> None:
+        image = self.library_path / "Screenshot-large.jpg"
+        Image.new("RGB", (2400, 1600), "#446688").save(image, quality=95)
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        file = self.database.get_file(self.database.pending_file_ids()[0])
+        local_settings = replace(
+            self.local_settings,
+            cache_dir=Path(self.temp.name) / "caption-cache",
+            vision_prepare_max_edge=1024,
+        )
+        local_settings.cache_dir.mkdir(parents=True)
+        with prepare_caption_upgrade_image(file, local_settings) as prepared:
+            self.assertNotEqual(prepared, image)
+            self.assertTrue(prepared.name.startswith("Screenshot-large"))
+            with Image.open(prepared) as output:
+                self.assertEqual(output.size, (1024, 683))
+            prepared_path = prepared
+        self.assertFalse(prepared_path.exists())
+
+    def test_caption_upgrade_pipeline_uses_bounded_workers(self) -> None:
+        file_ids = []
+        for index in range(4):
+            image = self.library_path / f"pipeline-{index}.jpg"
+            Image.new("RGB", (64, 64), f"#{index + 2}46688").save(image)
+        scan_library(self.database, self.library, lambda *_: None, lambda: False)
+        for file_id in self.database.pending_file_ids():
+            self.database.finish_file_index(
+                file_id,
+                {
+                    "caption": "旧版描述",
+                    "text": "",
+                    "quick_hash": "old",
+                    "metadata": {"caption_version": 3},
+                    "stages": {
+                        "metadata": {"status": "ready", "error": ""},
+                        "vision": {"status": "ready", "error": ""},
+                        "transcription": {"status": "not_applicable", "error": ""},
+                        "embedding": {"status": "ready", "error": ""},
+                    },
+                },
+                [{"content": "旧版描述", "source_label": "画面描述", "embedding": [0.1, 0.2]}],
+            )
+            file_ids.append(file_id)
+
+        class ParallelAI:
+            active = 0
+            maximum = 0
+            lock = threading.Lock()
+
+            @classmethod
+            def caption_image(cls, path):
+                with cls.lock:
+                    cls.active += 1
+                    cls.maximum = max(cls.maximum, cls.active)
+                time.sleep(0.04)
+                with cls.lock:
+                    cls.active -= 1
+                return f"新版描述 {path.stem}"
+
+            @staticmethod
+            def embeddings(values):
+                time.sleep(0.02)
+                return [[0.1, 0.2] for _ in values]
+
+        class UpgradeVectors:
+            @staticmethod
+            def file_points(file_id):
+                return [{"id": file_id * 1_000_000, "vector": [0.1, 0.2], "payload": {"file_id": file_id}}]
+
+            @staticmethod
+            def stage_file(file, _chunks):
+                return [int(file["id"]) * 1_000_000]
+
+            @staticmethod
+            def delete_points(_point_ids):
+                return None
+
+            @staticmethod
+            def restore_points(_points):
+                return None
+
+        local_settings = replace(self.local_settings, caption_upgrade_workers=2)
+        manager = TaskManager(self.database, local_settings, ParallelAI(), UpgradeVectors())
+        task_id = self.database.create_task("upgrade_captions", {"limit": 4})
+        message = asyncio.run(manager._upgrade_captions(task_id, file_ids))
+        self.assertEqual(ParallelAI.maximum, 2)
+        self.assertEqual(self.database.caption_upgrade_count(), 0)
+        self.assertIn("吞吐", message)
+        runtime = self.database.get_setting("caption_upgrade_runtime", {})
+        self.assertEqual(runtime["workers"], 2)
+
+    def test_caption_scheduler_allows_constrained_probe_batch(self) -> None:
+        local_settings = replace(
+            self.local_settings,
+            min_available_memory_bytes=1536 * 1024**2,
+            background_memory_floor_bytes=1024 * 1024**2,
+        )
+        manager = TaskManager(self.database, local_settings, Mock(), Mock())
+        manager.set_index_policy({
+            "enabled": True,
+            "start_hour": 0,
+            "end_hour": 7,
+            "batch_size": 50,
+            "library_id": None,
+            "kind": "",
+            "order": "balanced",
+        })
+        manager.submit_unique = AsyncMock(return_value=(42, False))
+        with (
+            patch("app.services.tasks.memory_runtime", return_value={
+                "available_bytes": 1200 * 1024**2,
+                "swap_total_bytes": 8 * 1024**3,
+                "swap_used_bytes": 3 * 1024**3,
+            }),
+            patch.object(manager.productivity, "create_due_schedule_runs", return_value=[]),
+            patch.object(self.database, "repair_count", return_value=0),
+            patch.object(self.database, "pending_summary", return_value={"total": 0}),
+            patch.object(self.database, "caption_upgrade_count", return_value=100),
+            patch.object(self.database, "active_task_count", return_value=0),
+        ):
+            status = asyncio.run(manager._auto_index_once(datetime(2026, 8, 22, 1, 0, 0)))
+        self.assertEqual(status["state"], "submitted")
+        self.assertEqual(status["resource_mode"], "constrained")
+        payload = manager.submit_unique.await_args.args[1]
+        self.assertEqual(payload["limit"], 25)
+
+    def test_index_task_deduplication_respects_library_scope(self) -> None:
+        second_library = self.database.create_library("第二媒体库", str(self.library_path / "second"))
+        manager = TaskManager(self.database, self.local_settings, Mock(), Mock())
+        first_id = self.database.create_task(
+            "index_pending",
+            {"library_id": int(self.library["id"]), "kind": "image", "limit": 5},
+            5,
+        )
+        second_id, existed = asyncio.run(manager.submit_unique(
+            "index_pending",
+            {"library_id": int(second_library["id"]), "kind": "image", "limit": 5},
+            5,
+        ))
+        self.assertFalse(existed)
+        self.assertNotEqual(second_id, first_id)
+        reused_id, existed = asyncio.run(manager.submit_unique(
+            "index_pending",
+            {"library_id": int(second_library["id"]), "kind": "image", "limit": 50},
+            5,
+        ))
+        self.assertTrue(existed)
+        self.assertEqual(reused_id, second_id)
+
+    def test_full_reindex_selection_is_not_limited_to_default_batch(self) -> None:
+        values = []
+        for index in range(self.local_settings.index_batch_size + 5):
+            path = self.library_path / f"reindex-{index:03}.txt"
+            values.append({
+                "library_id": int(self.library["id"]),
+                "path": str(path),
+                "relative_path": path.name,
+                "name": path.name,
+                "extension": ".txt",
+                "kind": "document",
+                "mime_type": "text/plain",
+                "size": index + 1,
+                "mtime_ns": index + 1,
+                "inode": index + 1,
+                "scan_token": "reindex-test",
+            })
+        self.database.upsert_files(values)
+        manager = TaskManager(self.database, self.local_settings, Mock(), Mock())
+        manager._index_file_ids = AsyncMock(return_value="完成")
+        asyncio.run(manager._index_pending(1, None, order="balanced"))
+        selected = manager._index_file_ids.await_args.args[1]
+        self.assertEqual(len(selected), self.local_settings.index_batch_size + 5)
+
+    def test_worker_retries_after_transient_task_lookup_failure(self) -> None:
+        manager = TaskManager(self.database, self.local_settings, Mock(), Mock())
+        manager.completed_since_prune = 99
+        task_id = self.database.create_task("analyze_places", {})
+        calls = 0
+
+        def flaky_get_task(_task_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary sqlite failure")
+            return None
+
+        async def exercise() -> None:
+            with (
+                patch.object(self.database, "get_task", side_effect=flaky_get_task),
+                patch.object(self.database, "prune_tasks", side_effect=RuntimeError("temporary prune failure")),
+                patch("app.services.tasks.logger.exception"),
+            ):
+                await manager.queue.put((-1, task_id))
+                worker = asyncio.create_task(manager._worker(0, manager.queue))
+                for _ in range(100):
+                    if calls >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertGreaterEqual(calls, 2)
+                self.assertFalse(worker.done())
+                worker.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await worker
+
+        asyncio.run(exercise())
+
+    def test_concurrent_upload_publish_never_overwrites(self) -> None:
+        destination = Path(self.temp.name) / "published"
+        destination.mkdir()
+        first = destination / ".first.part"
+        second = destination / ".second.part"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        barrier = threading.Barrier(3)
+        published: list[Path] = []
+
+        def publish(path: Path) -> None:
+            barrier.wait()
+            published.append(_publish_upload(path, destination, "same-name.bin"))
+
+        threads = [threading.Thread(target=publish, args=(path,)) for path in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(2)
+        self.assertEqual(len(published), 2)
+        self.assertEqual(len({path.name for path in published}), 2)
+        self.assertEqual({path.read_bytes() for path in published}, {b"first", b"second"})
+
     def test_duplicate_recycle_and_restore(self) -> None:
         first = self.library_path / "keep.bin"
         second = self.library_path / "remove.bin"
@@ -776,6 +1009,17 @@ class CoreTests(unittest.TestCase):
         self.assertIn("镜子 [1][2]", answer)
         self.assertIn("蛋糕 [1][2]", answer)
         self.assertNotIn("鲜花", answer)
+
+    def test_answer_citations_drop_unsupported_lines_and_invalid_references(self) -> None:
+        answer = _sanitize_answer_citations(
+            "第一项由资料支持 [1]\n第二项错误引用 [3]\n结论同时引用 [2][4]",
+            2,
+        )
+        self.assertIn("第一项由资料支持 [1]", answer)
+        self.assertNotIn("第二项错误引用", answer)
+        self.assertIn("结论同时引用 [2]", answer)
+        self.assertNotIn("[3]", answer)
+        self.assertNotIn("[4]", answer)
 
     def test_partial_query_coverage_caps_confidence(self) -> None:
         self.assertEqual(_partial_coverage_cap(0.5), 0.58)
@@ -1152,6 +1396,17 @@ class CoreTests(unittest.TestCase):
             thread.join(2)
         self.assertEqual(order, ["interactive", "background"])
 
+    def test_shared_model_endpoint_uses_strictest_concurrency_limit(self) -> None:
+        local_settings = replace(
+            self.local_settings,
+            vision_base_url="http://model:8080/v1",
+            chat_base_url="http://model:8080/v1",
+        )
+        ai = LocalAIClient(local_settings)
+        ai.set_max_concurrency(4, 1)
+        self.assertIs(ai._vision_gate, ai._chat_gate)
+        self.assertEqual(ai._vision_gate.limit, 1)
+
     def test_hardware_plans(self) -> None:
         nvidia = _make_plan(
             [GPU("nvidia", "RTX", "discrete", 24 * 1024**3)], 16, 32 * 1024**3,
@@ -1174,6 +1429,11 @@ class CoreTests(unittest.TestCase):
         Image.new("RGB", (640, 480), "#4865a8").save(image_path)
         scan_library(self.database, self.library, lambda *_: None, lambda: False)
         file = self.database.fetchone("SELECT * FROM files WHERE name = 'workspace.jpg'")
+        self.database.execute(
+            "UPDATE files SET metadata_json = ? WHERE id = ?",
+            (json.dumps({"frame_rate": 60}), file["id"]),
+        )
+        file = self.database.get_file(file["id"])
         user = self.database.create_user("workspace-owner", "项目所有者", "hash", "owner", [])
         reviewer = self.database.create_user("workspace-reviewer", "项目审阅者", "hash", "member", [])
         workspace = WorkspaceService(self.database)
@@ -1194,6 +1454,8 @@ class CoreTests(unittest.TestCase):
         )
         detail = workspace.asset_detail(asset["id"])
         self.assertEqual(len(detail["versions"]), 2)
+        self.assertEqual(detail["versions"][0]["frame_rate"], 60)
+        self.assertEqual(workspace.version(version["id"])["frame_rate"], 60)
         self.assertTrue(detail["comments"][0]["resolved"])
         self.assertEqual(workspace.share_by_token(token)["id"], share["id"])
         workspace.add_comment(
@@ -2108,6 +2370,79 @@ class APITests(unittest.TestCase):
         row = state.database.get_file(uploaded["id"])
         self.assertTrue(Path(row["path"]).is_relative_to(settings.upload_root))
         self.assertEqual(Path(row["path"]).read_bytes(), b"local upload content")
+
+    def test_reindex_endpoint_queues_dedicated_unlimited_task(self) -> None:
+        with (
+            patch.object(state.database, "active_task", return_value=None),
+            patch.object(state.database, "active_index_task", return_value=None),
+            patch.object(
+                state.tasks,
+                "submit_unique",
+                new=AsyncMock(return_value=(9876, False)),
+            ) as submit,
+        ):
+            response = self.client.post("/api/reindex")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {"task_id": 9876})
+        submit.assert_awaited_once_with(
+            "reindex_all",
+            {"order": "balanced"},
+            priority=5,
+            user_id=None,
+        )
+
+    def test_reindex_endpoint_rejects_conflicting_index_task(self) -> None:
+        with (
+            patch.object(state.database, "active_task", return_value=None),
+            patch.object(state.database, "active_index_task", return_value={"id": 42}),
+        ):
+            response = self.client.post("/api/reindex")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("已有索引任务", response.json()["detail"])
+
+    def test_project_share_supports_pagination_beyond_first_page(self) -> None:
+        upload = self.client.post(
+            "/api/uploads",
+            content=b"share pagination",
+            headers={"X-Filename": f"share-page-{time.time_ns()}.txt"},
+        )
+        self.assertEqual(upload.status_code, 201)
+        project = self.client.post("/api/projects", json={
+            "name": f"分页项目-{time.time_ns()}",
+            "description": "分页测试",
+            "color": "#7c8cff",
+        })
+        project_id = int(project.json()["id"])
+        file_id = int(upload.json()["file"]["id"])
+        for title in ("第一页素材", "第二页素材"):
+            created = self.client.post(f"/api/projects/{project_id}/assets", json={
+                "file_id": file_id,
+                "title": title,
+            })
+            self.assertEqual(created.status_code, 201)
+        share = self.client.post(f"/api/projects/{project_id}/shares", json={
+            "name": "完整项目分享",
+            "can_comment": False,
+        })
+        self.assertEqual(share.status_code, 201)
+        token = share.json()["token"]
+        first = self.client.post(
+            f"/api/public/shares/{token}",
+            json={"limit": 1, "offset": 0},
+        )
+        second = self.client.post(
+            f"/api/public/shares/{token}",
+            json={"limit": 1, "offset": 1},
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["pagination"]["total"], 2)
+        self.assertTrue(first.json()["pagination"]["has_more"])
+        self.assertFalse(second.json()["pagination"]["has_more"])
+        self.assertEqual(
+            {first.json()["assets"][0]["title"], second.json()["assets"][0]["title"]},
+            {"第一页素材", "第二页素材"},
+        )
 
     def test_local_user_login_and_library_permissions(self) -> None:
         username = f"member-{time.time_ns()}"

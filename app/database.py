@@ -1685,10 +1685,24 @@ class Database:
             row["payload"] = json.loads(row.pop("payload_json") or "{}")
         return row
 
+    def active_tasks(self, task_type: str) -> list[dict[str, Any]]:
+        rows = self.fetchall(
+            """SELECT * FROM tasks WHERE type = ? AND status IN ('pending', 'running')
+               ORDER BY priority DESC, id""",
+            (task_type,),
+        )
+        for row in rows:
+            try:
+                row["payload"] = json.loads(row.pop("payload_json") or "{}")
+            except json.JSONDecodeError:
+                row.pop("payload_json", None)
+                row["payload"] = {}
+        return rows
+
     def active_index_task(self) -> dict[str, Any] | None:
         row = self.fetchone(
             """SELECT * FROM tasks
-               WHERE type IN ('index_pending', 'repair_index', 'index_files', 'upgrade_captions')
+               WHERE type IN ('reindex_all', 'index_pending', 'repair_index', 'index_files', 'upgrade_captions')
                AND status IN ('pending', 'running')
                ORDER BY priority DESC, id LIMIT 1"""
         )

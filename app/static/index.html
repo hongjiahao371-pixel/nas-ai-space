@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=43">
+  <link rel="stylesheet" href="/assets/styles.css?v=45">
 </head>
 <body>
   <div class="app-shell">
@@ -577,6 +577,7 @@
       <div class="public-share-intro"><span class="eyebrow">SHARED REVIEW</span><h1 id="publicShareTitle">素材审阅</h1><p id="publicShareDescription"></p></div>
       <form class="public-access-form" id="publicAccessForm" hidden><label>请输入访问码<input name="access_code" type="password" autocomplete="current-password" required></label><button class="primary">进入审阅</button></form>
       <div class="public-assets" id="publicAssets"></div>
+      <button class="secondary" id="publicLoadMore" hidden>加载更多素材</button>
     </main>
   </div>
 
@@ -598,6 +599,6 @@
   <!-- 阶段二：通用确认 / 输入弹窗（替代原生 confirm/prompt） -->
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" id="dialogModal"><div class="modal-card compact-modal"><span class="eyebrow" id="dialogEyebrow">确认操作</span><h2 id="dialogTitle"></h2><p id="dialogBody"></p><label id="dialogField" hidden><span id="dialogLabel"></span><input id="dialogInput"></label><div class="dialog-actions"><button class="secondary" id="dialogCancel" type="button">取消</button><button class="primary" id="dialogConfirm" type="button">确定</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=43"></script>
+  <script src="/assets/app.js?v=45"></script>
 </body>
 </html>

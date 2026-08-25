@@ -1,6 +1,6 @@
 # NAS AI Space 发布进度
 
-> 更新时间：2026-08-13（北京时间）
+> 更新时间：2026-08-25（北京时间）
 
 ## 产品定位
 
@@ -12,7 +12,7 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - 部署目录：`/volume1/docker/nas-ai-space`
 - 服务端口：`8766`
 - 运行栈：app、ops、vision、embedding、reranker、qdrant、speech
-- 当前已部署版本：v1.3.0；数据库、模型、向量索引和媒体数据均为持久化卷
+- 当前已部署版本：v1.3.2；数据库、模型、向量索引和媒体数据均为持久化卷
 - 代码托管：私有 GitHub 仓库 `hongjiahao371-pixel/nas-ai-space`
 
 ## v1.3.0 实现范围
@@ -32,6 +32,24 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - [x] 完整测试矩阵与依赖安全复核
 - [x] 生产 NAS 备份、部署和真实数据闭环验收
 - [x] 私有 GitHub 提交与同步
+
+## v1.3.2 核心可靠性修复
+
+- [x] 全量重建索引改为无批次上限的独立任务，并拒绝与其他索引任务并发冲突
+- [x] `index_pending` 按媒体库和文件类型作用域去重，`index_files` 按文件集合去重
+- [x] 任务 worker 在读取/启动任务或清理历史记录时遇到瞬时数据库故障后保持存活并重试
+- [x] 整项目公开分享增加服务端分页和前端“加载更多素材”
+- [x] 项目版本接口从媒体元数据返回真实视频帧率
+- [x] 上传文件通过原子发布避免并发同名覆盖，数据库登记失败时清理孤立文件
+- [x] 新增全量重建、作用域去重、worker 恢复、分享分页、帧率和并发上传回归测试
+
+## v1.3.2 验收结果
+
+- Python 3.11 本地回归 157 项全部通过；JavaScript 与 Shell 语法、`pip check`、`git diff --check` 均通过。
+- 上线前创建数据库备份 `nas-ai-space-20260825-222814.db` 和源码回滚包 `/volume1/docker/.codex-backup-20260825-2230-pre-v132.tgz`。
+- NAS 重新构建后 app、ops、vision、embedding、reranker、qdrant、speech 七个服务全部 healthy；`/api/health` 与 `/api/ready` 均返回 v1.3.2。
+- 修复生产库中 1 个 SQL 标记 ready 但 Qdrant 缺失的文件后，向量一致性恢复为 SQL 11,474 / Qdrant 11,474，缺失、陈旧与数量不匹配均为 0。
+- 真实浏览器确认加载 `app.js?v=45` 与 `styles.css?v=45`，公开分享分页控件已进入生产页面，1280px 视口无横向溢出，控制台 warning/error 为 0。
 
 ## v1.3.0 生产验收结果
 

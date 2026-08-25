@@ -276,6 +276,8 @@ class ShareCreate(BaseModel):
 
 class PublicShareAccess(BaseModel):
     access_code: str = Field(default="", max_length=120)
+    limit: int = Field(default=200, ge=1, le=200)
+    offset: int = Field(default=0, ge=0, le=1000000)
 
 
 class PublicReviewComment(BaseModel):
@@ -398,7 +400,10 @@ async def lifespan(_: FastAPI):
     if not state.database.fetchone("SELECT id FROM libraries WHERE path = ?", (str(settings.upload_root),)):
         state.database.create_library("上传空间", str(settings.upload_root))
     state.ai = LocalAIClient(settings)
-    state.ai.set_max_concurrency(detect_hardware().plan.inference_workers)
+    state.ai.set_max_concurrency(
+        detect_hardware().plan.inference_workers,
+        settings.vision_concurrency,
+    )
     state.vectors = VectorStore(settings)
     state.search = SearchService(state.database, state.ai, state.vectors)
     state.tasks = TaskManager(state.database, settings, state.ai, state.vectors)
@@ -417,7 +422,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.3.0",
+    version="1.3.2",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -1456,8 +1461,11 @@ def system(principal: Auth) -> dict[str, Any]:
             "indexing": {
                 "task_workers": len(state.tasks.workers),
                 "index_workers": settings.index_workers or detect_hardware().plan.index_workers,
+                "caption_upgrade_workers": settings.caption_upgrade_workers,
+                "vision_concurrency": settings.vision_concurrency,
                 "default_batch_size": settings.index_batch_size,
                 "min_available_memory_bytes": settings.min_available_memory_bytes,
+                "background_memory_floor_bytes": settings.background_memory_floor_bytes,
                 "min_free_swap_bytes": settings.min_free_swap_bytes,
                 "retry_max_attempts": settings.index_retry_max_attempts,
                 "retry_base_seconds": settings.index_retry_base_seconds,
@@ -2695,10 +2703,19 @@ def public_share(token: str, payload: PublicShareAccess, request: Request) -> di
         raise
     _clear_rate_attempts(PUBLIC_ACCESS_FAILURES, PUBLIC_RATE_LIMIT_LOCK, rate_key)
     if share.get("asset_id"):
-        assets = [_public_asset_payload(int(share["asset_id"]), share)]
+        total = 1
+        assets = (
+            [_public_asset_payload(int(share["asset_id"]), share)]
+            if payload.offset == 0 else []
+        )
     else:
-        items = state.workspaces.list_assets(int(share["project_id"]), limit=200)["items"]
-        assets = [_public_asset_payload(int(item["id"]), share) for item in items]
+        page = state.workspaces.list_assets(
+            int(share["project_id"]),
+            limit=payload.limit,
+            offset=payload.offset,
+        )
+        total = int(page["total"])
+        assets = [_public_asset_payload(int(item["id"]), share) for item in page["items"]]
     return {
         "share": {
             key: share.get(key)
@@ -2709,6 +2726,12 @@ def public_share(token: str, payload: PublicShareAccess, request: Request) -> di
             )
         },
         "assets": assets,
+        "pagination": {
+            "total": total,
+            "limit": payload.limit,
+            "offset": payload.offset,
+            "has_more": payload.offset + len(assets) < total,
+        },
     }
 
 
@@ -2957,15 +2980,20 @@ def index_status(principal: Auth) -> dict[str, Any]:
             "failures": overview["caption_failures"],
         },
         "policy": state.tasks.index_policy(),
+        "scheduler": state.tasks.scheduler_status(),
+        "caption_runtime": state.database.get_setting("caption_upgrade_runtime", {}),
         "active": overview["active"],
         "active_tasks": state.database.active_task_count(),
         "overview": overview,
         "resources": {
             "available_memory_bytes": memory["available_bytes"],
             "minimum_memory_bytes": settings.min_available_memory_bytes,
+            "background_memory_floor_bytes": settings.background_memory_floor_bytes,
             "free_swap_bytes": max(0, memory["swap_total_bytes"] - memory["swap_used_bytes"]),
             "minimum_free_swap_bytes": settings.min_free_swap_bytes,
             "index_workers": settings.index_workers or detect_hardware().plan.index_workers,
+            "caption_upgrade_workers": settings.caption_upgrade_workers,
+            "vision_concurrency": settings.vision_concurrency,
             "default_batch_size": settings.index_batch_size,
         },
     }
@@ -3026,13 +3054,15 @@ def update_index_policy(payload: IndexPolicyUpdate, principal: Auth) -> dict[str
 @app.post("/api/reindex", status_code=202)
 async def reindex_all(principal: Auth) -> dict[str, int]:
     _require_admin(principal)
-    state.database.execute(
-        """UPDATE files SET status = 'pending', error = '', retry_count = 0, last_attempt_at = NULL,
-           next_retry_at = NULL, terminal_error = 0, last_error_fingerprint = ''"""
-    )
+    existing = state.database.active_task("reindex_all")
+    if existing:
+        return {"task_id": int(existing["id"])}
+    active = state.database.active_index_task()
+    if active:
+        raise HTTPException(status_code=409, detail="已有索引任务运行，请等待完成后再全量重建")
     task_id, _ = await state.tasks.submit_unique(
-        "index_pending",
-        {"limit": settings.index_batch_size, "order": "balanced"},
+        "reindex_all",
+        {"order": "balanced"},
         priority=5,
         user_id=principal["user_id"],
     )
@@ -4126,6 +4156,26 @@ def delete_conversation(conversation_id: int, principal: Auth) -> None:
     state.database.delete_conversation(conversation_id, _personal_user_id(principal))
 
 
+def _publish_upload(temporary: Path, destination_directory: Path, filename: str) -> Path:
+    """Atomically publish an upload without ever replacing an existing file."""
+    requested = destination_directory / filename
+    destination = requested
+    while True:
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+            break
+        except FileExistsError:
+            destination = requested.with_name(
+                f"{requested.stem}-{secrets.token_hex(4)}{requested.suffix}"
+            )
+    try:
+        temporary.unlink()
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
+
+
 @app.post("/api/uploads", status_code=201)
 async def upload_file(
     request: Request,
@@ -4153,10 +4203,7 @@ async def upload_file(
     relative_directory = Path(datetime.now().strftime("%Y/%m"))
     destination_directory = settings.upload_root / relative_directory
     destination_directory.mkdir(parents=True, exist_ok=True)
-    destination = destination_directory / filename
-    if destination.exists():
-        destination = destination.with_name(f"{destination.stem}-{secrets.token_hex(4)}{destination.suffix}")
-    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.part")
+    temporary = destination_directory / f".{secrets.token_hex(8)}.part"
     written = 0
     last_space_check = 0
     try:
@@ -4174,26 +4221,30 @@ async def upload_file(
             os.fsync(handle.fileno())
         if not written:
             raise HTTPException(status_code=400, detail="不能上传空文件")
-        os.replace(temporary, destination)
+        destination = _publish_upload(temporary, destination_directory, filename)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
     stat = destination.stat()
     relative_path = str(destination.relative_to(settings.upload_root))
     extension = destination.suffix.lower()
-    file_id, _ = state.database.upsert_file({
-        "library_id": int(library["id"]),
-        "path": str(destination),
-        "relative_path": relative_path,
-        "name": destination.name,
-        "extension": extension,
-        "kind": file_kind(extension),
-        "mime_type": mimetypes.guess_type(destination.name)[0] or "application/octet-stream",
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "inode": getattr(stat, "st_ino", 0),
-        "scan_token": "upload",
-    })
+    try:
+        file_id, _ = state.database.upsert_file({
+            "library_id": int(library["id"]),
+            "path": str(destination),
+            "relative_path": relative_path,
+            "name": destination.name,
+            "extension": extension,
+            "kind": file_kind(extension),
+            "mime_type": mimetypes.guess_type(destination.name)[0] or "application/octet-stream",
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "inode": getattr(stat, "st_ino", 0),
+            "scan_token": "upload",
+        })
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
     state.database.update_library_stats(int(library["id"]))
     task_id = await state.tasks.submit(
         "index_files", {"file_ids": [file_id]}, priority=9, user_id=principal["user_id"]
@@ -4458,6 +4509,7 @@ def operations_status(principal: Auth) -> dict[str, Any]:
             "pending": state.database.pending_summary(),
             "stages": state.database.index_stage_summary(),
             "policy": state.tasks.index_policy(),
+            "scheduler": state.tasks.scheduler_status(),
         },
         "runtime": runtime_metrics(),
         "people": faces,
@@ -4465,6 +4517,7 @@ def operations_status(principal: Auth) -> dict[str, Any]:
             "version": 4,
             "pending_upgrade": state.database.caption_upgrade_count(),
             "failures": state.database.caption_upgrade_failure_summary(),
+            "runtime": state.database.get_setting("caption_upgrade_runtime", {}),
         },
         "feedback": state.database.feedback_counts(),
         "watcher": state.watcher.status(),

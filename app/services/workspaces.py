@@ -335,15 +335,17 @@ class WorkspaceService:
         return self.version(version_id) or {}
 
     def version(self, version_id: int) -> dict[str, Any] | None:
-        return self.database.fetchone(
+        version = self.database.fetchone(
             """SELECT av.*, f.library_id, f.relative_path, f.status AS index_status, f.metadata_json,
                COALESCE(NULLIF(f.manual_caption, ''), f.ai_caption, '') AS caption
                FROM asset_versions av LEFT JOIN files f ON f.id = av.file_id WHERE av.id = ?""",
             (version_id,),
         )
-        for version in versions:
-            metadata = self._loads(version.pop("metadata_json", "{}"), {})
-            version["frame_rate"] = float(metadata.get("frame_rate") or 0) or None
+        if not version:
+            return None
+        metadata = self._loads(version.pop("metadata_json", "{}"), {})
+        version["frame_rate"] = float(metadata.get("frame_rate") or 0) or None
+        return version
 
     def list_assets(
         self,
@@ -408,11 +410,15 @@ class WorkspaceService:
             return None
         versions = self.database.fetchall(
             """SELECT av.*, f.library_id, f.relative_path, f.status AS index_status,
+               f.metadata_json,
                COALESCE(NULLIF(f.manual_caption, ''), f.ai_caption, '') AS caption
                FROM asset_versions av LEFT JOIN files f ON f.id = av.file_id
                WHERE av.asset_id = ? ORDER BY av.version_number DESC""",
             (asset_id,),
         )
+        for version in versions:
+            metadata = self._loads(version.pop("metadata_json", "{}"), {})
+            version["frame_rate"] = float(metadata.get("frame_rate") or 0) or None
         comments = self.database.fetchall(
             """SELECT rc.*, u.display_name, u.username FROM review_comments rc
                LEFT JOIN users u ON u.id = rc.user_id WHERE rc.asset_id = ?

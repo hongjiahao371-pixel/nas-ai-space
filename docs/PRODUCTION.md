@@ -23,6 +23,11 @@
 NAS_AI_ALLOW_QUERY_TOKEN=false
 NAS_AI_INDEX_RETRY_MAX_ATTEMPTS=3
 NAS_AI_INDEX_RETRY_BASE_SECONDS=300
+NAS_AI_BACKGROUND_MEMORY_FLOOR_MB=768
+NAS_AI_CAPTION_UPGRADE_WORKERS=2
+NAS_AI_VISION_CONCURRENCY=1
+NAS_AI_VISION_PREPARE_MAX_EDGE=2048
+NAS_AI_VISION_PREPARE_MAX_MB=8
 NAS_AI_TASK_RETENTION_DAYS=30
 NAS_AI_TASK_RETENTION_COUNT=2000
 NAS_AI_AUTOMATIC_BACKUP_ENABLED=true
@@ -32,7 +37,7 @@ NAS_AI_AUTOMATIC_BACKUP_RETENTION=7
 
 应用端口默认适合可信局域网使用。需要从公网、异地办公网或不受信任的 Wi-Fi 访问时，必须在 NAS 反向代理前启用 HTTPS，并限制来源网络；不要把 `8766` 直接映射到公网。
 
-8 GB 内存的 NVIDIA NAS 建议保持 `NAS_AI_INDEX_WORKERS=1`，每批 50–200 个文件，并保留可用内存和 Swap 保护线。任务之间按需重启模型容器的外部编排器必须以 root 运行，但应用容器本身继续使用普通用户和只读根文件系统。
+8 GB 内存的 NVIDIA NAS 建议保持 `NAS_AI_INDEX_WORKERS=1`，每批 50–200 个文件，并保留可用内存和 Swap 保护线。`NAS_AI_BACKGROUND_MEMORY_FLOOR_MB` 必须低于或等于正常内存保护线；它只允许旧图片描述运行小型探测批，不会放宽待索引文件和修复任务的正常保护条件。任务之间按需重启模型容器的外部编排器必须以 root 运行，但应用容器本身继续使用普通用户和只读根文件系统。
 
 ## 升级
 

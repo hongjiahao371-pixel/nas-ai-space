@@ -55,7 +55,12 @@ class Settings:
     index_workers: int
     index_batch_size: int
     min_available_memory_bytes: int
+    background_memory_floor_bytes: int
     min_free_swap_bytes: int
+    caption_upgrade_workers: int
+    vision_concurrency: int
+    vision_prepare_max_edge: int
+    vision_prepare_max_bytes: int
     index_retry_max_attempts: int
     index_retry_base_seconds: int
     auto_index_enabled: bool
@@ -152,7 +157,14 @@ class Settings:
             index_workers=_int_env("NAS_AI_INDEX_WORKERS", 0, 0, 16),
             index_batch_size=_int_env("NAS_AI_INDEX_BATCH_SIZE", 200, 1, 10000),
             min_available_memory_bytes=_int_env("NAS_AI_MIN_AVAILABLE_MEMORY_MB", 1024, 0, 65536) * 1024 * 1024,
+            background_memory_floor_bytes=_int_env(
+                "NAS_AI_BACKGROUND_MEMORY_FLOOR_MB", 768, 256, 65536
+            ) * 1024 * 1024,
             min_free_swap_bytes=_int_env("NAS_AI_MIN_FREE_SWAP_MB", 512, 0, 65536) * 1024 * 1024,
+            caption_upgrade_workers=_int_env("NAS_AI_CAPTION_UPGRADE_WORKERS", 2, 1, 8),
+            vision_concurrency=_int_env("NAS_AI_VISION_CONCURRENCY", 1, 1, 8),
+            vision_prepare_max_edge=_int_env("NAS_AI_VISION_PREPARE_MAX_EDGE", 2048, 512, 4096),
+            vision_prepare_max_bytes=_int_env("NAS_AI_VISION_PREPARE_MAX_MB", 8, 1, 256) * 1024 * 1024,
             index_retry_max_attempts=_int_env("NAS_AI_INDEX_RETRY_MAX_ATTEMPTS", 3, 1, 20),
             index_retry_base_seconds=_int_env("NAS_AI_INDEX_RETRY_BASE_SECONDS", 300, 30, 86400),
             auto_index_enabled=_bool_env("NAS_AI_AUTO_INDEX_ENABLED", False),

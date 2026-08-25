@@ -167,6 +167,24 @@ def _fallback_common_arrangements(sources: list[dict]) -> str:
     return "由至少两份资料共同支持的布置：\n\n" + "\n".join(lines)
 
 
+def _sanitize_answer_citations(content: str, source_count: int) -> str:
+    lines: list[str] = []
+    for line in content.splitlines():
+        references = [int(value) for value in re.findall(r"\[(\d+)]", line)]
+        valid = [value for value in references if 1 <= value <= source_count]
+        if references and not valid:
+            continue
+        cleaned = re.sub(
+            r"\[(\d+)]",
+            lambda match: match.group(0) if 1 <= int(match.group(1)) <= source_count else "",
+            line,
+        )
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines).strip()
+
+
 class _PriorityGate:
     def __init__(self, limit: int):
         self.limit = max(1, limit)
@@ -202,7 +220,7 @@ class LocalAIClient:
         self._cache_lock = threading.Lock()
         self._embedding_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
         self._rerank_cache: OrderedDict[str, tuple[float, dict[int, dict]]] = OrderedDict()
-        self._set_gates(1)
+        self._set_gates(1, 1)
 
     def _http(self) -> httpx.Client:
         # 复用同一 httpx.Client（连接池），避免每次推理请求重建 TCP/TLS 连接；
@@ -213,23 +231,31 @@ class LocalAIClient:
                     self._client = httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0))
         return self._client
 
-    def _set_gates(self, limit: int) -> None:
-        gates: dict[str, _PriorityGate] = {}
+    def _set_gates(self, limit: int, vision_limit: int) -> None:
+        requests = {
+            "embedding": (self.settings.embedding_base_url, limit),
+            "vision": (self.settings.vision_base_url, vision_limit),
+            "chat": (self.settings.chat_base_url, limit),
+            "rerank": (self.settings.rerank_base_url, limit),
+            "transcription": (self.settings.transcription_base_url, limit),
+        }
+        endpoint_limits: dict[str, int] = {}
+        keys: dict[str, str] = {}
+        for name, (endpoint, requested) in requests.items():
+            key = endpoint.rstrip("/") or f"__{name}"
+            keys[name] = key
+            requested = max(1, requested)
+            endpoint_limits[key] = min(endpoint_limits.get(key, requested), requested)
+        gates = {key: _PriorityGate(value) for key, value in endpoint_limits.items()}
+        self._embedding_gate = gates[keys["embedding"]]
+        self._vision_gate = gates[keys["vision"]]
+        self._chat_gate = gates[keys["chat"]]
+        self._rerank_gate = gates[keys["rerank"]]
+        self._transcription_gate = gates[keys["transcription"]]
 
-        def gate(endpoint: str) -> _PriorityGate:
-            key = endpoint.rstrip("/")
-            if key not in gates:
-                gates[key] = _PriorityGate(limit)
-            return gates[key]
-
-        self._embedding_gate = gate(self.settings.embedding_base_url)
-        self._vision_gate = gate(self.settings.vision_base_url)
-        self._chat_gate = gate(self.settings.chat_base_url)
-        self._rerank_gate = gate(self.settings.rerank_base_url)
-        self._transcription_gate = gate(self.settings.transcription_base_url)
-
-    def set_max_concurrency(self, value: int) -> None:
-        self._set_gates(max(1, value))
+    def set_max_concurrency(self, value: int, vision_value: int | None = None) -> None:
+        limit = max(1, value)
+        self._set_gates(limit, max(1, vision_value or limit))
 
     @property
     def configured(self) -> bool:
@@ -623,7 +649,8 @@ class LocalAIClient:
                 payload,
                 180,
             )
-            return response.json()["choices"][0]["message"]["content"].strip()
+            content = response.json()["choices"][0]["message"]["content"].strip()
+        return _sanitize_answer_citations(content, len(sources))
 
     def generate_artifact(
         self,

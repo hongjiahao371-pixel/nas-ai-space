@@ -10,12 +10,13 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import rawpy
-from PIL import ExifTags, Image, ImageDraw, ImageFont
+from PIL import ExifTags, Image, ImageDraw, ImageFont, ImageOps
 
 from app.config import Settings, settings
 from app.services.hardware import ffmpeg_input_args
@@ -454,16 +455,70 @@ def split_chunks(text: str, max_chars: int = 1200, overlap: int = 120) -> list[d
     return chunks
 
 
-def upgrade_image_caption(
+@contextmanager
+def prepare_caption_upgrade_image(
     file: dict[str, Any],
     settings: Settings,
-    ai: LocalAIClient,
-) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+) -> Iterator[Path]:
     if str(file.get("kind") or "") != "image":
         raise ValueError("只有图片支持描述升级")
     path = Path(str(file["path"]))
     if not path.exists():
         raise FileNotFoundError(path)
+    width = int(file.get("width") or 0)
+    height = int(file.get("height") or 0)
+    supported = True
+    if not width or not height:
+        try:
+            info = _image_info(path)
+            width = int(info.get("width") or 0)
+            height = int(info.get("height") or 0)
+        except (OSError, ValueError):
+            supported = False
+    requires_conversion = path.suffix.lower() in (
+        RAW_IMAGE_EXTENSIONS | PSD_EXTENSIONS | VECTOR_DESIGN_EXTENSIONS | FONT_EXTENSIONS
+    )
+    needs_prepare = (
+        not supported
+        or requires_conversion
+        or max(width, height) > settings.vision_prepare_max_edge
+        or int(file.get("size") or path.stat().st_size) > settings.vision_prepare_max_bytes
+    )
+    if not needs_prepare:
+        yield path
+        return
+    with tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="caption-upgrade-") as directory:
+        stem = re.sub(r"[^\w.-]+", "-", path.stem, flags=re.UNICODE).strip("-.")[:80] or "image"
+        destination = Path(directory) / f"{stem}.jpg"
+        if supported and not requires_conversion:
+            try:
+                with Image.open(path) as source:
+                    source.draft("RGB", (settings.vision_prepare_max_edge, settings.vision_prepare_max_edge))
+                    image = ImageOps.exif_transpose(source)
+                    image.thumbnail(
+                        (settings.vision_prepare_max_edge, settings.vision_prepare_max_edge),
+                        Image.Resampling.LANCZOS,
+                    )
+                    output = image if image.mode in {"RGB", "L"} else image.convert("RGB")
+                    try:
+                        output.save(destination, "JPEG", quality=88, optimize=True)
+                    finally:
+                        if output is not image:
+                            output.close()
+                        if image is not source:
+                            image.close()
+            except (OSError, ValueError):
+                _convert_image(path, destination, settings.vision_prepare_max_edge)
+        else:
+            _convert_image(path, destination, settings.vision_prepare_max_edge)
+        yield destination
+
+
+def caption_upgrade_content(
+    file: dict[str, Any],
+    ai: LocalAIClient,
+    prepared_path: Path,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
     try:
         metadata = json.loads(str(file.get("metadata_json") or "{}"))
         if not isinstance(metadata, dict):
@@ -475,29 +530,24 @@ def upgrade_image_caption(
         caption = manual_caption
         source = "manual"
     else:
-        prepared_path = path
-        temporary: tempfile.TemporaryDirectory[str] | None = None
-        try:
-            try:
-                _image_info(path)
-            except (OSError, ValueError):
-                temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="caption-upgrade-")
-                prepared_path = Path(temporary.name) / "converted.jpg"
-                _convert_image(path, prepared_path)
-            if int(file.get("size") or 0) > 24 * 1024 * 1024 and prepared_path == path:
-                temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix="caption-upgrade-large-")
-                prepared_path = Path(temporary.name) / "resized.jpg"
-                _convert_image(path, prepared_path)
-            caption = ai.caption_image(prepared_path).strip()
-        finally:
-            if temporary:
-                temporary.cleanup()
+        caption = ai.caption_image(prepared_path).strip()
         source = "ai"
     if not caption:
         raise RuntimeError("视觉模型未返回描述")
     chunks = [{**chunk, "source_label": "画面描述"} for chunk in split_chunks(caption)]
     if not chunks:
         raise RuntimeError("新版描述无法切分")
+    errors = metadata.get("ai_errors")
+    if isinstance(errors, list):
+        metadata["ai_errors"] = [
+            str(error) for error in errors
+            if not str(error).startswith(("vision:", "embedding:"))
+        ]
+    metadata.update({"caption_version": 4, "caption_source": source})
+    return caption, metadata, chunks
+
+
+def embed_caption_upgrade(chunks: list[dict[str, Any]], ai: LocalAIClient) -> None:
     for start in range(0, len(chunks), 32):
         batch = chunks[start:start + 32]
         embeddings = ai.embeddings([chunk["content"] for chunk in batch])
@@ -507,13 +557,16 @@ def upgrade_image_caption(
             if not embedding:
                 raise RuntimeError("Embedding 返回空向量")
             chunk["embedding"] = embedding
-    errors = metadata.get("ai_errors")
-    if isinstance(errors, list):
-        metadata["ai_errors"] = [
-            str(error) for error in errors
-            if not str(error).startswith(("vision:", "embedding:"))
-        ]
-    metadata.update({"caption_version": 4, "caption_source": source})
+
+
+def upgrade_image_caption(
+    file: dict[str, Any],
+    settings: Settings,
+    ai: LocalAIClient,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    with prepare_caption_upgrade_image(file, settings) as prepared_path:
+        caption, metadata, chunks = caption_upgrade_content(file, ai, prepared_path)
+        embed_caption_upgrade(chunks, ai)
     return caption, metadata, chunks
 
 
