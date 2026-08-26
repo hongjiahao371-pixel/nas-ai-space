@@ -118,6 +118,49 @@ class SimilarVectors(RankedVectors):
         return [0.1, 0.2]
 
 
+class ReleasePackagingTests(unittest.TestCase):
+    def test_guided_setup_generates_private_minimal_config(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="nas-ai-release-setup-") as directory:
+            root = Path(directory) / "repo"
+            scripts = root / "scripts"
+            library = Path(directory) / "media library"
+            scripts.mkdir(parents=True)
+            library.mkdir()
+            shutil.copy2(repository / "scripts" / "nas-ai", scripts / "nas-ai")
+            result = subprocess.run(
+                [
+                    "bash", str(scripts / "nas-ai"), "setup", "--non-interactive",
+                    "--profile", "cpu", "--preset", "lite", "--library", str(library),
+                    "--port", "18766",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            config = (root / ".env").read_text(encoding="utf-8")
+            self.assertIn('NAS_LIBRARY_PATH="', config)
+            self.assertIn("media library", config)
+            self.assertIn("NAS_AI_INDEX_WORKERS=1", config)
+            self.assertNotIn("replace-with-a-long-random-token", config)
+            token = next(line.partition("=")[2] for line in config.splitlines() if line.startswith("NAS_AI_API_TOKEN="))
+            self.assertGreaterEqual(len(token), 64)
+            self.assertNotIn(token, result.stdout)
+            self.assertEqual((root / ".nas-ai-profile").read_text(encoding="utf-8").strip(), "cpu")
+            self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+
+    def test_public_release_metadata_is_consistent(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            ["bash", str(repository / "scripts" / "release-check.sh")],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("Public release checks passed", result.stdout)
+
+
 class SemanticAI:
     def __init__(self, local_settings):
         self.settings = replace(local_settings, embedding_base_url="http://local", embedding_model="test")
@@ -1868,6 +1911,8 @@ class APITests(unittest.TestCase):
         self.assertIn("bootstrapForm", homepage.text)
         self.assertIn('name="password_confirm"', homepage.text)
         self.assertIn("完成设置并进入空间", homepage.text)
+        self.assertIn("onboardingPanel", homepage.text)
+        self.assertIn("renderOnboarding", script.text)
         self.assertIn("response.cookie_session", script.text)
         self.assertNotIn("if (!response.token)", script.text)
         self.assertNotIn("new URLSearchParams(location.search).get('token')", script.text)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR=${PROJECT_DIR:-/volume1/docker/nas-ai-space}
+PROJECT_DIR=${PROJECT_DIR:-}
 API_BASE=${API_BASE:-http://127.0.0.1:8766}
 STATE_DIR=${STATE_DIR:-/var/lib/nas-ai-space}
 REPAIR_BATCH=${REPAIR_BATCH:-50}
@@ -10,6 +10,16 @@ CAPTION_BATCH=${CAPTION_BATCH:-50}
 MIN_AVAILABLE_MEMORY_MB=${MIN_AVAILABLE_MEMORY_MB:-768}
 RECYCLE_SWAP_BELOW_MB=${RECYCLE_SWAP_BELOW_MB:-4096}
 MAX_FAILURE_BACKOFF_SECONDS=${MAX_FAILURE_BACKOFF_SECONDS:-3600}
+
+if [ -z "$PROJECT_DIR" ]; then
+  SCRIPT_PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+  if [ -f "$SCRIPT_PROJECT_DIR/.env" ]; then
+    PROJECT_DIR=$SCRIPT_PROJECT_DIR
+  else
+    printf 'PROJECT_DIR is required when the orchestrator is installed outside the repository.\n' >&2
+    exit 1
+  fi
+fi
 
 cd "$PROJECT_DIR"
 install -d -m 0750 "$STATE_DIR"

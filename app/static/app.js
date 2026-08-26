@@ -13,6 +13,7 @@ const state = {
   currentFileUrl: '',
   user: null,
   libraries: [],
+  dashboard: null,
   users: [],
   indexStatus: null,
   searchQuery: '',
@@ -454,9 +455,48 @@ function statsCard(label, value, note, iconName) {
   return `<article class="stat-card"><span class="stat-icon">${icon(iconName)}</span><div class="stat-copy"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(note)}</span></div></article>`;
 }
 
+function renderOnboarding() {
+  const panel = $('#onboardingPanel');
+  if (!panel) return;
+  if (!isAdmin() || !state.user?.id) {
+    panel.hidden = true;
+    return;
+  }
+  const sources = state.libraries.filter(item => !['/uploads', '/recycle'].includes(item.path));
+  const total = Number(state.dashboard?.files?.total || 0);
+  const semanticReady = Number(state.dashboard?.files?.semantic_ready || 0);
+  const searched = localStorage.getItem('nasAiFirstSearchDone') === '1';
+  const steps = [
+    { key: 'library', done: sources.length > 0, title: '连接资料目录', note: '添加 NAS 上已经挂载到容器内的只读目录' },
+    { key: 'scan', done: total > 0, title: '快速扫描', note: '先读取文件名、格式、时间和基础元数据' },
+    { key: 'index', done: semanticReady > 0, title: '建立 AI 索引', note: '在任务中心按设备资源分批生成描述和向量' },
+    { key: 'search', done: searched, title: '完成第一次搜索', note: '用自然语言确认本地资料可以被找回' },
+  ];
+  const complete = steps.every(step => step.done);
+  const dismissed = localStorage.getItem('nasAiOnboardingDismissed') === '1';
+  panel.hidden = complete || dismissed;
+  if (panel.hidden) return;
+  const next = steps.find(step => !step.done)?.key;
+  panel.innerHTML = `
+    <div class="onboarding-copy">
+      <span class="eyebrow">首次使用</span>
+      <h2>四步建立你的本地 AI 空间</h2>
+      <p>原始资料保持只读；先扫描元数据，再按设备资源逐步建立 AI 索引。</p>
+    </div>
+    <div class="onboarding-steps">${steps.map((step, index) => `
+      <button class="onboarding-step ${step.done ? 'done' : ''} ${next === step.key ? 'next' : ''}" data-onboarding="${step.key}" ${step.done ? 'disabled' : ''}>
+        <span>${step.done ? '✓' : String(index + 1).padStart(2, '0')}</span>
+        <b>${esc(step.title)}</b>
+        <small>${esc(step.note)}</small>
+      </button>`).join('')}
+    </div>
+    <button class="onboarding-dismiss" data-onboarding="dismiss" aria-label="隐藏新手引导">以后再说</button>`;
+}
+
 async function loadDashboard(quiet = false) {
   try {
     const data = await api('/api/dashboard');
+    state.dashboard = data;
     const total = Number(data.files.total || 0);
     const ready = Number(data.files.ready || 0);
     const partial = Number(data.files.partial || 0);
@@ -503,6 +543,7 @@ async function loadDashboard(quiet = false) {
     if (eta !== null && eta !== undefined && Number(indexing.runtime?.remaining_items || 0)) parts.push(fmtEta(eta));
     const updated = indexing.updated_at ? new Date(indexing.updated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
     $('#indexHealthMeta').textContent = `${parts.join(' · ') || '索引状态正常'}${updated ? ` · ${updated} 更新` : ''}`;
+    renderOnboarding();
   } catch (error) {
     $('#indexHealthMeta').textContent = '实时状态暂时不可用，保留上次数据';
     if (!quiet) toast(error.message, true);
@@ -720,6 +761,7 @@ async function loadLibraries() {
   try {
     const items = await api('/api/libraries');
     state.libraries = items;
+    renderOnboarding();
     renderLibTrees();
     ['#searchLibrary', '#librarySource'].forEach(selector => {
       const select = $(selector);
@@ -1244,6 +1286,8 @@ async function runSearch(query, append = false) {
   try {
     const fast = await api(`/api/search?${params}`);
     if (sequence !== state.searchSequence) return;
+    localStorage.setItem('nasAiFirstSearchDone', '1');
+    renderOnboarding();
     renderSearchResults(fast, append, 'fast');
     if (state.preciseSearch && !append && fast.results.length) {
       params.set('precise', 'true');
@@ -2712,6 +2756,19 @@ document.addEventListener('click', async event => {
   if (event.target.closest('.card-select, .duplicate-select')) return;
   const nav = event.target.closest('[data-view]');
   if (nav) return showView(nav.dataset.view);
+  const onboarding = event.target.closest('[data-onboarding]');
+  if (onboarding) {
+    const action = onboarding.dataset.onboarding;
+    if (action === 'dismiss') {
+      localStorage.setItem('nasAiOnboardingDismissed', '1');
+      renderOnboarding();
+      return;
+    }
+    if (action === 'library') return openModal($('#libraryModal'));
+    if (action === 'scan') return $('#globalScan').click();
+    if (action === 'index') return showView('tasks');
+    if (action === 'search') return showView('search');
+  }
   const go = event.target.closest('[data-go]');
   if (go) return showView(go.dataset.go);
   if (event.target.closest('#menuButton')) return $('.sidebar').classList.toggle('open');
@@ -4157,6 +4214,7 @@ $('#libraryForm').addEventListener('submit', async event => {
   try {
     const library = await api('/api/libraries', { method: 'POST', body: JSON.stringify(data) });
     await api(`/api/libraries/${library.id}/discover`, { method: 'POST' });
+    await loadLibraries();
     closeModal($('#libraryModal'));
     form.reset();
     toast('媒体库已添加，开始快速扫描');

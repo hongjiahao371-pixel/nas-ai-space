@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=45">
+  <link rel="stylesheet" href="/assets/styles.css?v=46">
 </head>
 <body>
   <div class="app-shell">
@@ -135,6 +135,8 @@
             <h1>AI 工作台</h1>
             <p>让 NAS 中的资料直接变成知识、任务和可交付成果。</p>
           </div>
+
+          <article class="onboarding-panel" id="onboardingPanel" hidden></article>
 
           <div class="productivity-launcher personal-only">
             <button data-go="knowledge"><span>01</span><b>建立知识空间</b><small>围绕客户或项目组织上下文</small></button>
@@ -599,6 +601,6 @@
   <!-- 阶段二：通用确认 / 输入弹窗（替代原生 confirm/prompt） -->
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" id="dialogModal"><div class="modal-card compact-modal"><span class="eyebrow" id="dialogEyebrow">确认操作</span><h2 id="dialogTitle"></h2><p id="dialogBody"></p><label id="dialogField" hidden><span id="dialogLabel"></span><input id="dialogInput"></label><div class="dialog-actions"><button class="secondary" id="dialogCancel" type="button">取消</button><button class="primary" id="dialogConfirm" type="button">确定</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=45"></script>
+  <script src="/assets/app.js?v=46"></script>
 </body>
 </html>

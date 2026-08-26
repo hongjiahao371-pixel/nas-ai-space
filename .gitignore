@@ -1,4 +1,5 @@
 .env
+.nas-ai-profile
 .venv/
 .codex-backup*/
 data/*
@@ -8,6 +9,7 @@ library/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 tests/quality-cases.local.json
 .DS_Store
 models/*

@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible NAS AI Space problem without private data.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach tokens, databases, private media, logs containing paths, or active share links.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: v1.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Hardware profile
+      options: [cpu, intel, intel-openvino, amd-vulkan, amd-rocm, nvidia, advanced NAS stack]
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include reproduction steps, expected behavior and sanitized logs.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste `scripts/nas-ai doctor` output after removing private paths.
+      render: text

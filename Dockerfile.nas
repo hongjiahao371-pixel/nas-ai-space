@@ -12,8 +12,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/nas-ai-space
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -r requirements.txt
+COPY requirements.txt requirements.lock.txt ./
+RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -r requirements.lock.txt
 
 COPY app ./app
 COPY models ./models

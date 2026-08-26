@@ -96,7 +96,7 @@ v1.3 上线报告还应记录至少一条真实生产力闭环：把文件加入
 依赖漏洞检查：
 
 ```bash
-uvx pip-audit -r requirements.txt --progress-spinner off
+uvx pip-audit -r requirements.lock.txt --progress-spinner off
 ```
 
 ## 回滚

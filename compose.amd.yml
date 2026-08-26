@@ -6,7 +6,7 @@ services:
     environment:
       NAS_AI_INFERENCE_BACKEND: rocm
   ollama:
-    image: ollama/ollama:rocm
+    image: ollama/ollama:0.30.8-rocm
     devices:
       - /dev/dri:/dev/dri
       - /dev/kfd:/dev/kfd

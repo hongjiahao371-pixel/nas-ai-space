@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+ENV_FILE="$PROJECT_DIR/.env"
+PROFILE_FILE="$PROJECT_DIR/.nas-ai-profile"
+DOCKER_CMD=(docker)
+DOCKER_ACCESS_READY=0
+
+say() { printf '%s\n' "$*"; }
+warn() { printf '警告：%s\n' "$*" >&2; }
+die() { printf '错误：%s\n' "$*" >&2; exit 1; }
+has() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_docker_access() {
+  [ "$DOCKER_ACCESS_READY" = 1 ] && return 0
+  has docker || return 1
+  if docker info >/dev/null 2>&1; then
+    DOCKER_CMD=(docker)
+    DOCKER_ACCESS_READY=1
+    return 0
+  fi
+  has sudo || return 1
+  if sudo -n docker info >/dev/null 2>&1; then
+    DOCKER_CMD=(sudo docker)
+    DOCKER_ACCESS_READY=1
+    return 0
+  fi
+  if [ -t 0 ]; then
+    say "Docker 需要管理员权限，请按提示输入当前 NAS 账号的 sudo 密码。"
+    if sudo docker info >/dev/null; then
+      DOCKER_CMD=(sudo docker)
+      DOCKER_ACCESS_READY=1
+      return 0
+    fi
+  fi
+  return 1
+}
+
+usage() {
+  cat <<'EOF'
+NAS AI Space 管理工具
+
+用法：scripts/nas-ai <命令> [选项]
+
+命令：
+  setup      交互式生成配置；支持 --non-interactive 用于自动化
+  doctor     检查 Docker、目录、端口、内存、硬件与 Compose 配置
+  start      构建并启动服务
+  stop       停止服务，保留数据
+  restart    重启服务
+  status     显示容器和应用健康状态
+  logs       持续查看日志，可追加服务名
+  backup     创建 SQLite 在线备份
+  update     备份、拉取当前分支并重建服务
+  config     输出最终 Compose 配置
+  help       显示帮助
+
+setup 选项：
+  --profile cpu|intel|amd-vulkan|amd-rocm|nvidia|intel-openvino
+  --preset lite|standard|full
+  --library PATH  --uploads PATH  --recycle PATH  --port PORT
+  --non-interactive  --force
+
+示例：
+  scripts/nas-ai setup
+  scripts/nas-ai setup --non-interactive --profile cpu --library /srv/photos
+  scripts/nas-ai start
+  scripts/nas-ai doctor
+EOF
+}
+
+total_memory_mb() {
+  if [ -r /proc/meminfo ]; then
+    awk '/MemTotal:/ { print int($2 / 1024); exit }' /proc/meminfo
+  elif has sysctl; then
+    local bytes
+    bytes=$(sysctl -n hw.memsize 2>/dev/null || printf '0')
+    printf '%s\n' "$((bytes / 1024 / 1024))"
+  else
+    printf '0\n'
+  fi
+}
+
+detect_profile() {
+  if has nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
+    printf 'nvidia\n'
+    return
+  fi
+  if [ -d /dev/dri ]; then
+    local gpu_info=""
+    has lspci && gpu_info=$(lspci 2>/dev/null | grep -Ei 'VGA|Display|3D' || true)
+    if printf '%s' "$gpu_info" | grep -Eqi 'AMD|ATI'; then
+      printf 'amd-vulkan\n'
+      return
+    fi
+    if printf '%s' "$gpu_info" | grep -qi 'Intel'; then
+      printf 'intel\n'
+      return
+    fi
+    if grep -qi 'AuthenticAMD' /proc/cpuinfo 2>/dev/null; then
+      printf 'amd-vulkan\n'
+      return
+    fi
+    if grep -qi 'GenuineIntel' /proc/cpuinfo 2>/dev/null; then
+      printf 'intel\n'
+      return
+    fi
+  fi
+  printf 'cpu\n'
+}
+
+detect_preset() {
+  local memory
+  memory=$(total_memory_mb)
+  if [ "$memory" -gt 0 ] && [ "$memory" -lt 10240 ]; then
+    printf 'lite\n'
+  elif [ "$memory" -ge 24576 ]; then
+    printf 'full\n'
+  else
+    printf 'standard\n'
+  fi
+}
+
+profile_files() {
+  local profile=${1:-cpu}
+  case "$profile" in
+    cpu) printf '%s\n' docker-compose.yml ;;
+    intel) printf '%s\n' docker-compose.yml compose.intel.yml ;;
+    amd-vulkan) printf '%s\n' docker-compose.yml compose.amd-vulkan.yml ;;
+    amd-rocm) printf '%s\n' docker-compose.yml compose.amd.yml ;;
+    nvidia) printf '%s\n' docker-compose.yml compose.nvidia.yml ;;
+    intel-openvino) printf '%s\n' docker-compose.yml compose.intel-openvino.yml ;;
+    *) die "未知硬件方案：$profile" ;;
+  esac
+}
+
+read_profile() {
+  if [ -s "$PROFILE_FILE" ]; then
+    tr -d '[:space:]' < "$PROFILE_FILE"
+  else
+    detect_profile
+  fi
+}
+
+compose() {
+  ensure_docker_access || die "Docker 服务未运行，或当前用户没有 Docker/sudo 权限"
+  local profile
+  profile=$(read_profile)
+  local args=(compose)
+  [ -f "$ENV_FILE" ] && args+=(--env-file "$ENV_FILE")
+  local file
+  while IFS= read -r file; do
+    args+=(-f "$PROJECT_DIR/$file")
+  done < <(profile_files "$profile")
+  "${DOCKER_CMD[@]}" "${args[@]}" "$@"
+}
+
+env_value() {
+  local key=$1
+  [ -f "$ENV_FILE" ] || return 0
+  awk -F= -v key="$key" '
+    $1 == key {
+      value = substr($0, index($0, "=") + 1)
+      if ((substr(value,1,1) == "\"" && substr(value,length(value),1) == "\"") ||
+          (substr(value,1,1) == "\047" && substr(value,length(value),1) == "\047")) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      print value
+      exit
+    }
+  ' "$ENV_FILE"
+}
+
+env_quote() {
+  case "$1" in
+    *$'\n'*|*$'\r'*) die "配置值不能包含换行" ;;
+  esac
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//\$/\$\$}
+  printf '"%s"' "$value"
+}
+
+random_token() {
+  if has openssl; then
+    openssl rand -hex 32
+  elif has python3; then
+    python3 -c 'import secrets; print(secrets.token_hex(32))'
+  else
+    die "需要 openssl 或 python3 来生成安全 Token"
+  fi
+}
+
+prompt_value() {
+  local label=$1 default=$2 result
+  if [ "${NON_INTERACTIVE:-0}" = 1 ]; then
+    printf '%s\n' "$default"
+    return
+  fi
+  read -r -p "$label [$default]：" result
+  printf '%s\n' "${result:-$default}"
+}
+
+validate_choice() {
+  local value=$1 allowed=$2 label=$3
+  case " $allowed " in
+    *" $value "*) ;;
+    *) die "$label 无效：$value" ;;
+  esac
+}
+
+setup_command() {
+  local profile="" preset="" library="" uploads="" recycle="" port="8766" force=0
+  NON_INTERACTIVE=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --profile) [ "$#" -ge 2 ] || die "--profile 缺少值"; profile=$2; shift 2 ;;
+      --preset) [ "$#" -ge 2 ] || die "--preset 缺少值"; preset=$2; shift 2 ;;
+      --library) [ "$#" -ge 2 ] || die "--library 缺少值"; library=$2; shift 2 ;;
+      --uploads) [ "$#" -ge 2 ] || die "--uploads 缺少值"; uploads=$2; shift 2 ;;
+      --recycle) [ "$#" -ge 2 ] || die "--recycle 缺少值"; recycle=$2; shift 2 ;;
+      --port) [ "$#" -ge 2 ] || die "--port 缺少值"; port=$2; shift 2 ;;
+      --non-interactive) NON_INTERACTIVE=1; shift ;;
+      --force) force=1; shift ;;
+      *) die "setup 不支持选项：$1" ;;
+    esac
+  done
+
+  [ ! -e "$ENV_FILE" ] || [ "$force" = 1 ] || die ".env 已存在；如需覆盖请使用 --force"
+  profile=${profile:-$(detect_profile)}
+  preset=${preset:-$(detect_preset)}
+  profile=$(prompt_value "硬件方案（cpu/intel/amd-vulkan/amd-rocm/nvidia/intel-openvino）" "$profile")
+  preset=$(prompt_value "资源预设（lite/standard/full）" "$preset")
+  validate_choice "$profile" "cpu intel amd-vulkan amd-rocm nvidia intel-openvino" "硬件方案"
+  validate_choice "$preset" "lite standard full" "资源预设"
+
+  library=${library:-$(prompt_value "媒体目录（只读）" "$PROJECT_DIR/library")}
+  uploads=${uploads:-$(prompt_value "上传与 AI 成果目录（可写）" "$PROJECT_DIR/uploads")}
+  recycle=${recycle:-$(prompt_value "回收站目录（可写）" "$PROJECT_DIR/recycle")}
+  port=$(prompt_value "网页端口" "$port")
+  case "$port" in *[!0-9]*|'') die "端口必须是数字" ;; esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "端口必须在 1-65535 之间"
+
+  mkdir -p "$library" "$uploads" "$recycle" "$PROJECT_DIR/data"
+  library=$(cd "$library" && pwd)
+  uploads=$(cd "$uploads" && pwd)
+  recycle=$(cd "$recycle" && pwd)
+  [ "$library" != "$uploads" ] || die "媒体目录和上传目录不能相同"
+  [ "$library" != "$recycle" ] || die "媒体目录和回收目录不能相同"
+
+  local workers batch min_memory face_workers
+  case "$preset" in
+    lite) workers=1; batch=50; min_memory=768; face_workers=1 ;;
+    standard) workers=2; batch=100; min_memory=1024; face_workers=2 ;;
+    full) workers=4; batch=200; min_memory=1536; face_workers=4 ;;
+  esac
+
+  local token
+  token=$(random_token)
+  umask 077
+  {
+    printf 'TZ=Asia/Shanghai\n'
+    printf 'NAS_AI_PORT=%s\n' "$port"
+    printf 'NAS_LIBRARY_PATH=%s\n' "$(env_quote "$library")"
+    printf 'NAS_UPLOAD_PATH=%s\n' "$(env_quote "$uploads")"
+    printf 'NAS_RECYCLE_PATH=%s\n' "$(env_quote "$recycle")"
+    printf 'NAS_AI_API_TOKEN=%s\n' "$token"
+    printf 'NAS_AI_ALLOW_QUERY_TOKEN=false\n'
+    printf 'NAS_AI_TASK_WORKERS=%s\n' "$workers"
+    printf 'NAS_AI_INDEX_WORKERS=%s\n' "$workers"
+    printf 'NAS_AI_INDEX_BATCH_SIZE=%s\n' "$batch"
+    printf 'NAS_AI_MIN_AVAILABLE_MEMORY_MB=%s\n' "$min_memory"
+    printf 'NAS_AI_MIN_FREE_SWAP_MB=512\n'
+    printf 'NAS_AI_FACE_WORKERS=%s\n' "$face_workers"
+    printf 'NAS_AI_AUTO_INDEX_ENABLED=false\n'
+    printf 'NAS_AI_AUTOMATIC_BACKUP_ENABLED=true\n'
+    printf 'NAS_AI_WATCH_ENABLED=true\n'
+  } > "$ENV_FILE"
+  printf '%s\n' "$profile" > "$PROFILE_FILE"
+  chmod 600 "$ENV_FILE" "$PROFILE_FILE"
+
+  say "配置已生成：$ENV_FILE"
+  say "硬件方案：${profile}；资源预设：${preset}"
+  say "下一步：scripts/nas-ai doctor && scripts/nas-ai start"
+}
+
+doctor_command() {
+  local failures=0 warnings=0 profile memory port path token architecture
+  say "NAS AI Space 环境检查"
+  architecture=$(uname -m)
+  case "$architecture" in
+    x86_64|amd64) say "✓ 处理器架构：$architecture" ;;
+    *) warn "处理器架构 $architecture 尚未完成公开版验收，建议先使用测试资料"; warnings=$((warnings + 1)) ;;
+  esac
+  if ! has docker; then
+    warn "未找到 Docker"; failures=$((failures + 1))
+  elif ! ensure_docker_access; then
+    warn "Docker 服务未运行，或当前用户无访问权限"; failures=$((failures + 1))
+  else
+    if [ "${DOCKER_CMD[0]}" = sudo ]; then
+      say "✓ Docker 服务可用（通过 sudo）"
+    else
+      say "✓ Docker 服务可用"
+    fi
+    if "${DOCKER_CMD[@]}" compose version >/dev/null 2>&1; then
+      say "✓ Docker Compose 可用"
+    else
+      warn "缺少 Docker Compose v2"; failures=$((failures + 1))
+    fi
+  fi
+
+  if has curl; then
+    say "✓ curl 可用"
+  else
+    warn "缺少 curl，无法执行健康检查、备份和安全更新"; failures=$((failures + 1))
+  fi
+
+  if [ ! -f "$ENV_FILE" ]; then
+    warn "尚未生成 .env，请先运行 scripts/nas-ai setup"; failures=$((failures + 1))
+  else
+    [ "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || printf '600')" = 600 ] || {
+      warn ".env 权限不是 600，建议执行 chmod 600 .env"; warnings=$((warnings + 1));
+    }
+    token=$(env_value NAS_AI_API_TOKEN)
+    if [ ${#token} -lt 32 ] || [ "$token" = replace-with-a-long-random-token ]; then
+      warn "NAS_AI_API_TOKEN 为空、仍是示例值或长度不足"; failures=$((failures + 1))
+    else
+      say "✓ API Token 已配置"
+    fi
+    for path in NAS_LIBRARY_PATH NAS_UPLOAD_PATH NAS_RECYCLE_PATH; do
+      local value
+      value=$(env_value "$path")
+      if [ -z "$value" ] || [ ! -d "$value" ]; then
+        warn "$path 指向的目录不存在：${value:-<空>}"; failures=$((failures + 1))
+      elif [ "$path" = NAS_LIBRARY_PATH ] && [ ! -r "$value" ]; then
+        warn "$path 不可读：$value"; failures=$((failures + 1))
+      elif [ "$path" != NAS_LIBRARY_PATH ] && [ ! -w "$value" ]; then
+        warn "$path 不可写：$value"; failures=$((failures + 1))
+      else
+        say "✓ ${path}：$value"
+      fi
+    done
+  fi
+
+  profile=$(read_profile)
+  validate_choice "$profile" "cpu intel amd-vulkan amd-rocm nvidia intel-openvino" "硬件方案"
+  say "✓ 硬件方案：$profile"
+  case "$profile" in
+    intel|amd-vulkan|intel-openvino)
+      [ -d /dev/dri ] || { warn "$profile 方案需要 /dev/dri"; failures=$((failures + 1)); } ;;
+    amd-rocm)
+      [ -e /dev/kfd ] || { warn "amd-rocm 方案需要 /dev/kfd"; failures=$((failures + 1)); } ;;
+    nvidia)
+      has nvidia-smi && nvidia-smi -L >/dev/null 2>&1 || {
+        warn "nvidia 方案未检测到可用的 nvidia-smi"; failures=$((failures + 1));
+      } ;;
+  esac
+
+  memory=$(total_memory_mb)
+  if [ "$memory" -gt 0 ]; then
+    say "✓ 系统内存：${memory} MB"
+    if [ "$memory" -lt 7168 ]; then
+      warn "内存低于 7 GB，完整视觉索引可能触发 Swap 或 OOM"; warnings=$((warnings + 1))
+    fi
+  fi
+
+  if [ -f "$ENV_FILE" ]; then
+    port=$(env_value NAS_AI_PORT); port=${port:-8766}
+    if has lsof && lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+      if ! curl -fsS "http://127.0.0.1:$port/api/health" >/dev/null 2>&1; then
+        warn "端口 $port 已被其他程序占用"; failures=$((failures + 1))
+      else
+        say "✓ 端口 $port 已由 NAS AI Space 使用"
+      fi
+    else
+      say "✓ 端口 $port 可用或服务已经由 Compose 管理"
+    fi
+  fi
+
+  if [ "$DOCKER_ACCESS_READY" = 1 ] && [ -f "$ENV_FILE" ]; then
+    if compose config --quiet >/dev/null; then
+      say "✓ Compose 配置有效"
+    else
+      warn "Compose 配置校验失败"; failures=$((failures + 1))
+    fi
+  fi
+
+  say "检查完成：$failures 个错误，$warnings 个提醒"
+  [ "$failures" -eq 0 ]
+}
+
+start_command() {
+  doctor_command
+  say "正在构建并启动服务。首次运行会下载约 2.5 GB 模型，耗时取决于网络。"
+  if [ "${NAS_AI_BUILD_LOCAL:-false}" != true ] && compose pull app; then
+    say "✓ 已取得预构建应用镜像"
+    compose up -d --no-build
+  else
+    warn "预构建镜像不可用或已要求本地构建，改为在当前设备构建应用"
+    compose up -d --build
+  fi
+  local port deadline response
+  port=$(env_value NAS_AI_PORT); port=${port:-8766}
+  deadline=$((SECONDS + 300))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if response=$(curl -fsS "http://127.0.0.1:$port/api/health" 2>/dev/null); then
+      say "✓ NAS AI Space 已启动：http://127.0.0.1:$port"
+      say "首次打开页面后，请在初始化向导中创建管理员账号。"
+      return 0
+    fi
+    sleep 3
+  done
+  compose ps
+  die "等待应用健康检查超时，请运行 scripts/nas-ai logs 查看原因"
+}
+
+status_command() {
+  compose ps
+  local port
+  port=$(env_value NAS_AI_PORT); port=${port:-8766}
+  if has curl; then
+    say ""
+    curl -fsS "http://127.0.0.1:$port/api/health" 2>/dev/null || warn "应用健康接口暂不可达"
+    say ""
+  fi
+}
+
+backup_command() {
+  local port token
+  port=$(env_value NAS_AI_PORT); port=${port:-8766}
+  token=$(env_value NAS_AI_API_TOKEN)
+  [ -n "$token" ] || die "NAS_AI_API_TOKEN 未配置"
+  has curl || die "backup 命令需要 curl"
+  curl --fail --silent --show-error \
+    -X POST -H "Authorization: Bearer $token" \
+    "http://127.0.0.1:$port/api/operations/backups"
+  say ""
+}
+
+update_command() {
+  has git || die "update 命令需要 git"
+  [ -d "$PROJECT_DIR/.git" ] || die "当前目录不是 Git 克隆，不能自动更新"
+  [ -z "$(git -C "$PROJECT_DIR" status --porcelain)" ] || die "工作区有未提交改动，请先处理后再更新"
+  say "先创建在线备份…"
+  backup_command
+  git -C "$PROJECT_DIR" pull --ff-only
+  start_command
+}
+
+command=${1:-help}
+[ "$#" -eq 0 ] || shift
+case "$command" in
+  setup) setup_command "$@" ;;
+  doctor) doctor_command ;;
+  start|up) start_command ;;
+  stop|down) compose down ;;
+  restart) compose restart ;;
+  status|ps) status_command ;;
+  logs) compose logs -f --tail=200 "$@" ;;
+  backup) backup_command ;;
+  update) update_command ;;
+  config) compose config ;;
+  help|-h|--help) usage ;;
+  *) usage; die "未知命令：$command" ;;
+esac

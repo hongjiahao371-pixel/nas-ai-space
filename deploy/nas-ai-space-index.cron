@@ -1,4 +1,5 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-* * * * * root /usr/local/sbin/nas-ai-space-index-orchestrator >> /var/log/nas-ai-space-index.log 2>&1
+# Replace /path/to/nas-ai-space before installing this file.
+* * * * * root PROJECT_DIR=/path/to/nas-ai-space /usr/local/sbin/nas-ai-space-index-orchestrator >> /var/log/nas-ai-space-index.log 2>&1

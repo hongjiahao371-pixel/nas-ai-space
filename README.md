@@ -2,6 +2,41 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
+## 五分钟开始
+
+需要一台安装了 Docker Engine 与 Docker Compose v2 的 x86-64 NAS 或
+Linux 主机。建议至少 8 GB 内存；12–16 GB 的使用体验更完整。首次启动
+需要联网下载约 2.5 GB 的模型，之后的资料扫描、索引和问答默认都在本机
+完成。
+
+```bash
+git clone https://github.com/hongjiahao371-pixel/nas-ai-space.git
+cd nas-ai-space
+scripts/nas-ai setup
+scripts/nas-ai doctor
+scripts/nas-ai start
+```
+
+安装向导会自动检测 CPU/GPU 和内存，询问媒体、上传、回收目录，生成随机
+系统 Token，并保存合适的 Compose 方案。启动完成后访问
+`http://NAS-IP:8766`，按照页面向导设置首位管理员。
+如果 NAS 只允许管理员操作 Docker，脚本会自动切换到 `sudo docker` 并在
+需要时请求当前 NAS 账号的 sudo 密码。
+
+没有 Git 的 NAS 可以下载 Release 源码包，解压后从 `scripts/nas-ai setup`
+开始。遇到问题先执行 `scripts/nas-ai doctor`；它会检查 Docker、目录权限、
+端口、内存、硬件设备和最终 Compose 配置。
+
+> 当前默认部署面向可信局域网。远程访问请使用 NAS 反向代理或 VPN，并启用
+> HTTPS；不要把 8766 端口直接映射到公网。
+
+## v1.4 开源首发
+
+- 引导式 `setup`、部署前 `doctor` 和统一的启动、日志、备份、安全更新命令
+- 根据设备自动选择纯 CPU、Intel、AMD 或 NVIDIA 方案，并提供轻量、标准、完整资源预设
+- 首位管理员登录后的四步使用清单：连接目录、快速扫描、AI 索引、第一次搜索
+- Apache-2.0 项目许可证、第三方授权声明、安全策略、贡献指南、变更记录与自动化发布检查
+
 ## v1.3 生产力主线
 
 - 统一 AI 工作台：从“组织资料 → 限定范围问答 → 预演任务 → 生成成果”完成一条工作闭环
@@ -102,86 +137,49 @@
 
 媒体目录的日常扫描和预览始终走只读挂载。精简 NAS Compose 额外提供隔离的 `/maintenance/*` 可写维护挂载，只供管理员执行经过重复副本校验的回收/恢复操作；用户上传写入独立的 `/uploads` 卷。项目入库箱位于 `NAS_UPLOAD_PATH/inbox/project-ID`，应复用 NAS 系统自带的文件服务，不需要让应用额外开放 FTP 端口。
 
-## 部署
+## 安装与管理
 
-需要 Docker Engine 与 Docker Compose。先准备配置：
+### 选择硬件方案
 
-```bash
-cp .env.example .env
-openssl rand -hex 32
-```
+一般用户不需要手动选择，`scripts/nas-ai setup` 会自动检测。需要覆盖时使用
+`--profile`：
 
-把生成值填入 `.env` 的 `NAS_AI_API_TOKEN`，把 `NAS_LIBRARY_PATH` 改成 NAS 上真实媒体根目录，并用 `NAS_UPLOAD_PATH`、`NAS_RECYCLE_PATH` 分别指定独立上传目录和回收目录。
+| 设备 | 推荐方案 | 说明 |
+|---|---|---|
+| 无可用 GPU | `cpu` | 兼容性最高，AI 索引较慢 |
+| Intel 核显 | `intel` | 默认推荐，Ollama Vulkan + QSV/VA-API |
+| Intel 16 GB 以上 | `intel-openvino` | 性能优先，需要下载更大的 OpenVINO 模型 |
+| AMD 核显或独显 | `amd-vulkan` | 自动检测的安全默认值，兼容性取决于宿主驱动 |
+| ROCm 支持列表内 AMD | `amd-rocm` | 确认兼容后用 `--profile amd-rocm` 手动启用 |
+| NVIDIA | `nvidia` | 需要 NVIDIA Container Toolkit |
 
-首次打开页面时，系统会进入不可跳过的初始化向导。用户自行设置首位管理员的用户名、显示名称和密码，完成后直接登录；密码只以安全哈希保存在 NAS，本地账号初始化完成后不再显示注册入口。`NAS_AI_API_TOKEN` 仅用于系统集成和紧急运维，不需要交给日常网页用户。
+资源预设会随内存自动选择：低于 10 GB 使用 `lite`，10–24 GB 使用
+`standard`，24 GB 以上使用 `full`。这些预设只控制任务并发与批量大小，
+不会降低原始资料质量。
 
-### 纯 CPU
-
-```bash
-docker compose up -d --build
-```
-
-### Intel 核显
-
-兼容性优先方案使用 QSV/VA-API 处理媒体、Ollama Vulkan 运行模型：
-
-```bash
-docker compose -f docker-compose.yml -f compose.intel.yml up -d --build
-```
-
-性能优先方案使用 Intel OpenVINO Model Server 2026.2.1，Embedding 和 VLM 都在核显上运行：
+### 常用命令
 
 ```bash
-docker compose -f docker-compose.yml -f compose.intel-openvino.yml up -d --build
+scripts/nas-ai status          # 容器与应用健康状态
+scripts/nas-ai logs app        # 查看应用日志
+scripts/nas-ai backup          # SQLite 在线备份
+scripts/nas-ai update          # 先备份，再安全拉取和重建
+scripts/nas-ai stop            # 停止服务但保留数据
 ```
 
-OpenVINO 方案默认使用约 1.2 GB 的 Qwen3 Embedding 0.6B 与 Qwen3-VL 8B INT4，建议至少 16 GB 内存。内存较小的 Intel NAS 先使用 Vulkan 方案。
+安装脚本把选中的硬件方案保存到 `.nas-ai-profile`，配置和随机 Token 保存到
+权限为 `0600` 的 `.env`。这两个文件都不会被 Git 提交。
 
-已有本地 `faster-whisper` 基础镜像时，可以使用不依赖大型 Ollama 镜像的精简方案：
+### 高级手动部署
 
-```bash
-docker compose --env-file .env -f compose.nas-intel.yml up -d --build
-```
+熟悉 Compose 的用户可以复制 `.env.example` 并手动组合基础栈与硬件 overlay。
+默认 `docker-compose.yml` 是可独立构建的公开安装栈；
+`compose.nas-intel.yml` 与 `compose.nas-nvidia.yml` 是面向已有本地 GGUF、
+llama.cpp/Qdrant 运行文件和自定义基础镜像的高级精简栈，不能直接用于全新环境。
 
-该方案由 llama.cpp Vulkan、Qwen3-VL 2B Q8、Qwen3 Embedding 0.6B Q8、独立 Qwen3 0.6B Q8 精准重排、Qdrant 原生二进制和复用的 Whisper 服务组成。运行文件分别放在 `runtime/llama`、`runtime/qdrant` 和 `models`，模型服务只在 Compose 内网开放。`NAS_UID`、`NAS_GID`、`NAS_VIDEO_GID` 与 `NAS_RENDER_GID` 用于保持 NAS 数据权限和核显设备权限。多块 Vulkan 显卡并存时，用 `GGML_VK_VISIBLE_DEVICES` 选择模型使用的设备；媒体解码仍通过 `/dev/dri` 自动选择并在失败时回退 CPU。
-
-内存小于 12 GB 的 NAS 可将 `NAS_AI_VISION_GGUF` 指向同模型的 `Q4_K_M` 文件，以降低常驻内存和 Swap 压力；模型别名及索引格式不变。仍有内存压力时，可将 `NAS_AI_VISION_CTX_SIZE` 调为 `4096`，并将 `NAS_AI_VISION_BATCH_SIZE` / `NAS_AI_VISION_UBATCH_SIZE` 调为 `64` / `32`；Embedding 可设 `NAS_AI_EMBEDDING_PARALLEL=1`，并将 batch/ubatch 同步调为 `32` / `32`。只有 8 GB 内存但 CPU 较强的设备，还可将 `NAS_AI_EMBEDDING_GPU_LAYERS=0`，让独显专注视觉推理并减少第二个 CUDA 上下文的主机内存占用。这些设置会略微降低单次向量生成速度，但更适合长时间索引。
-
-### AMD 核显或独显
-
-ROCm 支持列表内的 GPU：
-
-```bash
-docker compose -f docker-compose.yml -f compose.amd.yml up -d --build
-```
-
-不在 ROCm 支持列表内，但宿主机 Vulkan 驱动可用：
-
-```bash
-docker compose -f docker-compose.yml -f compose.amd-vulkan.yml up -d --build
-```
-
-只有确认 GPU 架构需要兼容映射时，才设置 `.env` 中的 `HSA_OVERRIDE_GFX_VERSION`。
-
-### NVIDIA 或雷电外接 NVIDIA
-
-宿主机需要已安装 NVIDIA 驱动与 NVIDIA Container Toolkit，并且 `docker run --gpus all ... nvidia-smi` 能看到显卡：
-
-```bash
-docker compose -f docker-compose.yml -f compose.nvidia.yml up -d --build
-```
-
-雷电外接显卡对容器而言仍是普通 NVIDIA GPU；关键是宿主机已识别设备且容器运行时完成 GPU 透传。
-
-已有 NAS 精简栈、本地 GGUF 模型和 CUDA 版 llama.cpp 运行时时，可叠加 NVIDIA 配置，让视觉、向量、语音和视频处理使用独显：
-
-```bash
-docker compose --env-file .env -f compose.nas-intel.yml -f compose.nas-nvidia.yml up -d
-```
-
-该组合把 `NAS_LIBRARY_PATH` 与 `NAS_VIDEO_PATH` 分别只读挂载到 `/library`、`/video-library`，可独立创建照片库和视频库。启动后应同时检查页面算力计划、`nvidia-smi` 显存占用和真实视频的 CUDA 解码；仅检测到显卡型号不算加速验收通过。
-
-启动后访问 `http://NAS-IP:8766`。首次启动会先下载约 2.5 GB 的 Ollama 模型，应用容器会等模型准备完成再开放页面；Whisper 模型在首次转写时下载。
+首次打开页面时，系统会进入不可跳过的管理员初始化向导。网页账号密码只以
+安全哈希保存在 NAS；`NAS_AI_API_TOKEN` 仅用于系统集成和紧急运维，不需要
+交给日常网页用户。
 
 ## 为什么适合 NAS
 
@@ -193,7 +191,7 @@ docker compose --env-file .env -f compose.nas-intel.yml -f compose.nas-nvidia.ym
 - SQLite 使用 WAL、30 秒 busy timeout、批量写入与 FTS5；索引完成度以真实内容块/向量覆盖计算，不再只看任务状态。
 - 默认每批处理 200 个待索引文件；8 GB NAS 建议 `NAS_AI_INDEX_WORKERS=1`，并设置可用内存与剩余 Swap 双重保护线，避免并行长任务耗尽系统余量。
 - 夜间自动索引策略可在任务中心保存到 SQLite；到达时间窗口且没有其他活动任务时，资源充足会提交正常批次，内存处于后台最低水位与正常保护线之间时会提交更小的受限探测批次，低于最低水位或 Swap 不足才等待。
-- 长时间连续索引时，可将 `scripts/index-orchestrator.sh` 以 root 所有、`0750` 权限安装到 `/usr/local/sbin/nas-ai-space-index-orchestrator`，再安装 `deploy/nas-ai-space-index.cron`。它每分钟检查任务与真实资源水位，在任务批次之间按需回收模型服务，再依次提交修复文件、待索引文件和旧版图片描述升级。临时失败按指数退避，重复失败达到上限后转为人工检查，不会无限提交空任务。
+- 长时间连续索引时，可将 `scripts/index-orchestrator.sh` 以 root 所有、`0750` 权限安装到 `/usr/local/sbin/nas-ai-space-index-orchestrator`，再按实际项目目录修改并安装 `deploy/nas-ai-space-index.cron`。它每分钟检查任务与真实资源水位，在任务批次之间按需回收模型服务，再依次提交修复文件、待索引文件和旧版图片描述升级。临时失败按指数退避，重复失败达到上限后转为人工检查，不会无限提交空任务。
 - NAS 精简栈降低 llama.cpp 的 batch/ubatch 与 Embedding 上下文长度，并使用 Q8 KV cache；Whisper 长时间空闲后自动卸载，减少 8 GB 设备上的常驻内存与 Swap。
 - 向量默认存放在磁盘，Qdrant HNSW 只保留必要索引结构，降低常驻内存。
 - 文本解析、媒体解码、模型推理使用独立并发上限；显存较小的设备不会盲目开多路模型任务。
@@ -226,10 +224,17 @@ docker compose --env-file .env -f compose.nas-intel.yml -f compose.nas-nvidia.ym
 ```bash
 python3 -m unittest discover -s tests -v
 node --check app/static/app.js
-bash -n scripts/index-orchestrator.sh
-docker compose -f compose.nas-intel.yml -f compose.nas-nvidia.yml config
+bash -n scripts/nas-ai scripts/index-orchestrator.sh scripts/create-release-backup.sh
+docker compose config
 ```
 
 ## 当前边界
 
 当前版本已覆盖知识空间、范围化问答、受控文件 Agent、自动化、版本化成果，以及扫描、解析、检索、媒体理解、项目资产、版本审阅、外部分享、交付导出、多用户、审计、可恢复回收站和 SQLite/Qdrant 双层备份。Agent 不执行 Shell、脚本或任意插件，也不会直接修改只读原始媒体；新增动作必须同时具备参数校验、权限检查、审计和撤销策略。3D 浏览器预览当前支持 80 MB 以内的 OBJ、ASCII PLY 与 GLB（.gltf 仅支持自包含内嵌资源，Draco 压缩模型暂不支持）；大型 DCC 工程和专有格式仍应在原生制作软件中打开。完整灾备仍应同时使用 NAS 自身的卷快照或备份套件保护 `data`、`uploads`、`recycle` 和模型目录。
+
+## 开源与参与
+
+项目采用 [Apache License 2.0](LICENSE)。随仓库分发及运行时下载组件的
+授权边界见 [第三方声明](THIRD_PARTY_NOTICES.md)。提交改进前请阅读
+[贡献指南](CONTRIBUTING.md)；安全问题请按 [安全策略](SECURITY.md) 私下报告，
+不要在公开 Issue 中提交 Token、数据库、媒体样本或可访问的分享链接。
