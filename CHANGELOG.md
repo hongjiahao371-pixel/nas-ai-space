@@ -3,6 +3,33 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
+## [1.4.1] - 2026-08-27
+
+### Added
+
+- Preflight checks for Docker-storage headroom, GHCR, Docker Hub, the Ollama
+  registry and the exact prebuilt application manifest.
+- `scripts/nas-ai restore` for verified SQLite rollback with an automatic
+  pre-restore backup and post-restore Qdrant consistency repair.
+- A recoverable `scripts/nas-ai uninstall` command that removes containers and
+  the Compose network while preserving configuration, files, databases and
+  model/vector volumes.
+- A versioned release archive and `SHA256SUMS` file attached to every GitHub
+  Release.
+
+### Changed
+
+- The quick start now distinguishes five-minute configuration from the longer
+  first image/model download, and puts the x86-64 support boundary before the
+  install commands.
+- Setup rejects media, upload and recycle roots that are equal or nested, which
+  prevents an accidental writable overlap with the source library.
+
+### Fixed
+
+- New-user diagnostics now surface low disk space and blocked registries before
+  a long first-start attempt.
+
 ## [1.4.0] - 2026-08-27
 
 ### Added

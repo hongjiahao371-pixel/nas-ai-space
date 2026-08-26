@@ -2,13 +2,19 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
-## 五分钟开始
+## 适用范围
 
-需要一台安装了 Docker Engine 与 Docker Compose v2 的 x86-64 NAS 或
-Linux 主机。建议至少 8 GB 内存；12–16 GB 的使用体验更完整。首次启动
-会联网下载固定版本的容器镜像和约 2.5 GB 模型，请为 Docker 存储预留至少
-15 GB 空间；之后的资料扫描、索引和问答默认都在本机完成。下载中断时直接
-重新运行 `scripts/nas-ai start`，已有镜像分层和模型文件会继续复用或续传。
+公开安装版当前面向安装了 Docker Engine 与 Docker Compose v2 的 **x86-64
+NAS 或 Linux 主机**。建议至少 8 GB 内存；12–16 GB 的使用体验更完整。
+ARM NAS 尚未完成发布验收，不建议直接放入正式资料库。默认只适合可信局域网，
+公网访问需要额外配置 HTTPS 反向代理或 VPN。
+
+## 五分钟完成配置
+
+下面四条命令通常可在五分钟内完成配置。首次启动还会联网下载固定版本的容器
+镜像和约 2.5 GB 模型，常见网络下可能再需要 10–60 分钟；请为 Docker 存储
+预留至少 15 GB 空间。下载中断时重新运行 `scripts/nas-ai start`，已有镜像
+分层和模型文件会继续复用或续传。
 
 ```bash
 git clone https://github.com/hongjiahao371-pixel/nas-ai-space.git
@@ -18,23 +24,38 @@ scripts/nas-ai doctor
 scripts/nas-ai start
 ```
 
-安装向导会自动检测 CPU/GPU 和内存，询问媒体、上传、回收目录，生成随机
+安装向导会自动检测 CPU/GPU 和内存，询问媒体、上传、回收三个相互独立的
+目录，生成随机
 系统 Token，记录当前 NAS 账号的 UID/GID，并保存合适的 Compose 方案，
 因此应用无需 root 权限也能写入自己的数据目录。启动完成后访问
 `http://NAS-IP:8766`，按照页面向导设置首位管理员。
 如果 NAS 只允许管理员操作 Docker，脚本会自动切换到 `sudo docker` 并在
 需要时请求当前 NAS 账号的 sudo 密码。
 
-没有 Git 的 NAS 可以下载 Release 源码包，解压后从 `scripts/nas-ai setup`
-开始。遇到问题先执行 `scripts/nas-ai doctor`；它会检查 Docker、目录权限、
-端口、内存、硬件设备和最终 Compose 配置。
+没有 Git 的 NAS 可以下载 Release 页面中的版本化 `tar.gz` 和
+`SHA256SUMS`，校验后解压：
+
+```bash
+VERSION=v1.4.1
+curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/nas-ai-space-${VERSION}.tar.gz"
+curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/SHA256SUMS"
+sha256sum -c SHA256SUMS
+tar -xzf "nas-ai-space-${VERSION}.tar.gz"
+cd "nas-ai-space-${VERSION}"
+scripts/nas-ai setup
+```
+
+遇到问题先执行 `scripts/nas-ai doctor`；它会检查 Docker、目录权限、端口、
+内存、Docker 存储空间、镜像/模型仓库、预构建镜像、硬件设备和最终 Compose
+配置。部分 NAS 的校验命令名是 `shasum -a 256`，可用
+`shasum -a 256 -c SHA256SUMS` 替代上面的 `sha256sum`。
 
 > 当前默认部署面向可信局域网。远程访问请使用 NAS 反向代理或 VPN，并启用
 > HTTPS；不要把 8766 端口直接映射到公网。
 
 ## v1.4 开源首发
 
-- 引导式 `setup`、部署前 `doctor` 和统一的启动、日志、备份、安全更新命令
+- 引导式 `setup`、部署前 `doctor` 和统一的启动、日志、备份、恢复、安全更新与可恢复卸载命令
 - 根据设备自动选择纯 CPU、Intel、AMD 或 NVIDIA 方案，并提供轻量、标准、完整资源预设
 - 首位管理员登录后的四步使用清单：连接目录、快速扫描、AI 索引、第一次搜索
 - Apache-2.0 项目许可证、第三方授权声明、安全策略、贡献指南、变更记录与自动化发布检查
@@ -159,15 +180,26 @@ scripts/nas-ai start
 `standard`，24 GB 以上使用 `full`。这些预设只控制任务并发与批量大小，
 不会降低原始资料质量。
 
+发布验收状态：x86-64 CPU/Ollama 公共栈与 Intel NAS 栈已经在真实设备上跑通；
+Intel OpenVINO、AMD ROCm/Vulkan 和 NVIDIA 方案已通过 Compose 配置校验，
+但仍需使用者在对应真实 GPU 上验证驱动与加速。ARM 尚未进入正式支持范围。
+
 ### 常用命令
 
 ```bash
 scripts/nas-ai status          # 容器与应用健康状态
 scripts/nas-ai logs app        # 查看应用日志
 scripts/nas-ai backup          # SQLite 在线备份
+scripts/nas-ai restore 文件名  # 恢复 SQLite 并修复向量一致性
 scripts/nas-ai update          # 先备份，再安全拉取和重建
 scripts/nas-ai stop            # 停止服务但保留数据
+scripts/nas-ai uninstall       # 移除容器，保留全部数据与模型
 ```
+
+`restore` 只接受 `data/backups` 中由系统生成并通过完整性检查的 `.db` 文件。
+恢复前会再次备份当前数据库，恢复后自动提交 Qdrant 一致性修复。`uninstall`
+不会使用 `docker compose down -v`，以后重新执行 `start` 即可恢复服务；彻底
+清除数据应先按 [生产运行手册](docs/PRODUCTION.md) 完成备份，再逐项删除。
 
 安装脚本把选中的硬件方案保存到 `.nas-ai-profile`，配置和随机 Token 保存到
 权限为 `0600` 的 `.env`。这两个文件都不会被 Git 提交。

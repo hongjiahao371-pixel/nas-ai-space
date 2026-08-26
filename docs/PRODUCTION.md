@@ -76,6 +76,9 @@ NAS_AI_AUTOMATIC_BACKUP_RETENTION=7
 ## 备份与恢复
 
 - SQLite 自动备份默认每 24 小时运行并保留 7 份。
+- 新手恢复优先使用 `scripts/nas-ai restore <data/backups 中的文件名>`。命令会
+  先校验备份、再备份当前数据库，停止应用完成原子替换，重启后自动提交
+  SQLite/Qdrant 一致性修复；原始媒体、上传和模型不会被删除。
 - Qdrant 快照需要在运维页单独创建；恢复向量快照前应用会再备份 SQLite。
 - NAS 自身的卷快照或备份套件仍需覆盖 `data`、上传、回收、模型和运行文件。
 - 每季度至少做一次隔离恢复演练，验证 SQLite、Qdrant 和媒体挂载能组合恢复。
@@ -107,3 +110,13 @@ uvx pip-audit -r requirements.lock.txt --progress-spinner off
 4. 重建 `app` 并重新执行生产就绪与真实功能验收。
 
 回滚不能只恢复 SQLite 而保留不匹配的向量集合；两者的索引版本必须成对管理。
+若只使用 `scripts/nas-ai restore` 回退 SQLite，应等待命令提交的一致性修复任务
+完成，再检查 `/api/ready` 和索引一致性页面。
+
+## 安全卸载
+
+`scripts/nas-ai uninstall` 只执行可恢复卸载：移除应用容器和 Compose 网络，
+但保留 `.env`、`.nas-ai-profile`、绑定目录以及 Qdrant、Ollama、语音模型命名卷。
+重新运行 `scripts/nas-ai start` 即可恢复。彻底清除前必须先备份 SQLite、向量
+快照和上传/回收目录，再人工核对并删除对应绑定目录和命名卷；不要把通配符或
+未展开的环境变量交给递归删除命令。

@@ -4,7 +4,7 @@ services:
   app:
     build:
       context: .
-    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.4.0}
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.4.1}
     restart: unless-stopped
     ports:
       - "${NAS_AI_PORT:-8766}:8000"

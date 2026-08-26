@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag (for example v1.4.0)"
+        description: "Existing release tag (for example v1.4.1)"
         required: true
         type: string
 
@@ -55,4 +55,8 @@ jobs:
         run: |
           notes="docs/RELEASE-NOTES-${RELEASE_TAG}.md"
           test -f "$notes"
-          gh release create "$RELEASE_TAG" --verify-tag --title "NAS AI Space ${RELEASE_TAG}" --notes-file "$notes"
+          archive="nas-ai-space-${RELEASE_TAG}.tar.gz"
+          git archive --format=tar.gz --prefix="nas-ai-space-${RELEASE_TAG}/" --output="$archive" HEAD
+          sha256sum "$archive" > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --title "NAS AI Space ${RELEASE_TAG}" \
+            --notes-file "$notes" "$archive" SHA256SUMS

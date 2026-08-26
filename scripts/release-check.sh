@@ -53,6 +53,19 @@ version = match.group(1)
 changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
 if f"## [{version}]" not in changelog:
     raise SystemExit(f"CHANGELOG has no section for app version {version}")
+release_notes = Path(f"docs/RELEASE-NOTES-v{version}.md")
+if not release_notes.is_file():
+    raise SystemExit(f"Missing release notes: {release_notes}")
+compose_source = Path("docker-compose.yml").read_text(encoding="utf-8")
+compose_image = re.search(r"ghcr\.io/hongjiahao371-pixel/nas-ai-space:([0-9.]+)", compose_source)
+if not compose_image or compose_image.group(1) != version:
+    raise SystemExit("Default application image tag does not match app version")
+manager = Path("scripts/nas-ai").read_text(encoding="utf-8")
+if f"ghcr.io/hongjiahao371-pixel/nas-ai-space:{version}" not in manager:
+    raise SystemExit("Doctor image probe does not match app version")
+readme = Path("README.md").read_text(encoding="utf-8")
+if f"VERSION=v{version}" not in readme:
+    raise SystemExit("README release-download example does not match app version")
 
 index = Path("app/static/index.html").read_text(encoding="utf-8")
 style = re.search(r'/assets/styles\.css\?v=(\d+)', index)
@@ -76,6 +89,9 @@ for fragment in (
     "ref: ${{ env.RELEASE_TAG }}",
     "value=${{ env.RELEASE_TAG }}",
     'gh release create "$RELEASE_TAG" --verify-tag',
+    "git archive --format=tar.gz",
+    'sha256sum "$archive" > SHA256SUMS',
+    '"$archive" SHA256SUMS',
 ):
     if fragment not in release_workflow:
         raise SystemExit(f"Release workflow is missing manual tagged-release support: {fragment}")

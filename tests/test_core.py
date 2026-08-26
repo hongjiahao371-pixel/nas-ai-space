@@ -151,6 +151,28 @@ class ReleasePackagingTests(unittest.TestCase):
             self.assertEqual((root / ".nas-ai-profile").read_text(encoding="utf-8").strip(), "cpu")
             self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
 
+    def test_setup_rejects_overlapping_storage_roots(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="nas-ai-release-overlap-") as directory:
+            root = Path(directory) / "repo"
+            scripts = root / "scripts"
+            library = Path(directory) / "media"
+            scripts.mkdir(parents=True)
+            library.mkdir()
+            shutil.copy2(repository / "scripts" / "nas-ai", scripts / "nas-ai")
+            result = subprocess.run(
+                [
+                    "bash", str(scripts / "nas-ai"), "setup", "--non-interactive",
+                    "--profile", "cpu", "--library", str(library),
+                    "--uploads", str(library / "uploads"),
+                    "--recycle", str(Path(directory) / "recycle"),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("不能互相包含", result.stderr)
+
     def test_public_compose_runs_app_as_the_setup_user(self) -> None:
         repository = Path(__file__).resolve().parent.parent
         compose = (repository / "docker-compose.yml").read_text(encoding="utf-8")
@@ -193,23 +215,89 @@ class ReleasePackagingTests(unittest.TestCase):
             curl = fake_bin / "curl"
             curl.write_text(
                 "#!/usr/bin/env bash\n"
-                "printf '{\"ok\":true,\"version\":\"1.4.0\"}\\n'\n",
+                "printf '{\"ok\":true,\"version\":\"1.4.1\"}\\n'\n",
                 encoding="utf-8",
             )
             curl.chmod(0o755)
+            df = fake_bin / "df"
+            df.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+                "printf 'fake 50000000 1000000 49000000 2%% /\\n'\n",
+                encoding="utf-8",
+            )
+            df.chmod(0o755)
             result = subprocess.run(
                 ["bash", str(scripts / "nas-ai"), "start"],
                 cwd=root,
                 env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
-                check=True,
                 capture_output=True,
                 text=True,
+                errors="replace",
             )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             calls = docker_log.read_text(encoding="utf-8")
             self.assertNotIn("pull app", calls)
             self.assertIn("up -d --build", calls)
             self.assertIn("已要求本地构建", result.stderr)
             self.assertIn("模型初始化开始后会在这里显示下载进度", result.stdout)
+
+    def test_restore_and_uninstall_are_recoverable_by_default(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="nas-ai-release-lifecycle-") as directory:
+            root = Path(directory) / "repo"
+            scripts = root / "scripts"
+            data = root / "data"
+            backups = data / "backups"
+            fake_bin = Path(directory) / "bin"
+            scripts.mkdir(parents=True)
+            backups.mkdir(parents=True)
+            fake_bin.mkdir()
+            shutil.copy2(repository / "scripts" / "nas-ai", scripts / "nas-ai")
+            (root / ".nas-ai-profile").write_text("cpu\n", encoding="utf-8")
+            (root / ".env").write_text(
+                "NAS_AI_PORT=18767\nNAS_AI_API_TOKEN=" + "a" * 64 + "\n",
+                encoding="utf-8",
+            )
+            (data / "nas-ai-space.db").write_bytes(b"current-database")
+            backup_name = "nas-ai-space-20260827-120000.db"
+            (backups / backup_name).write_bytes(b"restored-database")
+            docker_log = Path(directory) / "docker.log"
+            docker = fake_bin / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\n"
+                f"printf '%s\\n' \"$*\" >> {docker_log}\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            curl = fake_bin / "curl"
+            curl.write_text("#!/usr/bin/env bash\nprintf '{}\\n'\n", encoding="utf-8")
+            curl.chmod(0o755)
+            environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+            subprocess.run(
+                ["bash", str(scripts / "nas-ai"), "restore", backup_name, "--yes"],
+                cwd=root,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual((data / "nas-ai-space.db").read_bytes(), b"restored-database")
+            subprocess.run(
+                ["bash", str(scripts / "nas-ai"), "uninstall"],
+                cwd=root,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            calls = docker_log.read_text(encoding="utf-8")
+            self.assertIn("stop app", calls)
+            self.assertIn("up -d --no-deps app", calls)
+            self.assertIn("down --remove-orphans", calls)
+            self.assertNotIn("down -v", calls)
 
     def test_mobile_quick_prompts_wrap_without_horizontal_scrolling(self) -> None:
         repository = Path(__file__).resolve().parent.parent
@@ -233,6 +321,10 @@ class ReleasePackagingTests(unittest.TestCase):
             text=True,
         )
         self.assertIn("Public release checks passed", result.stdout)
+        manager = (repository / "scripts" / "nas-ai").read_text(encoding="utf-8")
+        self.assertIn("Docker 存储可用空间", manager)
+        self.assertIn("https://registry.ollama.ai/v2/", manager)
+        self.assertIn('manifest inspect "$image"', manager)
 
 
 class SemanticAI:

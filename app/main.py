@@ -422,7 +422,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.4.0",
+    version="1.4.1",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
