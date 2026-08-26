@@ -323,7 +323,7 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertIn("Public release checks passed", result.stdout)
         manager = (repository / "scripts" / "nas-ai").read_text(encoding="utf-8")
         self.assertIn("Docker 存储可用空间", manager)
-        self.assertIn("https://registry.ollama.ai/v2/", manager)
+        self.assertIn("https://registry.ollama.ai/v2/library/qwen3-vl/manifests/2b", manager)
         self.assertIn('manifest inspect "$image"', manager)
 
 

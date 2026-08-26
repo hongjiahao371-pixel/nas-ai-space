@@ -344,7 +344,7 @@ doctor_command() {
     for probe in \
       "GitHub 容器仓库|https://ghcr.io/v2/" \
       "Docker Hub|https://registry-1.docker.io/v2/" \
-      "Ollama 模型仓库|https://registry.ollama.ai/v2/"; do
+      "Ollama 模型仓库|https://registry.ollama.ai/v2/library/qwen3-vl/manifests/2b"; do
       status=$(http_status "${probe#*|}")
       case "$status" in
         200|301|302|307|308|401) say "✓ ${probe%%|*}可达（HTTP ${status}）" ;;
