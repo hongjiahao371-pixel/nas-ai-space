@@ -1,6 +1,6 @@
 # NAS AI Space 发布进度
 
-> 更新时间：2026-08-25（北京时间）
+> 更新时间：2026-08-26（北京时间）
 
 ## 产品定位
 
@@ -12,7 +12,7 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - 部署方式：Docker Compose，项目目录与持久化目录由安装向导生成
 - 默认服务端口：`8766`
 - 运行栈：app、ops、vision、embedding、reranker、qdrant、speech
-- 已验证版本：v1.3.2；数据库、模型、向量索引和媒体数据均为持久化卷
+- 已验证版本：v1.4.0；数据库、模型、向量索引和媒体数据均为持久化卷
 
 ## v1.4.0 开源发布准备
 
@@ -24,6 +24,17 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - [x] 清除公开文档中的私有仓库状态、设备专属路径和具体备份文件名
 - [ ] 全新 x86-64 Docker 主机从零下载模型并完成第一次搜索
 - [ ] 创建并推送 `v1.4.0` 标签；确认后再将仓库可见性改为公开
+
+## v1.4.0 验收结果
+
+- 本地 Python 3.11 回归 159 项全部通过；发布门禁、JavaScript 语法、Shell 语法、`pip check` 与 `git diff --check` 均通过，锁定依赖经 `pip-audit` 检查无已知漏洞。
+- 在真实 x86-64 NAS 上完成全新目录的非交互安装与 `doctor` 验证；脚本正确识别普通账号需要 sudo 访问 Docker，最终结果为 0 error / 0 warning。
+- base、Intel、Intel OpenVINO、AMD、AMD Vulkan、NVIDIA、NAS Intel 与 NAS Intel + NVIDIA 八种 Compose 组合均通过 NAS 上 Docker Compose v5.1.3 的配置解析。
+- 上线前创建并校验 SQLite 在线备份和独立源码回滚包；部署过程保留现有 `.env`、数据库、媒体、模型、上传、回收站和备份目录。
+- 生产 app、ops、vision、embedding、reranker、qdrant、speech 七个服务全部 healthy；`/api/health` 返回 v1.4.0，`/api/ready` 为 `ready=true/status=degraded`，仅因 6,620 张图片等待描述升级和 295 张等待自动重试。
+- 生产 SQLite 与 Qdrant 向量一致性为 11,474 / 11,474，缺失、陈旧和数量不匹配均为 0；数据库、向量库、本地模型与认证四条关键链路全部通过就绪检查。
+- 新生产镜像内 159 项测试全部通过，耗时 342.982 秒；真实浏览器确认 v46 前端资源、登录页与工作台正常渲染，控制台 warning/error 为 0。
+- 首次启动空环境正确进入管理员设置流程；四步新手引导的发布资源和回归断言已进入 v1.4.0。全新主机下载全部模型并完成第一次真实搜索仍保留为公开前最终门槛。
 
 ## v1.3.0 实现范围
 
