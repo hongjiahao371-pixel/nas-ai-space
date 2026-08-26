@@ -16,7 +16,7 @@ idna==3.19
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
 pillow==12.3.0
-psd-tools==1.17.4
+psd-tools==1.18.0
 pydantic==2.10.4
 pydantic_core==2.27.2
 pypdf==6.16.2
