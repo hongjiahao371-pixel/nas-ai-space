@@ -10,6 +10,8 @@ local search.
 - `doctor`, lifecycle, log, online-backup and safe-update commands.
 - CPU, Intel, AMD and NVIDIA profile selection without editing Compose commands.
 - Four-step first-use checklist in the administrator dashboard.
+- Least-privilege application process mapped to the NAS account that owns the
+  generated data, upload and recycle directories.
 - Reproducible Python lock file and pinned runtime image tags.
 - Apache-2.0 licensing, third-party notices, security and contribution policies.
 - CI verification for tests, scripts, release metadata and all Compose profiles.
@@ -31,7 +33,10 @@ scripts/nas-ai doctor
 scripts/nas-ai start
 ```
 
-The default public stack downloads models on first start. The specialized
+The default public stack downloads pinned container images and about 2.5 GB of
+models on first start. Reserve at least 15 GB in Docker storage; rerunning
+`scripts/nas-ai start` after an interruption reuses completed layers and model
+data. The specialized
 `compose.nas-intel.yml` stack remains an advanced option for hosts that already
 have the required local base image, GGUF models and llama.cpp/Qdrant runtimes.
 
@@ -43,3 +48,6 @@ have the required local base image, GGUF models and llama.cpp/Qdrant runtimes.
 - Internet-facing access still requires an external HTTPS reverse proxy or VPN.
 - Hardware acceleration must be verified with a real inference or media task;
   device detection alone is not proof that acceleration is active.
+- Release acceptance ran the CPU/Ollama and NAS Intel stacks on a real Intel
+  x86-64 NAS. Intel OpenVINO, AMD ROCm/Vulkan and NVIDIA profiles passed Compose
+  validation but were not runtime-tested on matching physical GPUs.

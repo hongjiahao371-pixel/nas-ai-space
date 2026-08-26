@@ -1182,9 +1182,9 @@ main { grid-column: 2; min-width: 0; }
   .welcome-row p { font-size: var(--fs-xs); }
   .command-card { padding: 15px; }
   .hero-search input { font-size: var(--fs-md); }
-  .quick-prompts { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+  .quick-prompts { flex-wrap: wrap; overflow-x: visible; padding-bottom: 2px; }
   .quick-prompts > span { display: none; }
-  .quick-prompts button { flex: 0 0 auto; }
+  .quick-prompts button { flex: 0 1 auto; }
   .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
   .stat-card { grid-template-columns: 1fr; gap: 8px; padding: 14px; }
   .stat-icon { width: 30px; height: 30px; }

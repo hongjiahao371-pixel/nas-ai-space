@@ -58,6 +58,7 @@ services:
       - ${NAS_LIBRARY_PATH:-./library}:/maintenance/library
       - ${NAS_UPLOAD_PATH:-./uploads}:/uploads
       - ${NAS_RECYCLE_PATH:-./recycle}:/recycle
+    user: "${NAS_UID:-1000}:${NAS_GID:-1000}"
     depends_on:
       qdrant:
         condition: service_healthy

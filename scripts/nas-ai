@@ -264,6 +264,8 @@ setup_command() {
   {
     printf 'TZ=Asia/Shanghai\n'
     printf 'NAS_AI_PORT=%s\n' "$port"
+    printf 'NAS_UID=%s\n' "${SUDO_UID:-$(id -u)}"
+    printf 'NAS_GID=%s\n' "${SUDO_GID:-$(id -g)}"
     printf 'NAS_LIBRARY_PATH=%s\n' "$(env_quote "$library")"
     printf 'NAS_UPLOAD_PATH=%s\n' "$(env_quote "$uploads")"
     printf 'NAS_RECYCLE_PATH=%s\n' "$(env_quote "$recycle")"
@@ -392,15 +394,48 @@ doctor_command() {
   [ "$failures" -eq 0 ]
 }
 
+compose_up_with_model_progress() {
+  compose "$@" &
+  local up_pid=$!
+  local track_models=0
+  local current_progress=""
+  local previous_progress=""
+  if compose config --services 2>/dev/null | grep -qx 'model-init'; then
+    track_models=1
+    say "模型初始化开始后会在这里显示下载进度；网络中断可重新运行 start 续传。"
+  fi
+  while kill -0 "$up_pid" 2>/dev/null; do
+    if [ "$track_models" = 1 ]; then
+      current_progress=$(
+        compose logs --no-color --tail 20 model-init 2>/dev/null \
+          | tr '\r' '\n' \
+          | grep -E '([[:digit:]]{1,3}%|success)' \
+          | tail -n 1 \
+          | tr -cd '\11\12\15\40-\176' \
+          || true
+      )
+      if [ -n "$current_progress" ] && [ "$current_progress" != "$previous_progress" ]; then
+        say "模型下载：$current_progress"
+        previous_progress=$current_progress
+      fi
+    fi
+    sleep 5
+  done
+  wait "$up_pid"
+}
+
 start_command() {
   doctor_command
-  say "正在构建并启动服务。首次运行会下载约 2.5 GB 模型，耗时取决于网络。"
-  if [ "${NAS_AI_BUILD_LOCAL:-false}" != true ] && compose pull app; then
+  say "正在构建并启动服务。首次运行会下载固定版本容器镜像和约 2.5 GB 模型，请为 Docker 存储预留至少 15 GB；中断后重新运行 start 会续传。"
+  local build_local=${NAS_AI_BUILD_LOCAL:-}
+  [ -n "$build_local" ] || build_local=$(env_value NAS_AI_BUILD_LOCAL)
+  build_local=${build_local:-false}
+  if [ "$build_local" != true ] && compose pull app; then
     say "✓ 已取得预构建应用镜像"
-    compose up -d --no-build
+    compose_up_with_model_progress up -d --no-build
   else
     warn "预构建镜像不可用或已要求本地构建，改为在当前设备构建应用"
-    compose up -d --build
+    compose_up_with_model_progress up -d --build
   fi
   local port deadline response
   port=$(env_value NAS_AI_PORT); port=${port:-8766}

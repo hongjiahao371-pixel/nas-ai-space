@@ -6,8 +6,9 @@
 
 需要一台安装了 Docker Engine 与 Docker Compose v2 的 x86-64 NAS 或
 Linux 主机。建议至少 8 GB 内存；12–16 GB 的使用体验更完整。首次启动
-需要联网下载约 2.5 GB 的模型，之后的资料扫描、索引和问答默认都在本机
-完成。
+会联网下载固定版本的容器镜像和约 2.5 GB 模型，请为 Docker 存储预留至少
+15 GB 空间；之后的资料扫描、索引和问答默认都在本机完成。下载中断时直接
+重新运行 `scripts/nas-ai start`，已有镜像分层和模型文件会继续复用或续传。
 
 ```bash
 git clone https://github.com/hongjiahao371-pixel/nas-ai-space.git
@@ -18,7 +19,8 @@ scripts/nas-ai start
 ```
 
 安装向导会自动检测 CPU/GPU 和内存，询问媒体、上传、回收目录，生成随机
-系统 Token，并保存合适的 Compose 方案。启动完成后访问
+系统 Token，记录当前 NAS 账号的 UID/GID，并保存合适的 Compose 方案，
+因此应用无需 root 权限也能写入自己的数据目录。启动完成后访问
 `http://NAS-IP:8766`，按照页面向导设置首位管理员。
 如果 NAS 只允许管理员操作 Docker，脚本会自动切换到 `sudo docker` 并在
 需要时请求当前 NAS 账号的 sudo 密码。

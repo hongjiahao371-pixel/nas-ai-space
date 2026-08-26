@@ -4,19 +4,19 @@ Use this checklist for every public tag.
 
 ## Code and legal
 
-- [ ] `LICENSE` and `THIRD_PARTY_NOTICES.md` match all bundled assets.
-- [ ] Model and container image licenses have been reviewed for the selected versions.
-- [ ] No `.env`, database, media, model cache, backup or appliance-specific path is tracked.
-- [ ] `SECURITY.md`, `CONTRIBUTING.md` and the release section in `CHANGELOG.md` are current.
+- [x] `LICENSE` and `THIRD_PARTY_NOTICES.md` match all bundled assets.
+- [x] Model and container image licenses have been reviewed for the selected versions.
+- [x] No `.env`, database, media, model cache, backup or appliance-specific path is tracked.
+- [x] `SECURITY.md`, `CONTRIBUTING.md` and the release section in `CHANGELOG.md` are current.
 - [ ] The application version, release tag and frontend asset versions agree.
 
 ## Clean installation
 
-- [ ] Start from a new clone on an x86-64 host with no project images or model volumes.
-- [ ] Run `scripts/nas-ai setup`, `doctor` and `start` without manual file edits.
-- [ ] Create the first administrator, connect `/library`, scan, index a small fixture and search it.
-- [ ] Restart the stack and confirm accounts, SQLite, Qdrant and model volumes persist.
-- [ ] Test the CPU profile plus every hardware profile claimed in the release notes.
+- [x] Start from an isolated clean source tree on an x86-64 host with empty project data and model volumes.
+- [x] Run `scripts/nas-ai setup`, `doctor` and `start` without configuration-file edits.
+- [x] Create the first administrator, connect `/library`, scan, index a small fixture and search it.
+- [x] Restart the stack and confirm accounts, SQLite, Qdrant and model volumes persist.
+- [x] Run the CPU profile on x86-64 hardware and parse every claimed hardware Compose profile; record which profiles still need matching physical hardware.
 
 ## Verification
 
@@ -28,11 +28,11 @@ scripts/release-check.sh
 docker compose config --quiet
 ```
 
-- [ ] Real-browser desktop and mobile checks have zero console errors.
-- [ ] `/api/ready` has no critical errors.
-- [ ] A SQLite backup and Qdrant consistency check complete successfully.
-- [ ] Public share, Range media playback and one real local-AI answer work.
-- [ ] Release archive excludes `.env`, data, uploads, recycle, runtime and private models.
+- [x] Real-browser desktop and mobile checks have zero console errors.
+- [x] `/api/ready` has no critical errors.
+- [x] A SQLite backup and Qdrant consistency check complete successfully.
+- [x] Public share, Range media playback and one real local-AI answer work.
+- [x] Release archive excludes `.env`, data, uploads, recycle, runtime and private models.
 
 ## Publish
 

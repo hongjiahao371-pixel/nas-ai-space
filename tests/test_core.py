@@ -142,12 +142,86 @@ class ReleasePackagingTests(unittest.TestCase):
             self.assertIn('NAS_LIBRARY_PATH="', config)
             self.assertIn("media library", config)
             self.assertIn("NAS_AI_INDEX_WORKERS=1", config)
+            self.assertIn(f"NAS_UID={os.getuid()}", config)
+            self.assertIn(f"NAS_GID={os.getgid()}", config)
             self.assertNotIn("replace-with-a-long-random-token", config)
             token = next(line.partition("=")[2] for line in config.splitlines() if line.startswith("NAS_AI_API_TOKEN="))
             self.assertGreaterEqual(len(token), 64)
             self.assertNotIn(token, result.stdout)
             self.assertEqual((root / ".nas-ai-profile").read_text(encoding="utf-8").strip(), "cpu")
             self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+
+    def test_public_compose_runs_app_as_the_setup_user(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        compose = (repository / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('user: "${NAS_UID:-1000}:${NAS_GID:-1000}"', compose)
+
+    def test_start_reads_local_build_flag_from_dotenv(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="nas-ai-release-start-") as directory:
+            root = Path(directory) / "repo"
+            scripts = root / "scripts"
+            fake_bin = Path(directory) / "bin"
+            library = Path(directory) / "library"
+            scripts.mkdir(parents=True)
+            fake_bin.mkdir()
+            library.mkdir()
+            shutil.copy2(repository / "scripts" / "nas-ai", scripts / "nas-ai")
+            (root / ".nas-ai-profile").write_text("cpu\n", encoding="utf-8")
+            docker_log = Path(directory) / "docker.log"
+            (root / ".env").write_text(
+                "\n".join([
+                    "NAS_AI_BUILD_LOCAL=true",
+                    "NAS_AI_PORT=18767",
+                    f'NAS_LIBRARY_PATH="{library}"',
+                    f'NAS_UPLOAD_PATH="{library}"',
+                    f'NAS_RECYCLE_PATH="{library}"',
+                    "NAS_AI_API_TOKEN=" + "a" * 64,
+                    "",
+                ]),
+                encoding="utf-8",
+            )
+            docker = fake_bin / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\n"
+                f"printf '%s\\n' \"$*\" >> {docker_log}\n"
+                "case \"$*\" in *\"config --services\"*) printf 'app\\nmodel-init\\n' ;; esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            curl = fake_bin / "curl"
+            curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '{\"ok\":true,\"version\":\"1.4.0\"}\\n'\n",
+                encoding="utf-8",
+            )
+            curl.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(scripts / "nas-ai"), "start"],
+                cwd=root,
+                env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            calls = docker_log.read_text(encoding="utf-8")
+            self.assertNotIn("pull app", calls)
+            self.assertIn("up -d --build", calls)
+            self.assertIn("已要求本地构建", result.stderr)
+            self.assertIn("模型初始化开始后会在这里显示下载进度", result.stdout)
+
+    def test_mobile_quick_prompts_wrap_without_horizontal_scrolling(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        styles = (repository / "app" / "static" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(
+            ".quick-prompts { flex-wrap: wrap; overflow-x: visible; padding-bottom: 2px; }",
+            styles,
+        )
+        self.assertNotIn(
+            ".quick-prompts { flex-wrap: nowrap; overflow-x: auto;",
+            styles,
+        )
 
     def test_public_release_metadata_is_consistent(self) -> None:
         repository = Path(__file__).resolve().parent.parent

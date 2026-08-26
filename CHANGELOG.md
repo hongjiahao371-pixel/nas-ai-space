@@ -3,7 +3,7 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
-## [1.4.0] - 2026-08-25
+## [1.4.0] - 2026-08-27
 
 ### Added
 
@@ -24,6 +24,18 @@ Semantic Versioning.
   backup filenames or appliance-specific absolute paths.
 - Release and dependency configuration is validated automatically before a
   public build is accepted.
+- First-start guidance now includes container-image disk requirements and
+  resumable restart instructions.
+
+### Fixed
+
+- `NAS_AI_BUILD_LOCAL=true` is honored when stored in `.env`, while an exported
+  shell value still takes precedence.
+- Mobile home-page search examples wrap instead of clipping the final example
+  beyond a narrow viewport.
+- Clean installations run the application with the setup user's UID and GID,
+  so private host data directories remain writable without restoring container
+  root capabilities.
 
 ## [1.3.2] - 2026-08-25
 

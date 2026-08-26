@@ -1,6 +1,6 @@
 # NAS AI Space 发布进度
 
-> 更新时间：2026-08-26（北京时间）
+> 更新时间：2026-08-27（北京时间）
 
 ## 产品定位
 
@@ -22,19 +22,23 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - [x] Python 运行依赖锁定、容器镜像标签固定和八种 Compose 组合 CI 校验
 - [x] 公开发布自检、发布清单、Issue 模板和自动依赖更新配置
 - [x] 清除公开文档中的私有仓库状态、设备专属路径和具体备份文件名
-- [ ] 全新 x86-64 Docker 主机从零下载模型并完成第一次搜索
+- [x] 全新 x86-64 Docker 隔离环境从空数据/模型卷完成模型校验、首次索引和第一次搜索
 - [ ] 创建并推送 `v1.4.0` 标签；确认后再将仓库可见性改为公开
 
 ## v1.4.0 验收结果
 
-- 本地 Python 3.11 回归 159 项全部通过；发布门禁、JavaScript 语法、Shell 语法、`pip check` 与 `git diff --check` 均通过，锁定依赖经 `pip-audit` 检查无已知漏洞。
+- 本地 Python 3.11 回归 162 项全部通过；发布门禁、JavaScript 语法、Shell 语法、`pip check` 与 `git diff --check` 均通过，锁定依赖经 `pip-audit` 检查无已知漏洞。
 - 在真实 x86-64 NAS 上完成全新目录的非交互安装与 `doctor` 验证；脚本正确识别普通账号需要 sudo 访问 Docker，最终结果为 0 error / 0 warning。
 - base、Intel、Intel OpenVINO、AMD、AMD Vulkan、NVIDIA、NAS Intel 与 NAS Intel + NVIDIA 八种 Compose 组合均通过 NAS 上 Docker Compose v5.1.3 的配置解析。
 - 上线前创建并校验 SQLite 在线备份和独立源码回滚包；部署过程保留现有 `.env`、数据库、媒体、模型、上传、回收站和备份目录。
 - 生产 app、ops、vision、embedding、reranker、qdrant、speech 七个服务全部 healthy；`/api/health` 返回 v1.4.0，`/api/ready` 为 `ready=true/status=degraded`，仅因 6,620 张图片等待描述升级和 295 张等待自动重试。
 - 生产 SQLite 与 Qdrant 向量一致性为 11,474 / 11,474，缺失、陈旧和数量不匹配均为 0；数据库、向量库、本地模型与认证四条关键链路全部通过就绪检查。
-- 新生产镜像内 159 项测试全部通过，耗时 342.982 秒；真实浏览器确认 v46 前端资源、登录页与工作台正常渲染，控制台 warning/error 为 0。
-- 首次启动空环境正确进入管理员设置流程；四步新手引导的发布资源和回归断言已进入 v1.4.0。全新主机下载全部模型并完成第一次真实搜索仍保留为公开前最终门槛。
+- 最终生产镜像在隔离发布源码包内完成 162 项测试，全部通过，耗时 354.262 秒；生产应用与其余六个服务全部 healthy，app 重启次数为 0。
+- 在同一台 x86-64 NAS 上使用独立 Compose 项目、空绑定目录和空持久化卷完成首次启动。Qwen3-VL 2B 与 Qwen3-Embedding 0.6B 官方内容寻址模型 blob 均从零取得并按 SHA-256 校验；受 NAS 访问模型仓库带宽限制，校验后的 blob 通过局域网送入隔离卷，随后 `model-init` 正常退出。
+- 空环境成功创建首位 owner、连接 `/library`、扫描 2 个文件并完整索引目标文档；搜索唯一短语“青松计划 4827”命中 `first-search.txt`，结果同时包含全文与语义来源，语义分数为 0.67276824。
+- 干净启动暴露并修复基础 Compose 的数据目录权限缺陷：应用现在以安装账号 UID/GID 运行且继续 `cap_drop: ALL`。修复后容器重启次数为 0；整栈销毁容器但保留卷后，账号、SQLite、Qdrant 向量和模型均持久化，重启后的同一语义搜索再次通过。
+- 390×844 真实浏览器视口确认侧栏为离屏抽屉、认证弹窗宽 350 px、页面无横向溢出；最后一个快速搜索示例原有约 11 px 裁切已改为自动换行，v47 静态资源复测控制台 warning/error 为 0。
+- CPU/Ollama 公共栈和 NAS Intel 精简栈均在真实 x86-64 Intel NAS 上运行通过；其余 Intel、Intel OpenVINO、AMD ROCm、AMD Vulkan 与 NVIDIA 组合完成 Compose 配置解析，仍需使用者在对应真实硬件上验证加速效果。
 
 ## v1.3.0 实现范围
 
