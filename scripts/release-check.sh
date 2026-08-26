@@ -68,6 +68,17 @@ for name, digest in expected.items():
     actual = hashlib.sha256(Path(name).read_bytes()).hexdigest()
     if actual != digest:
         raise SystemExit(f"Checksum mismatch: {name}")
+
+release_workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+for fragment in (
+    "workflow_dispatch:",
+    "RELEASE_TAG:",
+    "ref: ${{ env.RELEASE_TAG }}",
+    "value=${{ env.RELEASE_TAG }}",
+    'gh release create "$RELEASE_TAG" --verify-tag',
+):
+    if fragment not in release_workflow:
+        raise SystemExit(f"Release workflow is missing manual tagged-release support: {fragment}")
 print(f"release metadata ok: v{version}, assets v{style.group(1)}")
 PY
 
