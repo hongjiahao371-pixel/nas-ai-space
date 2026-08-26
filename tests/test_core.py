@@ -1404,11 +1404,16 @@ class CoreTests(unittest.TestCase):
         for row in self.database.fetchall("SELECT * FROM files ORDER BY id"):
             result, chunks = index_file(row, self.local_settings, LocalAIClient(self.local_settings))
             self.database.finish_file_index(row["id"], result, chunks)
-        rows = self.database.fetchall("SELECT id, name FROM files ORDER BY id")
-        self.database.save_feedback(None, rows[0]["id"], "灰色猫咪 花盆", "irrelevant")
-        self.database.save_feedback(None, rows[1]["id"], "灰色猫咪 花盆", "relevant")
+        rows = {
+            row["name"]: row for row in self.database.fetchall("SELECT id, name FROM files")
+        }
+        # os.scandir() 不保证跨文件系统的遍历顺序，不能用数据库 id 推断文件名。
+        self.database.save_feedback(None, rows["first.txt"]["id"], "灰色猫咪 花盆", "irrelevant")
+        self.database.save_feedback(None, rows["second.txt"]["id"], "灰色猫咪 花盆", "relevant")
         response = SearchService(self.database, LocalAIClient(self.local_settings), NullVectors()).search("灰色猫咪 花盆")
         self.assertEqual(response["results"][0]["name"], "second.txt")
+        scores = {row["name"]: row["score"] for row in response["results"]}
+        self.assertGreater(scores["second.txt"], scores["first.txt"])
 
     def test_office_document_chunks_keep_source_labels(self) -> None:
         document = self.library_path / "slides.pptx"
