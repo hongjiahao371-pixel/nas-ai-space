@@ -12,6 +12,8 @@ downloads without changing the database schema.
 - `scripts/nas-ai restore <backup.db>` validates the selected SQLite backup,
   creates a fresh pre-restore backup, restarts the application and repairs
   SQLite/Qdrant consistency.
+- Backup and restore tolerate NAS host ACLs that reject a container-side
+  directory `chmod`; individual database backups remain owner-only.
 - `scripts/nas-ai uninstall` removes containers and the Compose network without
   deleting configuration, files, databases, uploads, recycle contents or named
   model/vector volumes.
@@ -32,6 +34,11 @@ takes longer than the setup itself because it downloads pinned images and about
 The database schema is unchanged. Run `scripts/nas-ai backup`, update the source
 and run `scripts/nas-ai start`. Keep the existing `.env`, `.nas-ai-profile`,
 data directories and Docker volumes.
+
+The lifecycle path was exercised on a real x86-64 NAS: online backup, verified
+restore, Qdrant consistency repair, recoverable uninstall and restart all
+completed while preserving the administrator, indexed fixture, database and
+named model/vector volumes.
 
 ## Known limitations
 

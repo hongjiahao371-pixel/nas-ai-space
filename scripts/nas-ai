@@ -263,7 +263,10 @@ setup_command() {
   case "$port" in *[!0-9]*|'') die "端口必须是数字" ;; esac
   [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "端口必须在 1-65535 之间"
 
-  mkdir -p "$library" "$uploads" "$recycle" "$PROJECT_DIR/data"
+  mkdir -p "$library" "$uploads" "$recycle" "$PROJECT_DIR/data/backups"
+  if ! chmod 700 "$PROJECT_DIR/data" "$PROJECT_DIR/data/backups" 2>/dev/null; then
+    warn "NAS ACL 不允许收紧 data 目录权限；备份文件仍会单独使用 600 权限"
+  fi
   library=$(cd "$library" && pwd)
   uploads=$(cd "$uploads" && pwd)
   recycle=$(cd "$recycle" && pwd)
@@ -347,8 +350,8 @@ doctor_command() {
       "Ollama 模型仓库|https://registry.ollama.ai/v2/library/qwen3-vl/manifests/2b"; do
       status=$(http_status "${probe#*|}")
       case "$status" in
-        200|301|302|307|308|401) say "✓ ${probe%%|*}可达（HTTP ${status}）" ;;
-        *) warn "${probe%%|*}不可达（HTTP ${status}）；首次安装可能无法下载镜像或模型"; warnings=$((warnings + 1)) ;;
+        200|301|302|307|308|401) say "✓ ${probe%%|*} 可达（HTTP ${status}）" ;;
+        *) warn "${probe%%|*} 不可达（HTTP ${status}）；首次安装可能无法下载镜像或模型"; warnings=$((warnings + 1)) ;;
       esac
     done
   else
@@ -548,7 +551,7 @@ backup_command() {
 }
 
 restore_command() {
-  local backup_name="" assume_yes=0 backup_path staging database_path token port answer app_stopped=0
+  local backup_name="" assume_yes=0 backup_path database_path token port answer app_stopped=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --yes) assume_yes=1; shift ;;
@@ -561,7 +564,6 @@ restore_command() {
   case "$backup_name" in */*|*..*) die "只能填写备份文件名，不能包含路径或 .." ;; esac
   backup_path="$PROJECT_DIR/data/backups/$backup_name"
   database_path="$PROJECT_DIR/data/nas-ai-space.db"
-  staging="$PROJECT_DIR/data/.restore-${$}.db"
   [ -f "$backup_path" ] || die "找不到备份：$backup_path"
   [ -f "$database_path" ] || die "找不到当前数据库：$database_path"
 
@@ -576,17 +578,36 @@ restore_command() {
   compose run --rm --no-deps --entrypoint python app -c \
     'from pathlib import Path; from app.database import Database; import sys; print(Database.verify_backup(Path(sys.argv[1])))' \
     "/app/data/backups/$backup_name" >/dev/null
-  cp "$backup_path" "$staging"
-  chmod 600 "$staging"
-  trap 'rm -f "$staging"; if [ "$app_stopped" = 1 ]; then compose up -d --no-deps app >/dev/null 2>&1 || true; fi' EXIT INT TERM
+  trap 'if [ "$app_stopped" = 1 ]; then compose up -d --no-deps app >/dev/null 2>&1 || true; fi' EXIT INT TERM
 
   say "正在备份当前数据库…"
   backup_command
   compose stop app
   app_stopped=1
-  mv "$staging" "$database_path"
-  chmod 600 "$database_path"
-  rm -f "$database_path-wal" "$database_path-shm"
+  compose run --rm -T --no-deps --entrypoint python app - "$backup_name" "$$" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+from app.database import Database
+
+data = Path("/app/data")
+source = data / "backups" / sys.argv[1]
+destination = data / "nas-ai-space.db"
+temporary = data / f".restore-{sys.argv[2]}.db"
+try:
+    Database.verify_backup(source)
+    shutil.copyfile(source, temporary)
+    os.chmod(temporary, 0o600)
+    Database.verify_backup(temporary)
+    os.replace(temporary, destination)
+    os.chmod(destination, 0o600)
+    destination.with_name(destination.name + "-wal").unlink(missing_ok=True)
+    destination.with_name(destination.name + "-shm").unlink(missing_ok=True)
+finally:
+    temporary.unlink(missing_ok=True)
+PY
   compose up -d --no-deps app
   app_stopped=0
   trap - EXIT INT TERM

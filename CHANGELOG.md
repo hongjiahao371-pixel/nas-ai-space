@@ -29,6 +29,9 @@ Semantic Versioning.
 
 - New-user diagnostics now surface low disk space and blocked registries before
   a long first-start attempt.
+- SQLite backups no longer fail on NAS bind mounts whose ACL permits file
+  creation but rejects changing the backup directory mode; each backup and its
+  verification marker remain restricted to mode `0600`.
 
 ## [1.4.0] - 2026-08-27
 

@@ -267,6 +267,8 @@ class ReleasePackagingTests(unittest.TestCase):
             docker.write_text(
                 "#!/usr/bin/env bash\n"
                 f"printf '%s\\n' \"$*\" >> {docker_log}\n"
+                f"case \" $* \" in *\" --entrypoint python app - \"*) "
+                f"backup_name=\"${{@: -2:1}}\"; cp \"{backups}/$backup_name\" \"{data}/nas-ai-space.db\" ;; esac\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -1964,6 +1966,21 @@ class CoreTests(unittest.TestCase):
         corrupt.write_bytes(b"not a sqlite database")
         with self.assertRaises(Exception):
             Database.verify_backup(corrupt)
+
+    def test_backup_survives_nas_acl_rejecting_directory_chmod(self) -> None:
+        destination = Path(self.temp.name) / "acl-backups" / "verified.db"
+        real_chmod = os.chmod
+
+        def chmod_with_nas_acl(path: os.PathLike[str] | str, mode: int) -> None:
+            if Path(path) == destination.parent:
+                raise PermissionError("NAS ACL rejects directory chmod")
+            real_chmod(path, mode)
+
+        with patch("app.database.os.chmod", side_effect=chmod_with_nas_acl):
+            self.database.backup(destination)
+
+        self.assertEqual(Database.verify_backup(destination), "ok")
+        self.assertEqual(destination.stat().st_mode & 0o077, 0)
 
     def test_lut_preview_is_tracked_without_modifying_source(self) -> None:
         image_path = self.library_path / "look-source.jpg"

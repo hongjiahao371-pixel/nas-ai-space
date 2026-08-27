@@ -2485,7 +2485,14 @@ class Database:
 
     def backup(self, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(destination.parent, 0o700)
+        try:
+            os.chmod(destination.parent, 0o700)
+        except PermissionError:
+            # Some NAS bind mounts apply host ACLs that allow file creation but
+            # reject chmod from inside a container. Backup files are still
+            # restricted to 0600 below, so the backup must not fail solely
+            # because the parent directory mode cannot be tightened here.
+            pass
         temporary = destination.with_suffix(destination.suffix + ".part")
         temporary.unlink(missing_ok=True)
         try:
