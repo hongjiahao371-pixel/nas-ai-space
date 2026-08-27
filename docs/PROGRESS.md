@@ -43,6 +43,7 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - NAS 首次在线备份暴露了宿主 ACL 允许写文件但拒绝容器修改父目录权限的真实兼容问题；现已容错父目录 `chmod`，同时备份数据库和验证标记继续保持 `0600`。
 - 隔离实例真实执行在线备份与恢复；恢复前自动生成第二份备份，恢复后健康检查通过，Qdrant 一致性修复返回成功，同一唯一短语继续命中 `first-search.txt`。
 - `uninstall` 后该 Compose 项目的容器数为 0，三个模型/向量命名卷、`.env`、SQLite、备份和 library/uploads/recycle 目录全部保留；用原镜像重新启动后所有服务恢复，检索结果仍然存在。
+- 生产升级前创建 67,371,008 字节 SQLite 在线备份和独立源码回滚包；同步时保留 `.env`、数据库、模型、媒体、上传、回收站与备份。v1.4.1 重建后 app、ops、vision、embedding、reranker、qdrant、speech 七个服务全部 healthy，app/ops 重启次数为 0；`/api/health` 返回 v1.4.1，`/api/ready` 为 `ready=true/status=degraded` 且无关键错误。升级后的在线备份再次成功。
 
 ## v1.4.0 验收结果
 
