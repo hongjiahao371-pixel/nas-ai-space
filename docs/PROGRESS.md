@@ -1,6 +1,6 @@
 # NAS AI Space 发布进度
 
-> 更新时间：2026-08-27（北京时间）
+> 更新时间：2026-09-07（北京时间）
 
 ## 产品定位
 
@@ -33,7 +33,7 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - [x] 可恢复卸载只移除容器和网络，保留配置、数据库、资料目录和命名模型/向量卷
 - [x] GitHub Release 自动附带版本化源码包和 `SHA256SUMS`
 - [x] 真实 x86-64 NAS 完成备份、恢复、卸载、重装和检索数据保留闭环
-- [ ] 推送 `v1.4.1` 标签、发布 Release，并确认 GHCR 可匿名拉取
+- [x] 推送 `v1.4.1` 标签、发布 Release，并确认 GHCR 可匿名拉取
 
 ## v1.4.1 验收结果
 
@@ -44,6 +44,7 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - 隔离实例真实执行在线备份与恢复；恢复前自动生成第二份备份，恢复后健康检查通过，Qdrant 一致性修复返回成功，同一唯一短语继续命中 `first-search.txt`。
 - `uninstall` 后该 Compose 项目的容器数为 0，三个模型/向量命名卷、`.env`、SQLite、备份和 library/uploads/recycle 目录全部保留；用原镜像重新启动后所有服务恢复，检索结果仍然存在。
 - 生产升级前创建 67,371,008 字节 SQLite 在线备份和独立源码回滚包；同步时保留 `.env`、数据库、模型、媒体、上传、回收站与备份。v1.4.1 重建后 app、ops、vision、embedding、reranker、qdrant、speech 七个服务全部 healthy，app/ops 重启次数为 0；`/api/health` 返回 v1.4.1，`/api/ready` 为 `ready=true/status=degraded` 且无关键错误。升级后的在线备份再次成功。
+- `v1.4.1` 注解标签和 GitHub Release 已发布；Release 附带 `nas-ai-space-v1.4.1.tar.gz` 与 `SHA256SUMS`，匿名下载和校验通过。GHCR 包已公开，未登录客户端可读取并拉取 Linux amd64 镜像；OCI 索引摘要为 `sha256:e5a3cb2c9698f0fe8f1d93c55f843c5a2e86841f9a1e9f64730f493054cacea3`。
 
 ## v1.4.0 验收结果
 

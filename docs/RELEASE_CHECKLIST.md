@@ -37,7 +37,7 @@ docker compose config --quiet
 
 ## Publish
 
-- [ ] Create signed or annotated tag `vX.Y.Z` from the verified commit.
-- [ ] Attach checksums and known limitations to the GitHub Release.
-- [ ] Confirm the published GHCR application package is public and can be pulled without login.
+- [x] Create signed or annotated tag `vX.Y.Z` from the verified commit.
+- [x] Attach checksums and known limitations to the GitHub Release.
+- [x] Confirm the published GHCR application package is public and can be pulled without login.
 - [x] The source repository was made public only after the v1.4.0 pre-public checks completed.
