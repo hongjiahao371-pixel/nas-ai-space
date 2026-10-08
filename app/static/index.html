@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=50">
+  <link rel="stylesheet" href="/assets/styles.css?v=51">
 </head>
 <body>
   <div class="app-shell">
@@ -621,6 +621,6 @@
 <div class="modal" role="dialog" aria-modal="true" id="imageSearchModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">视觉检索</span><h2>以图搜图</h2><p>选择参考图片后可拖动框选局部；不框选则搜索整张图。图片仅用于本次检索。</p><label class="secondary image-file-label">选择图片<input id="visualReference" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><canvas id="visualCanvas" hidden></canvas><div class="card-actions"><button class="secondary" id="resetVisualCrop">使用整张图</button><button class="primary" id="submitVisualSearch" disabled>搜索素材库</button></div></div></div>
 <div class="modal" role="dialog" aria-modal="true" id="clipModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">片段交付</span><h2>导出视频片段</h2><p>保留原始视频，生成可下载的 MP4 片段，最长 5 分钟。</p><form id="clipForm"><input name="file_id" type="hidden"><div class="form-grid"><label>开始（秒）<input name="start" type="number" min="0" step="0.01" required></label><label>结束（秒）<input name="end" type="number" min="0" step="0.01" required></label></div><button class="primary">开始导出</button></form></div></div>
 
-  <script src="/assets/app.js?v=50"></script>
+  <script src="/assets/app.js?v=51"></script>
 </body>
 </html>
