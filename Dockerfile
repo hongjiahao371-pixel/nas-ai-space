@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg poppler-utils libgl1 libglib2.0-0 pciutils \
+    && apt-get install -y --no-install-recommends ffmpeg poppler-utils libgl1 libglib2.0-0 pciutils fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.lock.txt
 
 COPY app ./app
 COPY models ./models
+COPY scripts/restore-recovery.py ./scripts/restore-recovery.py
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

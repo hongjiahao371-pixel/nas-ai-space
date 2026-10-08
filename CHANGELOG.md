@@ -3,6 +3,20 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
+## [1.6.0] - 2026-10-08
+
+### Added
+- Direct image query uploads with normalized region cropping and permission/revision checks.
+- Independent media index controls (pause/resume, processing window/order, bounded retries and recent throughput/ETA), shared interactive leases and two-service ops monitoring.
+- Coordinated metadata and dual-vector recovery sets, integrity verification and restoration into a fresh isolated environment.
+- Bounded scene-aware video samples and audio-track vectors, non-destructive video clip export/download.
+- Native DOCX, PDF and PPTX artifact downloads and an optional durable webhook outbox.
+
+### Fixed
+- Visual retrieval scores no longer depend on generated-caption keyword coverage.
+- HEIC/HEIF/AVIF caption upgrades always convert to JPEG; terminal failures can be retried explicitly.
+- Coverage separates completed and inapplicable stages, vector backups expire after 48 hours, galleries collapse unused inspectors and unchanged scans can be hidden.
+
 ## [1.5.0] - 2026-10-08
 
 ### Added

@@ -613,6 +613,14 @@ class SearchService:
             except Exception:
                 precise_used = False
 
+        # Apply to all visual candidates, including those outside the text-profile window.
+        if multimodal_scores:
+            filename_query=bool(re.search(r"(?:\.[a-zA-Z0-9]{2,5}$|(?:IMG|VID|DSC)[_-]?\d)",query.strip(),re.I))
+            for file_id,similarity in multimodal_scores.items():
+                filename_hit=filename_query and query.casefold() in rows[file_id]['name'].casefold()
+                scores[file_id]=similarity+feedback.get(file_id,0)+(1 if filename_hit else 0)
+            ordered=sorted(rows.values(),key=lambda row:scores.get(int(row['id']),0),reverse=True)
+
         total_candidates = len(ordered)
         selected = ordered[offset:offset + page_size]
         raw_values = [scores.get(int(row["id"]), 0.0) for row in selected]
@@ -626,7 +634,7 @@ class SearchService:
             else:
                 confidence = min(0.95, max(0.05, scores.get(file_id, 0.0)))
             profile = profiles.get(file_id, {})
-            if precise_used and len(groups) > 1 and float(profile.get("coverage") or 0) < 1:
+            if file_id not in multimodal_scores and precise_used and len(groups) > 1 and float(profile.get("coverage") or 0) < 1:
                 confidence = min(confidence, _partial_coverage_cap(float(profile.get("coverage") or 0)))
             if precise_used and any(
                 marker in rerank_reasons.get(file_id, "")
@@ -674,6 +682,25 @@ class SearchService:
             "has_more": offset + len(selected) < total_candidates,
             "results": results,
         }
+
+    def visual_results(self,hits,kind,limit,library_ids=None,exclude_id=None):
+        files=self._files_by_ids([int(h.get('payload',{}).get('file_id',0)) for h in hits],'*')
+        results=[];seen=set()
+        enabled_libraries={row['id'] for row in self.database.fetchall('SELECT id FROM libraries WHERE enabled=1')}
+        for hit in sorted(hits,key=lambda h:float(h['score']),reverse=True):
+            payload=hit.get('payload') or {};file_id=int(payload.get('file_id') or 0);row=files.get(file_id)
+            if not row or file_id==exclude_id or file_id in seen or row['library_id'] not in enabled_libraries:continue
+            if library_ids is not None and row['library_id'] not in library_ids:continue
+            if kind and row['kind']!=kind:continue
+            if row['mtime_ns']!=payload.get('mtime_ns') or row['size']!=payload.get('size'):continue
+            seen.add(file_id)
+            score=float(hit['score'])
+            results.append({**{k:row[k] for k in ['id','name','kind','mime_type','size','mtime_ns','width','height','duration']},
+                'path':row['relative_path'],'caption':row['ai_caption'],'snippet':row['ai_caption'] or payload.get('content',''),
+                'match_time':payload.get('start_time'),'sources':['以图搜图'],'score':score,'confidence':max(0,min(1,score)),
+                'multimodal_score':score,'matched_terms':[],'coverage':0,'rerank_reason':''})
+            if len(results)>=limit:break
+        return {'query':'以图搜图','total':len(results),'results':results,'multimodal':True,'semantic':True,'precise':False}
 
     def similar(
         self,

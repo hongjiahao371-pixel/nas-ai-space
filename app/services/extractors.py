@@ -476,7 +476,7 @@ def prepare_caption_upgrade_image(
         except (OSError, ValueError):
             supported = False
     requires_conversion = path.suffix.lower() in (
-        RAW_IMAGE_EXTENSIONS | PSD_EXTENSIONS | VECTOR_DESIGN_EXTENSIONS | FONT_EXTENSIONS
+        RAW_IMAGE_EXTENSIONS | PSD_EXTENSIONS | VECTOR_DESIGN_EXTENSIONS | FONT_EXTENSIONS | {".heic", ".heif", ".avif"}
     )
     needs_prepare = (
         not supported

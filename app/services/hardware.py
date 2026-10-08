@@ -326,6 +326,17 @@ def runtime_metrics() -> dict[str, Any]:
             })
         except ValueError:
             continue
+    if not gpus:
+        for card in sorted(Path('/sys/class/drm').glob('card[0-9]')):
+            try:
+                if (card/'device/vendor').read_text().strip()!='0x8086':continue
+                frequency=None
+                for path in [card/'gt_cur_freq_mhz',card/'gt/gt0/rps_cur_freq_mhz']:
+                    if path.is_file():frequency=float(path.read_text().strip());break
+                gpus.append({'index':len(gpus),'name':'Intel 集成显卡','vendor':'intel',
+                    'frequency_mhz':frequency,'utilization_percent':None,'memory_used_bytes':None,
+                    'memory_total_bytes':None,'temperature_c':None,'power_watts':None,'power_limit_watts':None})
+            except (OSError,ValueError):continue
     return {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "cpu": {

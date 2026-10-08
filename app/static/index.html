@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=48">
+  <link rel="stylesheet" href="/assets/styles.css?v=49">
 </head>
 <body>
   <div class="app-shell">
@@ -354,7 +354,7 @@
         <!-- 阶段三（布局重构）：搜索视图改为三栏工作台（筛选轨 / 结果区+工具栏 / 检查器） -->
         <section class="view workbench-view" id="view-search">
           <form class="large-search" data-search-form><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input name="q" id="mainSearchInput" placeholder="输入自然语言，例如“去年在海边拍的日落”…" autocomplete="off"><button>搜索</button></form>
-          <div class="workbench" id="searchWorkbench">
+          <div class="visual-search-tools"><button class="secondary" id="openImageSearch">以图搜图 / 框选局部</button></div><div class="workbench" id="searchWorkbench">
             <aside class="wb-rail" id="searchRail" aria-label="搜索筛选">
               <div class="rail-block">
                 <div class="rail-title"><span>类型</span></div>
@@ -382,7 +382,7 @@
               </div>
             </aside>
             <section class="wb-main">
-              <div class="wb-toolbar">
+              <div class="wb-toolbar"><button class="secondary" data-inspector-toggle>预览栏</button>
                 <button class="wb-rail-toggle" data-rail-toggle aria-label="筛选面板"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></svg>筛选</button>
                 <div class="wb-view-switch" role="group" aria-label="布局切换">
                   <button class="active" data-wb-layout="grid" aria-label="网格视图"><svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg></button>
@@ -441,7 +441,7 @@
                   <button data-wb-layout="list" aria-label="列表视图"><svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
                 </div>
                 <select id="librarySort" aria-label="排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="largest">最大文件</option><option value="name">按名称</option></select>
-                <span class="wb-count result-summary" id="librarySummary">正在读取资料…</span>
+                <button class="secondary" data-inspector-toggle>预览栏</button><span class="wb-count result-summary" id="librarySummary">正在读取资料…</span>
               </div>
               <div class="wb-content">
                 <div class="results-grid library-results" id="libraryResults"></div>
@@ -508,9 +508,25 @@
 
         <section class="view" id="view-tasks">
           <div class="section-heading simple-heading"><div><span class="eyebrow">处理管线</span><h1>任务中心</h1></div><span class="queue-status"><i></i>资源保护已启用</span></div>
+          <article class="panel admin-only" id="multimodalPanel" hidden>
+ <div class="panel-head"><div><span class="eyebrow">直接理解画面与声音</span><h2>素材语义索引</h2></div><span class="status-badge" id="multimodalBadge">读取中</span></div>
+ <div class="index-control-summary" id="multimodalSummary"></div>
+ <p class="hint">查询会优先获得资源。暂停将在当前模型请求结束后生效，已经完成的索引会保留。</p>
+ <form class="index-batch-form" id="multimodalPolicyForm">
+  <label>执行模式<select name="mode"><option value="continuous">持续处理</option><option value="night">仅在指定时间处理</option></select></label>
+  <label>开始时间<input name="start_hour" type="number" min="0" max="23" value="0"></label>
+  <label>结束时间<input name="end_hour" type="number" min="0" max="23" value="7"></label>
+  <label>顺序<select name="order"><option value="latest">最新优先</option><option value="oldest">最早优先</option><option value="smallest">小文件优先</option></select></label>
+  <label>每批数量<input name="batch_size" type="number" min="1" max="200" value="20"></label>
+  <button class="secondary">保存策略</button>
+ </form>
+ <div class="repair-actions"><button class="primary" id="toggleMultimodal">暂停索引</button><button class="secondary" id="retryMultimodal">重试失败素材</button></div>
+ <div id="multimodalErrors" class="hint"></div>
+</article>
+
           <article class="panel index-control admin-only">
             <div class="panel-head">
-              <div><span class="eyebrow">安全批处理</span><h2>AI 索引调度</h2></div>
+              <div><span class="eyebrow">安全批处理</span><h2>描述与文字索引</h2></div>
               <span class="status-badge" id="indexPolicyBadge">读取中</span>
             </div>
             <div class="index-control-summary" id="indexControlSummary"></div>
@@ -530,7 +546,7 @@
               <button class="secondary">保存策略</button>
             </form>
           </article>
-          <div class="task-list" id="taskList"></div>
+          <label class="check-row task-history-toggle"><input type="checkbox" id="showScanHistory">显示无变化的扫描记录</label><div class="task-list" id="taskList"></div>
         </section>
 
         <section class="view" id="view-organizer">
@@ -558,14 +574,15 @@
         </section>
 
         <section class="view admin-only" id="view-operations">
-          <div class="section-heading"><div><span class="eyebrow">运行与恢复</span><h1>运维与备份</h1><p class="hint">备份只包含应用元数据，不含原始文件</p></div><button class="primary" id="createBackup"><svg viewBox="0 0 24 24"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 16h8"/></svg>立即备份</button></div>
+          <div class="section-heading"><div><span class="eyebrow">运行与恢复</span><h1>运维与备份</h1><p class="hint">备份应用元数据与两套索引；素材及生成文件请使用 NAS 备份</p></div><button class="primary" id="createBackup"><svg viewBox="0 0 24 24"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 16h8"/></svg>立即备份</button></div>
           <div class="ops-grid" id="opsStatus"></div>
+          <article class="panel"><div class="panel-head"><div><span class="eyebrow">完整索引恢复</span><h2>恢复包</h2></div><span class="status-badge" id="externalNotifyStatus">通知渠道读取中</span></div><p class="hint">同时保存应用元数据、素材索引状态和两套向量。下载后可恢复到独立环境；原始素材、上传文件及模型请一并使用 NAS 备份。</p><div id="recoveryList"></div></article>
           <!-- 阶段八（容器资源）：ops 边车代理的容器状态 / 内存上限 / 重启管理 -->
           <article class="panel container-panel"><div class="panel-head"><div><span class="eyebrow">容器资源</span><h2>容器资源<span class="help-dot" title="通过隔离的 ops 边车读取容器状态；内存上限在线调整（docker update），无需重建容器">?</span></h2></div><span class="status-badge" id="containersBadge">加载中</span></div><div class="container-list" id="containerList"></div></article>
           <article class="panel production-panel"><div class="panel-head"><div><span class="eyebrow">生产就绪检查</span><h2>运行基线</h2></div><span class="status-badge" id="productionBadge">检查中</span></div><div class="production-checks" id="productionChecks"></div></article>
           <article class="panel stage-health-panel"><div class="panel-head"><div><span class="eyebrow">真实覆盖率</span><h2>AI 索引阶段<span class="help-dot" title="区分视觉、语音和向量是否真正完成，避免把只有元数据的文件算作可搜索">?</span></h2></div><div class="repair-actions"><select class="repair-limit" aria-label="本次修复数量"><option value="50">50 个</option><option value="200" selected>200 个</option><option value="500">500 个</option><option value="100000">全部</option></select><button class="secondary" id="repairFromOperations">开始修复</button></div></div><div class="stage-health-grid" id="stageHealthGrid"></div></article>
           <article class="panel consistency-panel"><div class="panel-head"><div><span class="eyebrow">数据完整性</span><h2>SQLite 与向量索引<span class="help-dot" title="核对资料分块与 Qdrant 向量数量；修复时只重建异常文件，不影响正常索引">?</span></h2></div><div class="repair-actions"><button class="secondary" id="checkIndexConsistency">检查一致性</button><button class="secondary" id="repairIndexConsistency" disabled>修复异常</button><button class="secondary" id="compactDatabase">压缩数据库</button></div></div><div class="consistency-status" id="indexConsistencyStatus"><span>尚未检查</span><small>检查不会修改任何数据</small></div></article>
-          <article class="panel vision-upgrade-panel"><div class="panel-head"><div><span class="eyebrow">识别质量迁移</span><h2>升级旧版图片描述<span class="help-dot" title="新版描述和向量全部成功后才替换旧索引；任务按小批次运行，避免阻塞目录扫描">?</span></h2></div><div class="repair-actions"><select class="repair-limit" aria-label="本次升级数量"><option value="50" selected>50 张</option><option value="100">100 张</option><option value="200">200 张</option></select><button class="secondary" id="upgradeCaptions">开始无损升级</button></div></div><div class="vision-upgrade-status" id="visionUpgradeStatus"></div></article>
+          <article class="panel vision-upgrade-panel"><div class="panel-head"><div><span class="eyebrow">识别质量迁移</span><h2>升级旧版图片描述<span class="help-dot" title="新版描述和向量全部成功后才替换旧索引；任务按小批次运行，避免阻塞目录扫描">?</span></h2></div><div class="repair-actions"><select class="repair-limit" aria-label="本次升级数量"><option value="50" selected>50 张</option><option value="100">100 张</option><option value="200">200 张</option></select><button class="secondary" id="retryCaptionFailures">重试失败照片</button><button class="secondary" id="upgradeCaptions">开始无损升级</button></div></div><div class="vision-upgrade-status" id="visionUpgradeStatus"></div></article>
           <article class="panel snapshot-panel"><div class="panel-head"><div><span class="eyebrow">向量灾备</span><h2>Qdrant 快照</h2><p class="hint">恢复前会自动备份 SQLite 元数据</p></div><button class="secondary" id="createVectorSnapshot">创建向量快照</button></div><div class="snapshot-list" id="snapshotList"></div></article>
           <article class="panel audit-panel"><div class="panel-head"><div><span class="eyebrow">安全追踪</span><h2>最近操作</h2></div></div><div class="audit-list" id="auditList"></div></article>
         </section>
@@ -601,6 +618,9 @@
   <!-- 阶段二：通用确认 / 输入弹窗（替代原生 confirm/prompt） -->
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" id="dialogModal"><div class="modal-card compact-modal"><span class="eyebrow" id="dialogEyebrow">确认操作</span><h2 id="dialogTitle"></h2><p id="dialogBody"></p><label id="dialogField" hidden><span id="dialogLabel"></span><input id="dialogInput"></label><div class="dialog-actions"><button class="secondary" id="dialogCancel" type="button">取消</button><button class="primary" id="dialogConfirm" type="button">确定</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=48"></script>
+<div class="modal" role="dialog" aria-modal="true" id="imageSearchModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">视觉检索</span><h2>以图搜图</h2><p>选择参考图片后可拖动框选局部；不框选则搜索整张图。图片仅用于本次检索。</p><label class="secondary image-file-label">选择图片<input id="visualReference" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><canvas id="visualCanvas" hidden></canvas><div class="card-actions"><button class="secondary" id="resetVisualCrop">使用整张图</button><button class="primary" id="submitVisualSearch" disabled>搜索素材库</button></div></div></div>
+<div class="modal" role="dialog" aria-modal="true" id="clipModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">片段交付</span><h2>导出视频片段</h2><p>保留原始视频，生成可下载的 MP4 片段，最长 5 分钟。</p><form id="clipForm"><input name="file_id" type="hidden"><div class="form-grid"><label>开始（秒）<input name="start" type="number" min="0" step="0.01" required></label><label>结束（秒）<input name="end" type="number" min="0" step="0.01" required></label></div><button class="primary">开始导出</button></form></div></div>
+
+  <script src="/assets/app.js?v=49"></script>
 </body>
 </html>

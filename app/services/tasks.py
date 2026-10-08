@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import asyncio
 import json
 import logging
@@ -47,6 +48,13 @@ class TaskManager:
         self.maintenance: asyncio.Task | None = None
         self.scan_locks: dict[int, asyncio.Lock] = {}
         self.stopping = False
+        self.quiescing = False
+        self.running_workers = 0
+        self.backup_gate = asyncio.Lock()
+        from app.services.recovery import RecoveryService
+        from app.services.notifications import NotificationService
+        self.recovery = RecoveryService(database,settings,vectors)
+        self.external_notifications = NotificationService(database,settings)
         self.completed_since_prune = 0
         self._last_album_refresh_at = 0.0
         self.maintenance_state: dict[str, Any] = {
@@ -63,6 +71,19 @@ class TaskManager:
             "last_submitted_at": None,
             "last_task_id": None,
         }
+
+    @asynccontextmanager
+    async def quiesce(self):
+        async with self.backup_gate:
+            self.quiescing=True
+            started=time.monotonic()
+            try:
+                while self.running_workers:
+                    if time.monotonic()-started>1800:raise RuntimeError('后台任务尚未结束，请稍后创建完整备份')
+                    await asyncio.sleep(.2)
+                yield
+            finally:
+                self.quiescing=False
 
     async def start(self) -> None:
         self.database.prune_tasks(self.settings.task_retention_count, self.settings.task_retention_days)
@@ -170,12 +191,15 @@ class TaskManager:
             task: dict[str, Any] | None = None
             task_started = False
             try:
+                while self.quiescing and not self.stopping:
+                    await asyncio.sleep(.1)
                 task = self.database.get_task(task_id)
                 if not task or task["cancel_requested"]:
                     self.database.mark_task_cancelled(task_id)
                     continue
                 self.database.start_task(task_id)
                 task_started = True
+                self.running_workers += 1
                 message = "完成"
                 if task["type"] == "scan_library":
                     message = await self._scan_and_index(task_id, int(task["payload"]["library_id"]))
@@ -252,6 +276,11 @@ class TaskManager:
                         lambda: self.database.is_task_cancelled(task_id),
                     )
                     message = f"生成 {result['events']:,} 个事件相册"
+                elif task["type"] == "export_clip":
+                    from app.services.media_exports import export_clip
+                    result=await asyncio.to_thread(export_clip,self.database,self.settings,int(task['payload']['export_id']),
+                                                  lambda:self.database.is_task_cancelled(task_id))
+                    message=f"视频片段已导出 · {result['duration']:.2f}秒"
                 elif task["type"] == "generate_proxy":
                     result = await asyncio.to_thread(
                         generate_proxy,
@@ -340,6 +369,8 @@ class TaskManager:
                         int(task["user_id"]) if task.get("user_id") is not None else None,
                         message,
                     )
+                    if task['type'] not in {'scan_only','scan_library'}:
+                        self.external_notifications.enqueue(f'task:{task_id}:completed','task.completed','处理任务已完成',message)
             except InterruptedError:
                 self.database.mark_task_cancelled(task_id)
             except asyncio.CancelledError:
@@ -352,6 +383,7 @@ class TaskManager:
                     await asyncio.sleep(0.25)
                 else:
                     try:
+                        self.external_notifications.enqueue(f'task:{task_id}:failed','task.failed','处理任务失败','请在任务中心查看详情并重试')
                         self.database.fail_task_with_notification(
                             task_id,
                             int(task["user_id"]) if task.get("user_id") is not None else None,
@@ -360,6 +392,7 @@ class TaskManager:
                     except Exception:
                         logger.exception("记录任务 %s 失败状态时数据库不可用", task_id)
             finally:
+                if task_started:self.running_workers -= 1
                 self.completed_since_prune += 1
                 if self.completed_since_prune >= 100:
                     self.completed_since_prune = 0
@@ -915,6 +948,21 @@ class TaskManager:
                             detail={"bytes": destination.stat().st_size},
                         )
                         self.maintenance_state["last_backup"] = filename
+                if self.settings.automatic_backup_enabled and self.settings.multimodal_enabled:
+                    bundles=self.recovery.list()
+                    interval=self.settings.automatic_backup_interval_hours*3600
+                    if not bundles or bundles[0]['age_seconds']>=interval:
+                        async with self.quiesce():
+                            result=await asyncio.to_thread(self.recovery.create)
+                        self.maintenance_state['last_recovery']=result['name']
+                        self.external_notifications.enqueue('backup:'+result['name'],'backup.completed','完整索引备份已完成','元数据及双索引恢复包已校验')
+                if self.settings.multimodal_enabled:
+                    mm=self.recovery.multimodal.status()
+                    if mm.get('total_media') and not mm.get('pending_files'):
+                        self.external_notifications.enqueue('mm:complete:'+str(mm['total_media']),'index.completed','素材语义索引已完成',f"已处理 {mm['indexed_files']} 个媒体文件")
+                    if mm.get('terminal_errors'):
+                        self.external_notifications.enqueue('mm:errors:'+str(mm['terminal_errors']),'index.failed','素材索引需要人工检查',f"{mm['terminal_errors']} 个素材已停止无效重试")
+                await asyncio.to_thread(self.external_notifications.flush)
                 self.maintenance_state["last_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
                 self.maintenance_state["last_error"] = ""
             except asyncio.CancelledError:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import tempfile
+import tarfile
 import hashlib
 import hmac
 import html
@@ -370,7 +373,7 @@ state = AppState()
 INDEX_KINDS = {"", "image", "video", "audio", "document", "archive", "other"}
 INDEX_ORDERS = {"balanced", "newest", "oldest", "smallest"}
 # 容器资源面板可操作的服务白名单（与 ops 边车各自独立校验）
-OPS_SERVICES = {"app", "vision", "reranker", "embedding", "qdrant", "speech"}
+OPS_SERVICES = {"app", "vision", "reranker", "embedding", "qdrant", "speech", "multimodal", "multimodal-indexer"}
 COMMENT_ATTACHMENT_MIMES = {
     "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif",
     "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
@@ -424,7 +427,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -446,6 +449,8 @@ async def production_headers(request: Request, call_next: Any) -> Any:
         csrf_header = request.headers.get("x-csrf-token", "")
         if not csrf_cookie or not csrf_header or not hmac.compare_digest(csrf_cookie, csrf_header):
             return JSONResponse({"detail": "CSRF 校验失败"}, status_code=403)
+    if request.method in {'POST','PUT','PATCH','DELETE'} and getattr(getattr(state,'tasks',None),'quiescing',False):
+        return JSONResponse({'detail':'正在创建完整恢复备份，请稍后重试'},status_code=503,headers={'Retry-After':'2'})
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -1145,6 +1150,15 @@ def _production_readiness() -> dict[str, Any]:
         "本地模型端点可用" if local_ai.get("reachable") else "一个或多个本地模型端点不可达",
         True,
     )
+    if settings.multimodal_enabled:
+        mm=state.search.multimodal.status()
+        mm_health=state.search.multimodal.health()
+        add('multimodal_model','ok' if mm_health['reachable'] else 'warning','素材语义模型在线' if mm_health['reachable'] else '素材模型离线，已回退原检索')
+        add('multimodal_worker','ok' if mm.get('worker_alive') else 'warning',f"已索引 {mm['indexed_files']}/{mm['total_media']} · {mm.get('worker_status','等待服务')}")
+        add('multimodal_errors','warning' if mm.get('errors') else 'ok',f"{mm.get('errors',0)} 个素材失败，{mm.get('terminal_errors',0)} 个需要人工检查")
+        bundles=state.tasks.recovery.list()
+        fresh=bool(bundles and bundles[0].get('verified') and bundles[0]['age_seconds']<=max(48,settings.automatic_backup_interval_hours*2)*3600)
+        add('recovery_backup','ok' if fresh else 'warning',bundles[0]['name'] if fresh else '缺少新鲜、已校验的双索引恢复包')
     token_ok = len(settings.api_token) >= 32
     add(
         "authentication",
@@ -1188,8 +1202,8 @@ def _production_readiness() -> dict[str, Any]:
     vector_snapshots = state.vectors.list_snapshots()
     add(
         "vector_backup",
-        "ok" if vector_snapshots else "warning",
-        vector_snapshots[0]["name"] if vector_snapshots else "尚未创建 Qdrant 向量快照",
+        "ok" if vector_snapshots and time.time()-datetime.fromisoformat(vector_snapshots[0]['created_at']).timestamp()<=48*3600 else "warning",
+        vector_snapshots[0]["name"] if vector_snapshots and time.time()-datetime.fromisoformat(vector_snapshots[0]['created_at']).timestamp()<=48*3600 else "缺少48小时内的向量快照",
     )
     sensitive_paths = [
         settings.data_dir,
@@ -1513,6 +1527,140 @@ def watcher_status(principal: Auth) -> dict[str, Any]:
     return state.watcher.status()
 
 
+class MultimodalPolicyUpdate(BaseModel):
+    paused:bool=False
+    mode:str='continuous'
+    start_hour:int=Field(default=0,ge=0,le=23)
+    end_hour:int=Field(default=7,ge=0,le=23)
+    batch_size:int=Field(default=20,ge=1,le=200)
+    order:str='latest'
+    library_id:Optional[int]=None
+    kind:str=''
+
+class ClipExportRequest(BaseModel):
+    start:float=Field(ge=0)
+    end:float=Field(gt=0)
+
+@app.put('/api/index/multimodal/policy')
+def set_multimodal_policy(payload:MultimodalPolicyUpdate,principal:Auth):
+    _require_admin(principal)
+    if payload.library_id is not None:_visible_library(payload.library_id,principal)
+    try:
+        policy=state.search.multimodal.set_policy(payload.model_dump())
+    except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+    _audit(principal,'multimodal.policy','settings','multimodal',policy)
+    return policy
+
+@app.post('/api/index/multimodal/retry')
+def retry_multimodal(principal:Auth):
+    _require_admin(principal)
+    count=state.search.multimodal.retry()
+    _audit(principal,'multimodal.retry','index','multimodal',{'files':count})
+    return {'files':count}
+
+@app.post('/api/operations/caption-failures/retry',status_code=202)
+async def retry_caption_failures(principal:Auth):
+    _require_admin(principal)
+    ids=[r['file_id'] for r in state.database.fetchall('SELECT file_id FROM caption_upgrade_attempts WHERE terminal=1')]
+    for file_id in ids:state.database.clear_caption_upgrade_failure(file_id)
+    task_id,existing=await state.tasks.submit_unique('upgrade_captions',{'limit':min(200,max(1,len(ids)))},priority=7,user_id=principal['user_id'])
+    _audit(principal,'vision.retry_failed','task',str(task_id),{'files':len(ids)})
+    return {'files':len(ids),'task_id':task_id,'existing':existing}
+
+@app.get('/api/operations/recovery')
+def list_recovery(principal:Auth):
+    _require_admin(principal)
+    return {'items':state.tasks.recovery.list(),'notifications':state.tasks.external_notifications.status()}
+
+@app.post('/api/operations/recovery/{name}/verify')
+async def verify_recovery(name:str,principal:Auth):
+    _require_admin(principal)
+    try:return await __import__('asyncio').to_thread(state.tasks.recovery.verify,name)
+    except FileNotFoundError as exc:raise HTTPException(404,str(exc)) from exc
+    except (ValueError,tarfile.TarError) as exc:raise HTTPException(409,str(exc)) from exc
+
+@app.get('/api/operations/recovery/{name}/download')
+def download_recovery(name:str,principal:Auth):
+    _require_admin(principal)
+    try:path=state.tasks.recovery._bundle(name)
+    except (FileNotFoundError,ValueError) as exc:raise HTTPException(404,str(exc)) from exc
+    return FileResponse(path,media_type='application/x-tar',filename=name)
+
+@app.post('/api/files/{file_id}/clips',status_code=202)
+async def create_clip(file_id:int,payload:ClipExportRequest,principal:Auth):
+    file=_visible_file(file_id,principal)
+    if file['kind']!='video' or payload.end<=payload.start or payload.end-payload.start>300 or payload.end>float(file.get('duration') or 0)+.01:
+        raise HTTPException(400,'请选择有效视频区间，最长5分钟')
+    export_id=state.database.execute("INSERT INTO clip_exports(file_id,user_id,start_time,end_time,created_at) VALUES (?,?,?,?,?)",
+               (file_id,principal.get('user_id'),payload.start,payload.end,datetime.now(timezone.utc).isoformat(timespec='seconds')))
+    task_id=await state.tasks.submit('export_clip',{'export_id':export_id},priority=4,user_id=principal.get('user_id'))
+    state.database.execute('UPDATE clip_exports SET task_id=? WHERE id=?',(task_id,export_id))
+    _audit(principal,'clip.export','clip',str(export_id),{'file_id':file_id,'start':payload.start,'end':payload.end})
+    return {'id':export_id,'task_id':task_id}
+
+@app.get('/api/clips/{export_id}')
+def get_clip(export_id:int,principal:Auth):
+    row=state.database.fetchone('SELECT * FROM clip_exports WHERE id=?',(export_id,))
+    if not row:raise HTTPException(404,'片段不存在')
+    _visible_file(int(row['file_id']),principal)
+    if not _is_admin(principal) and row['user_id']!=principal.get('user_id'):raise HTTPException(403,'无权访问片段')
+    return {k:row[k] for k in ['id','file_id','task_id','start_time','end_time','status','error']}
+
+@app.get('/api/clips/{export_id}/download')
+def download_clip(export_id:int,principal:Auth):
+    row=get_clip(export_id,principal)
+    if row['status']!='ready':raise HTTPException(409,'片段尚未完成')
+    path=settings.data_dir/'clip-exports'/f'clip-{export_id}.mp4'
+    if not path.is_file():raise HTTPException(404,'片段已离线')
+    return FileResponse(path,media_type='video/mp4',filename=f'视频片段-{export_id}.mp4')
+
+@app.post('/api/search/image')
+async def search_image(request:Request,principal:Auth,kind:str='image',limit:int=Query(default=20,ge=1,le=60),
+                       library_id:Optional[int]=None,left:float=0,top:float=0,right:float=1,bottom:float=1):
+    if kind not in {'','image','video','audio'}:raise HTTPException(400,'检索类型无效')
+    if not 0<=left<right<=1 or not 0<=top<bottom<=1:raise HTTPException(400,'框选范围无效')
+    libraries=_library_ids(principal)
+    if library_id is not None:
+        _visible_library(library_id,principal);libraries=[library_id]
+    if not state.search.multimodal.enabled:raise HTTPException(409,'素材语义模型尚未启用')
+    size=0
+    with tempfile.TemporaryDirectory(dir=settings.cache_dir,prefix='visual-query-') as tmp:
+        source=Path(tmp)/'reference';target=Path(tmp)/'crop.jpg'
+        with source.open('wb') as dest:
+            async for chunk in request.stream():
+                size+=len(chunk)
+                if size>20*1024*1024:raise HTTPException(413,'参考图片最大20MB')
+                dest.write(chunk)
+        def prepare():
+            from PIL import Image,ImageOps
+            try:
+                with Image.open(source) as opened:
+                    if opened.width*opened.height>40_000_000:raise ValueError('参考图片像素过大')
+                    image=ImageOps.exif_transpose(opened).convert('RGB')
+                    cropped=image.crop((round(left*image.width),round(top*image.height),round(right*image.width),round(bottom*image.height)))
+                    if min(cropped.size)<1:raise ValueError('框选范围过小')
+                    cropped.thumbnail((960,960));cropped.save(target,'JPEG',quality=88)
+            except (OSError,ValueError) as exc:raise ValueError('请上传有效的JPEG、PNG或WebP图片') from exc
+        try:
+            await asyncio.to_thread(prepare)
+            hits=await asyncio.to_thread(state.search.multimodal.image_search,MultimodalService.image_input(target),max(80,limit*5),kind,libraries)
+            return state.search.visual_results(hits,kind,limit,libraries)
+        except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+        except httpx.HTTPError as exc:raise HTTPException(503,'素材语义服务暂不可用，请稍后重试') from exc
+
+@app.get('/api/files/{file_id}/visual-similar')
+def visual_similar(file_id:int,principal:Auth,limit:int=Query(default=20,ge=1,le=60)):
+    file=_visible_file(file_id,principal)
+    if file['kind']!='image' or not state.search.multimodal.enabled:
+        return similar_files(file_id,principal,limit=limit)
+    try:
+        path=state.search.multimodal.source_path(file)
+        hits=state.search.multimodal.image_search(MultimodalService.image_input(path),max(80,limit*5),'image',_library_ids(principal))
+        return state.search.visual_results(hits,'image',limit,_library_ids(principal),exclude_id=file_id)
+    except (httpx.HTTPError,ValueError):
+        return similar_files(file_id,principal,limit=limit)
+
+
 @app.get("/api/system/multimodal")
 def multimodal_status(principal: Auth) -> dict[str, Any]:
     return state.search.multimodal.status(_library_ids(principal))
@@ -1723,13 +1871,19 @@ async def create_artifact_version(
 
 
 @app.get("/api/artifacts/{artifact_id}/versions/{version_id}/download")
-def download_artifact_version(artifact_id: int, version_id: int, principal: Auth) -> FileResponse:
+def download_artifact_version(artifact_id: int, version_id: int, principal: Auth, format: str = "md") -> FileResponse:
     path = state.productivity.artifact_file(
         artifact_id, version_id, _personal_user_id(principal), _is_admin(principal)
     )
     if not path:
         raise HTTPException(status_code=404, detail="成果文件不存在")
-    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=path.name)
+    if format=='md':return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=path.name)
+    from app.services.artifact_exports import export_artifact
+    artifact=state.productivity.artifact(artifact_id,_personal_user_id(principal),_is_admin(principal))
+    try:
+        exported,mime=export_artifact(path,artifact['title'],format,settings.cache_dir/'artifact-exports')
+    except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+    return FileResponse(exported,media_type=mime,filename=f"{artifact['title']}-V{version_id}.{format}")
 
 
 @app.delete("/api/artifacts/{artifact_id}")
@@ -4618,12 +4772,14 @@ async def repair_index_consistency(principal: Auth) -> dict[str, Any]:
 
 
 @app.post("/api/operations/backups", status_code=201)
-def create_backup(principal: Auth) -> dict[str, Any]:
+async def create_backup(principal: Auth) -> dict[str, Any]:
     _require_admin(principal)
     backup_directory = settings.data_dir / "backups"
     filename = f"nas-ai-space-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
     destination = backup_directory / filename
-    state.database.backup(destination)
+    async with state.tasks.quiesce():
+        await asyncio.to_thread(state.database.backup,destination)
+        recovery=await asyncio.to_thread(state.tasks.recovery.create) if settings.multimodal_enabled else None
     old_backups = sorted(
         backup_directory.glob("nas-ai-space-*.db"),
         key=lambda path: path.stat().st_mtime,
@@ -4637,6 +4793,7 @@ def create_backup(principal: Auth) -> dict[str, Any]:
         "name": filename,
         "bytes": destination.stat().st_size,
         "retained": settings.automatic_backup_retention,
+        "recovery": recovery,
     }
 
 

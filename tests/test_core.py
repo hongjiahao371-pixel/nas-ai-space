@@ -4328,7 +4328,7 @@ class OpsAgentTests(unittest.TestCase):
 
         with patch.object(ops_agent, "docker_request", side_effect=fake_docker):
             items = ops_agent.list_containers()
-        self.assertEqual(len(items), 6)
+        self.assertEqual(len(items), 8)
         app_item = items[0]
         self.assertEqual(app_item["service"], "app")
         self.assertEqual(app_item["name"], "nas-ai-space-app-1")

@@ -109,6 +109,9 @@ class Settings:
     multimodal_poll_seconds: int = 15
     multimodal_memory_floor_mb: int = 2048
     multimodal_min_score: float = 0.12
+    multimodal_scene_frames: int = 6
+    multimodal_video_audio: bool = True
+    notification_webhook_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -214,6 +217,9 @@ class Settings:
             allow_query_token=_bool_env("NAS_AI_ALLOW_QUERY_TOKEN", False),
             qdrant_url=os.getenv("NAS_AI_QDRANT_URL", "http://qdrant:6333").strip().rstrip("/"),
             qdrant_collection=os.getenv("NAS_AI_QDRANT_COLLECTION", "nas_ai_chunks").strip(),
+            multimodal_scene_frames=_int_env("NAS_AI_MULTIMODAL_SCENE_FRAMES",6,0,12),
+            multimodal_video_audio=_bool_env("NAS_AI_MULTIMODAL_VIDEO_AUDIO",True),
+            notification_webhook_url=os.getenv("NAS_AI_NOTIFICATION_WEBHOOK_URL", "").strip(),
             multimodal_enabled=_bool_env("NAS_AI_MULTIMODAL_ENABLED", False),
             multimodal_base_url=os.getenv("NAS_AI_MULTIMODAL_URL", "").strip().rstrip("/"),
             multimodal_collection=os.getenv("NAS_AI_MULTIMODAL_COLLECTION", "nas_ai_media_gemma2_q8_v1").strip(),

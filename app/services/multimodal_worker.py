@@ -15,6 +15,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     service = MultimodalService(settings)
+    service.stopping=stop.is_set
     if not service.enabled:
         raise RuntimeError("多模态索引尚未启用")
     while not stop.is_set():

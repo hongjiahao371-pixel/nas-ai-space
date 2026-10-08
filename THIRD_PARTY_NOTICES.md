@@ -28,3 +28,7 @@ version you select.
 Changing a model name, image tag or hardware-specific runtime may change the
 applicable third-party terms. Keep this notice and the corresponding upstream
 license files when redistributing a combined image or appliance.
+
+## Native export runtime dependencies
+
+Native exports install python-docx 1.2.0 (MIT), python-pptx 1.0.2 (MIT), ReportLab 5.0.1 (BSD), lxml 6.1.3 (BSD) and XlsxWriter 3.2.9 (BSD). Package license notices remain in the installed distributions. Chinese PDF rendering uses the system WenQuanYi Zen Hei font when available; its font license remains in the OS package. These components retain their upstream licenses.

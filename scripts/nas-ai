@@ -449,7 +449,7 @@ doctor_command() {
       warn "Compose 配置校验失败"; failures=$((failures + 1))
     fi
     image=$(env_value NAS_AI_APP_IMAGE)
-    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.5.0}
+    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.6.0}
     if "${DOCKER_CMD[@]}" manifest inspect "$image" >/dev/null 2>&1; then
       say "✓ 预构建应用镜像可读取：$image"
     else

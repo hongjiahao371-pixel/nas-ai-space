@@ -189,6 +189,7 @@ const taskTitle = task => ({
   generate_proxy: '生成审阅代理媒体',
   generate_look_preview: '生成 LUT 审阅预览',
   collect_project_inbox: '收集 NAS 项目入库箱',
+  export_clip: '导出视频片段',
   generate_artifact: '生成工作成果',
   agent_run: '执行 AI 任务',
   automation_run: '运行自动化工作流',
@@ -746,7 +747,7 @@ async function openArtifact(artifactId) {
     const version = artifact.versions?.[0];
     const detail = $('#artifactDetail');
     detail.hidden = false;
-    detail.innerHTML = `<div class="space-detail-head"><div><span class="eyebrow">${esc(artifactTypeLabel(artifact.artifact_type))} · ${esc(artifact.status)}</span><h2>${esc(artifact.title)}</h2><p>${fmtCount(artifact.versions.length)} 个版本 · ${esc(fmtTime(artifact.updated_at))}</p></div><div class="card-actions">${version ? `<button class="secondary" data-artifact-download="${artifact.id}" data-version="${version.id}" data-name="${esc(artifact.title)}-V${version.version_number}.md">下载 Markdown</button>` : ''}<button class="danger" data-artifact-delete="${artifact.id}">删除</button></div></div>${version ? `<div class="artifact-content">${esc(version.content)}</div><div class="citation-list">${(version.sources || []).map((source, index) => `<button data-file="${source.id}">[${index + 1}] ${esc(source.path || source.name)}</button>`).join('')}</div>` : '<div class="empty-state compact"><b>成果正在生成</b><p>完成后会自动出现在这里。</p></div>'}`;
+    detail.innerHTML = `<div class="space-detail-head"><div><span class="eyebrow">${esc(artifactTypeLabel(artifact.artifact_type))} · ${esc(artifact.status)}</span><h2>${esc(artifact.title)}</h2><p>${fmtCount(artifact.versions.length)} 个版本 · ${esc(fmtTime(artifact.updated_at))}</p></div><div class="card-actions">${version ? ['md','docx','pdf','pptx'].map(format=>`<button class="secondary" data-artifact-download="${artifact.id}" data-version="${version.id}" data-format="${format}" data-name="${esc(artifact.title)}-V${version.version_number}.${format}">${{md:'Markdown',docx:'Word',pdf:'PDF',pptx:'PowerPoint'}[format]}</button>`).join('') : ''}<button class="danger" data-artifact-delete="${artifact.id}">删除</button></div></div>${version ? `<div class="artifact-content">${esc(version.content)}</div><div class="citation-list">${(version.sources || []).map((source, index) => `<button data-file="${source.id}">[${index + 1}] ${esc(source.path || source.name)}</button>`).join('')}</div>` : '<div class="empty-state compact"><b>成果正在生成</b><p>完成后会自动出现在这里。</p></div>'}`;
   } catch (error) { toast(error.message, true); }
 }
 
@@ -812,6 +813,7 @@ async function loadIndexStatus(refreshForm = false, quiet = false) {
   try {
     const data = await api('/api/index/status');
     state.indexStatus = data;
+    renderMultimodal(data.multimodal,refreshForm);
     const kinds = Object.fromEntries(data.pending.kinds.map(item => [item.kind, item]));
     const available = Number(data.resources.available_memory_bytes || 0);
     const minimum = Number(data.resources.minimum_memory_bytes || 0);
@@ -820,12 +822,7 @@ async function loadIndexStatus(refreshForm = false, quiet = false) {
     const terminal = Number(data.stages.terminal_failures || 0);
     const retryWaiting = Number(data.stages.retry_waiting || 0);
     $('#indexControlSummary').innerHTML = [
-      indexSummaryItem('语义覆盖', fmtPercent(overview.semantic_percent), `${fmtCount(overview.semantic_ready)} / ${fmtCount(overview.total)}`),
-      ...(data.multimodal?.enabled ? [
-        indexSummaryItem('素材语义', `${fmtCount(data.multimodal.indexed_files)} / ${fmtCount(data.multimodal.total_media)} 个`,
-          data.multimodal.worker_alive ? '直接理解素材 · 后台持续建立索引' : '等待素材索引服务'),
-        indexSummaryItem('素材片段', `${fmtCount(data.multimodal.indexed_points)} 个`, '图片直接检索 · 视频按抽帧覆盖'),
-      ] : []),
+      indexSummaryItem('描述语义覆盖', fmtPercent(overview.semantic_percent), `${fmtCount(overview.semantic_ready)} / ${fmtCount(overview.total)}`),
       indexSummaryItem('待索引', `${fmtCount(data.pending.total)} 个`, fmtBytes(data.pending.bytes)),
       indexSummaryItem('待修复', `${fmtCount(data.stages.repairable)} 个`, '仅重跑缺失阶段'),
       indexSummaryItem('退避等待', `${fmtCount(retryWaiting)} 个`, '按指数退避自动重试'),
@@ -893,9 +890,10 @@ function runtimeMetricsBody(metrics) {
     + kv('CPU 1 分钟负载', `${metrics.cpu.load_percent}% · ${metrics.cpu.load_1m}`)
     + kv('可用内存', fmtBytes(metrics.memory.available_bytes))
     + kv('Swap 已用', `${fmtBytes(metrics.memory.swap_used_bytes)} / ${fmtBytes(metrics.memory.swap_total_bytes)}`)
-    + kv('GPU 利用率', gpu ? `${gpu.utilization_percent}%` : '无 NVIDIA 实时数据')
-    + kv('GPU 显存', gpu ? `${fmtBytes(gpu.memory_used_bytes)} / ${fmtBytes(gpu.memory_total_bytes)}` : '—')
-    + kv('GPU 温度 / 功耗', gpu ? `${gpu.temperature_c}℃ · ${gpu.power_watts.toFixed(1)} W` : '—');
+    + kv('GPU 利用率', gpu?.utilization_percent!=null ? `${gpu.utilization_percent}%` : '系统未提供利用率')
+    + kv('GPU 显存', gpu?.memory_total_bytes!=null ? `${fmtBytes(gpu.memory_used_bytes)} / ${fmtBytes(gpu.memory_total_bytes)}` : gpu?.vendor==='intel'?'共享系统内存':'—')
+    + kv('GPU 温度 / 功耗', gpu?.power_watts!=null ? `${gpu.temperature_c}℃ · ${gpu.power_watts.toFixed(1)} W` : '系统未提供'
+    ) + (gpu?.frequency_mhz!=null?kv('Intel GPU 当前频率',`${gpu.frequency_mhz} MHz`):'');
 }
 
 async function loadRuntimeMetrics() {
@@ -1067,8 +1065,9 @@ function resultCard(item) {
   const feedback = state.searchQuery
     ? `<span class="card-feedback"><button data-card-feedback="relevant" data-feedback-file="${item.id}" title="相关">✓</button><button data-card-feedback="irrelevant" data-feedback-file="${item.id}" title="不相关">×</button></span>`
     : '';
+  const clipExport = item.kind==='video' ? `<button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
-  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
+  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
 }
 
 // 阶段三（布局重构）：列表行模式，与网格卡片并列；缩略图复用同一条懒加载管线
@@ -1162,6 +1161,7 @@ function inspectorSkeleton() {
 }
 
 async function openInspector(fileId, aside) {
+  aside.closest('.workbench').classList.add('inspector-open');
   state.inspectorFileId = Number(fileId);
   const sequence = ++state.inspectorSeq;
   markSelectedFile();
@@ -1183,6 +1183,7 @@ async function openInspector(fileId, aside) {
 function selectWorkbenchFile(element) {
   const aside = $('.wb-inspector', element.closest('.workbench'));
   if (!aside) return;
+  if(innerWidth>1180)aside.closest('.workbench').classList.add('inspector-open');
   if (!state.inspectorClickTimer) state.inspectorRestore = { aside, html: aside.innerHTML };
   clearTimeout(state.inspectorClickTimer);
   state.inspectorFileId = Number(element.dataset.file);
@@ -1321,7 +1322,7 @@ async function runSimilarSearch(fileId, name) {
   $('#searchSummary').textContent = '正在查找语义相近的内容…';
   $('#searchResults').innerHTML = '<div class="empty-state"><b>正在比较本地向量…</b><p>不会上传原文件或内容描述。</p></div>';
   try {
-    const data = await api(`/api/files/${fileId}/similar?limit=20`);
+    const data = await api(`/api/files/${fileId}/visual-similar?limit=20`);
     if (sequence !== state.searchSequence) return;
     state.searchTotal = Number(data.total || 0);
     state.searchResults = data.results || [];
@@ -1797,6 +1798,7 @@ function openUserModal(user = null) {
 }
 
 async function loadOperations() {
+  loadRecovery();
   if (!isAdmin()) return;
   try {
     const [data, audit, snapshots] = await Promise.all([
@@ -1821,17 +1823,17 @@ async function loadOperations() {
       sensitive_permissions: '敏感文件权限', backup_verification: '备份完整性',
       index_failures: '索引失败项', caption_upgrades: '图片描述版本',
       caption_upgrade_failures: '描述迁移失败', index_controller: '外部调度器',
-      task_heartbeat: '任务心跳',
+      task_heartbeat: '任务心跳',multimodal_model:'素材语义模型',multimodal_worker:'素材索引服务',multimodal_errors:'素材索引异常',recovery_backup:'双索引恢复备份',
     };
     $('#productionChecks').innerHTML = production.checks.length
       ? production.checks.map(check => `<div class="production-check ${esc(check.level)}"><i></i><div><b>${esc(checkLabels[check.name] || check.name)}</b><span>${esc(check.detail)}</span></div><small>${check.level === 'ok' ? '通过' : check.level === 'warning' ? '提醒' : '阻塞'}</small></div>`).join('')
       : '<div class="empty-state compact"><b>尚未取得生产检查结果</b></div>';
     const stages = data.indexing.stages;
     const stageCard = (name, values) => {
-      const ready = Number(values.ready || 0) + Number(values.manual || 0) + Number(values.not_applicable || 0);
+      const ready = Number(values.ready || 0) + Number(values.manual || 0);
       const trouble = Number(values.error || 0) + Number(values.missing || 0) + Number(values.blocked || 0);
       const pending = Number(values.pending || 0);
-      return `<div class="stage-health-card"><span>${esc(name)}</span><b>${fmtCount(ready)} 正常</b><div class="stage-stack"><i style="--stage:${Math.max(2, ready)}"></i><i class="warning" style="--stage:${Math.max(0, trouble)}"></i><i class="muted" style="--stage:${Math.max(0, pending)}"></i></div><small>${fmtCount(trouble)} 需修复 · ${fmtCount(pending)} 待处理</small></div>`;
+      return `<div class="stage-health-card"><span>${esc(name)}</span><b>${fmtCount(ready)} 已完成</b><div class="stage-stack"><i style="--stage:${Math.max(2, ready)}"></i><i class="warning" style="--stage:${Math.max(0, trouble)}"></i><i class="muted" style="--stage:${Math.max(0, pending)}"></i></div><small>${fmtCount(values.not_applicable)} 不适用 · ${fmtCount(trouble)} 需修复 · ${fmtCount(pending)} 待处理</small></div>`;
     };
     $('#stageHealthGrid').innerHTML = [
       stageCard('视觉描述', stages.vision || {}),
@@ -1882,7 +1884,7 @@ async function loadIndexConsistency() {
 }
 
 // 阶段八（容器资源）：ops 边车代理的容器面板
-const OPS_SERVICE_LABELS = { app: '应用', vision: '视觉识别', reranker: '精准重排', embedding: '语义向量', qdrant: '向量数据库', speech: '语音转写' };
+const OPS_SERVICE_LABELS = { multimodal:'素材语义模型', 'multimodal-indexer':'素材索引服务', app: '应用', vision: '视觉识别', reranker: '精准重排', embedding: '语义向量', qdrant: '向量数据库', speech: '语音转写' };
 
 function containerRow(item) {
   const usage = Number(item.mem_usage_bytes || 0);
@@ -2018,7 +2020,7 @@ async function openFileViewer(fileId, matchTime = null) {
 }
 
 function renderHomeTasks(tasks) {
-  const items = tasks.slice(0, 3);
+  const items = tasks.filter(task=>!(task.type==='scan_only'&&task.status==='completed'&&/新增或变化 0，移除 0/.test(task.message||''))).slice(0,3);
   $('#homeTasks').innerHTML = items.length
     ? items.map(task => `<div class="home-task-row"><i class="${esc(task.status)}"></i><div><b>${esc(taskTitle(task))}</b><small>${esc(task.message || task.error || '等待执行')}</small></div><span>${esc(taskStatus(task.status))}</span></div>`).join('')
     : '<div class="home-task-row"><i></i><div><b>当前没有处理任务</b><small>扫描媒体库后，处理进度会显示在这里</small></div><span>空闲</span></div>';
@@ -2027,18 +2029,19 @@ function renderHomeTasks(tasks) {
 async function loadTasks(quiet = false) {
   try {
     const tasks = await api('/api/tasks');
+    const visibleTasks=$('#showScanHistory').checked?tasks:tasks.filter(task=>!(task.type==='scan_only'&&task.status==='completed'&&/新增或变化 0，移除 0/.test(task.message||'')));
     const activeCount = tasks.filter(task => ['pending', 'running'].includes(task.status)).length;
     $('#taskCount').textContent = activeCount;
     renderHomeTasks(tasks);
-    $('#taskList').innerHTML = tasks.length
-      ? tasks.map(task => {
+    $('#taskList').innerHTML = visibleTasks.length
+      ? visibleTasks.map(task => {
         const done = Number(task.work_done || 0);
         const total = Number(task.work_total || 0);
         const work = total ? ` · ${fmtCount(done)}/${fmtCount(total)}` : '';
         const heartbeat = task.heartbeat_at && task.status === 'running'
           ? ` · 心跳 ${new Date(task.heartbeat_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
           : '';
-        return `<article class="task-card"><span class="card-leading">${icon('task')}</span><div><h3>${esc(taskTitle(task))}</h3><p>${esc(task.message || task.error || '等待执行')}${esc(work)}${esc(heartbeat)} · ${esc(fmtTime(task.created_at))}</p><div class="progress"><span style="width:${Math.round(task.progress * 100)}%"></span></div></div><div class="card-actions"><span class="task-status ${esc(task.status)}">${esc(taskStatus(task.status))}</span>${['pending', 'running'].includes(task.status) ? `<button class="danger" data-cancel="${task.id}">取消</button>` : ''}${['failed', 'cancelled'].includes(task.status) ? `<button class="secondary" data-retry="${task.id}">重试</button>` : ''}</div></article>`;
+        return `<article class="task-card"><span class="card-leading">${icon('task')}</span><div><h3>${esc(taskTitle(task))}</h3><p>${esc(task.message || task.error || '等待执行')}${esc(work)}${esc(heartbeat)} · ${esc(fmtTime(task.created_at))}</p><div class="progress"><span style="width:${Math.round(task.progress * 100)}%"></span></div></div><div class="card-actions"><span class="task-status ${esc(task.status)}">${esc(taskStatus(task.status))}</span>${task.type==='export_clip'&&task.status==='completed'?`<button class="secondary" data-clip-download="${task.payload.export_id}">下载片段</button>`:''}${['pending', 'running'].includes(task.status) ? `<button class="danger" data-cancel="${task.id}">取消</button>` : ''}${['failed', 'cancelled'].includes(task.status) ? `<button class="secondary" data-retry="${task.id}">重试</button>` : ''}</div></article>`;
       }).join('')
       : '<div class="empty-state"><span class="empty-icon">' + icon('task') + '</span><b>暂无处理任务</b><p>扫描媒体库时，实时进度会显示在这里。</p></div>';
   } catch (error) {
@@ -2746,6 +2749,16 @@ document.addEventListener('change', event => {
 });
 
 document.addEventListener('click', async event => {
+  if(event.target.closest('#openImageSearch'))return openModal($('#imageSearchModal'));
+  if(event.target.closest('[data-inspector-toggle]')){event.target.closest('.workbench').classList.toggle('inspector-open');return;}
+  const clip=event.target.closest('[data-export-clip]');if(clip){event.stopPropagation();return openClipModal(clip.dataset.exportClip,clip.dataset.time||0);}
+  const clipDownload=event.target.closest('[data-clip-download]');if(clipDownload)return downloadAuthenticated(`/api/clips/${clipDownload.dataset.clipDownload}/download`,`视频片段-${clipDownload.dataset.clipDownload}.mp4`);
+  if(event.target.closest('#toggleMultimodal')){try{const policy={...state.indexStatus.multimodal.policy,paused:!state.indexStatus.multimodal.policy.paused};await api('/api/index/multimodal/policy',{method:'PUT',body:JSON.stringify(policy)});await loadIndexStatus(true);}catch(error){toast(error.message,true)}return;}
+  if(event.target.closest('#retryMultimodal')){try{const result=await api('/api/index/multimodal/retry',{method:'POST'});toast(`${result.files} 个素材重新加入索引队列`);await loadIndexStatus()}catch(error){toast(error.message,true)}return;}
+  if(event.target.closest('#retryCaptionFailures')){try{const result=await api('/api/operations/caption-failures/retry',{method:'POST'});toast(`${result.files} 张失败照片已重新加入无损升级队列`);await loadTasks()}catch(error){toast(error.message,true)}return;}
+  const verifyRecovery=event.target.closest('[data-recovery-verify]');if(verifyRecovery){verifyRecovery.disabled=true;try{await api(`/api/operations/recovery/${encodeURIComponent(verifyRecovery.dataset.recoveryVerify)}/verify`,{method:'POST'});toast('恢复包哈希及数据库完整性校验通过')}catch(error){toast(error.message,true)}finally{verifyRecovery.disabled=false}return;}
+  const downloadRecovery=event.target.closest('[data-recovery-download]');if(downloadRecovery)return downloadAuthenticated(`/api/operations/recovery/${encodeURIComponent(downloadRecovery.dataset.recoveryDownload)}/download`,downloadRecovery.dataset.recoveryDownload);
+
   const helpDot = event.target.closest('.help-dot');
   if (helpDot) {
     // 再次点击同一个帮助点 = 收起
@@ -3079,7 +3092,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#createBackup')) {
     try {
       const backup = await api('/api/operations/backups', { method: 'POST' });
-      toast(`备份已完成：${backup.name}`);
+      toast(backup.recovery?`完整恢复包已完成：${backup.recovery.name}`:`备份已完成：${backup.name}`);
       loadOperations();
     } catch (error) { toast(error.message, true); }
     return;
@@ -3958,7 +3971,7 @@ document.addEventListener('click', async event => {
   const artifactDownload = event.target.closest('[data-artifact-download]');
   if (artifactDownload) {
     return downloadAuthenticated(
-      `/api/artifacts/${artifactDownload.dataset.artifactDownload}/versions/${artifactDownload.dataset.version}/download`,
+      `/api/artifacts/${artifactDownload.dataset.artifactDownload}/versions/${artifactDownload.dataset.version}/download?format=${artifactDownload.dataset.format||'md'}`,
       artifactDownload.dataset.name,
     );
   }
@@ -4832,4 +4845,64 @@ if (state.publicMode) {
 } else {
   setGreeting();
   boot();
+}
+
+function renderMultimodal(data,refresh=false) {
+  const panel=$('#multimodalPanel');panel.hidden=!data?.enabled;if(!data?.enabled)return;
+  const labels={running:'正在处理',indexing:'正在处理',waiting:'等待新素材',paused:'已暂停',scheduled:'等待处理窗口',interactive:'优先响应查询',low_memory:'等待可用内存',low_swap:'等待可用资源'};
+  $('#multimodalBadge').textContent=data.worker_alive?(labels[data.worker_status]||'在线'):'索引服务离线';
+  $('#multimodalSummary').innerHTML=[
+    indexSummaryItem('已完成',`${fmtCount(data.indexed_files)} / ${fmtCount(data.total_media)}`,fmtPercent(data.total_media?data.indexed_files/data.total_media*100:0)),
+    indexSummaryItem('剩余素材',fmtCount(data.pending_files),'包含待处理与失败素材'),
+    indexSummaryItem('可检索片段',fmtCount(data.indexed_points),'图片、视频画面与音轨'),
+    indexSummaryItem('近期吞吐',`${fmtCount(data.files_per_hour)} 个/小时`,'按最近一小时的完成记录估算'),
+    indexSummaryItem('预计剩余',fmtEta(data.eta_seconds),'按近期吞吐估算；暂停及时间窗口另计'),
+    indexSummaryItem('失败素材',fmtCount(data.errors),`${fmtCount(data.terminal_errors)} 个需要人工检查`)
+  ].join('');
+  $('#toggleMultimodal').textContent=data.policy?.paused?'继续索引':'暂停索引';
+  $('#retryMultimodal').disabled=!data.errors;
+  $('#multimodalErrors').innerHTML=(data.error_files||[]).map(x=>`<button class="secondary" data-file="${x.file_id}">查看失败素材 ${x.file_id}</button>`).join(' ');
+  if(refresh||!state.mmPolicyLoaded){
+    const form=$('#multimodalPolicyForm');for(const name of ['mode','start_hour','end_hour','order','batch_size'])form.elements[name].value=data.policy[name];state.mmPolicyLoaded=true;
+  }
+}
+$('#multimodalPolicyForm').addEventListener('submit',async event=>{
+ event.preventDefault();const form=event.currentTarget;const values={...state.indexStatus.multimodal.policy};
+ for(const name of ['mode','start_hour','end_hour','order','batch_size'])values[name]=['mode','order'].includes(name)?form.elements[name].value:Number(form.elements[name].value);
+ try{await api('/api/index/multimodal/policy',{method:'PUT',body:JSON.stringify(values)});toast('素材索引策略已保存');await loadIndexStatus(true);}catch(error){toast(error.message,true)}
+});
+$('#showScanHistory').addEventListener('change',()=>loadTasks());
+let visualImage=null,visualFile=null,visualUrl='',visualCrop=null,visualAnchor=null;
+function drawVisualReference(){
+ const canvas=$('#visualCanvas'),ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(visualImage,0,0,canvas.width,canvas.height);
+ if(visualCrop){const [l,t,r,b]=visualCrop;ctx.fillStyle='rgba(0,0,0,.15)';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(visualImage,l*visualImage.width,t*visualImage.height,(r-l)*visualImage.width,(b-t)*visualImage.height,l*canvas.width,t*canvas.height,(r-l)*canvas.width,(b-t)*canvas.height);ctx.strokeStyle='#2563eb';ctx.lineWidth=3;ctx.strokeRect(l*canvas.width,t*canvas.height,(r-l)*canvas.width,(b-t)*canvas.height);}
+}
+$('#visualReference').addEventListener('change',async event=>{
+ const file=event.target.files[0];if(!file)return;if(file.size>20*1024*1024)return toast('参考图片最大20MB',true);
+ if(visualUrl)URL.revokeObjectURL(visualUrl);visualUrl=URL.createObjectURL(file);visualFile=file;
+ const image=new Image();image.onload=()=>{visualImage=image;visualCrop=null;const canvas=$('#visualCanvas');const scale=Math.min(1,800/image.width,420/image.height);canvas.width=Math.round(image.width*scale);canvas.height=Math.round(image.height*scale);canvas.hidden=false;drawVisualReference();$('#submitVisualSearch').disabled=false};image.onerror=()=>toast('图片无法打开，请选择JPEG、PNG或WebP',true);image.src=visualUrl;
+});
+function visualPoint(event){const r=$('#visualCanvas').getBoundingClientRect();return [Math.max(0,Math.min(1,(event.clientX-r.left)/r.width)),Math.max(0,Math.min(1,(event.clientY-r.top)/r.height))]}
+$('#visualCanvas').addEventListener('pointerdown',event=>{visualAnchor=visualPoint(event);event.currentTarget.setPointerCapture(event.pointerId)});
+$('#visualCanvas').addEventListener('pointermove',event=>{if(!visualAnchor)return;const p=visualPoint(event);visualCrop=[Math.min(p[0],visualAnchor[0]),Math.min(p[1],visualAnchor[1]),Math.max(p[0],visualAnchor[0]),Math.max(p[1],visualAnchor[1])];drawVisualReference()});
+$('#visualCanvas').addEventListener('pointerup',()=>{visualAnchor=null;if(visualCrop&&(visualCrop[2]-visualCrop[0]<.01||visualCrop[3]-visualCrop[1]<.01))visualCrop=null;drawVisualReference()});
+$('#resetVisualCrop').addEventListener('click',()=>{visualCrop=null;if(visualImage)drawVisualReference()});
+$('#submitVisualSearch').addEventListener('click',async()=>{
+ if(!visualFile)return;closeModal($('#imageSearchModal'));showView('search');const sequence=++state.searchSequence;
+ state.searchQuery='';state.currentSearchFeedbackQuery='';state.searchHasMore=false;$('#mainSearchInput').value='以图搜图';$('#searchMore').hidden=true;
+ $('#searchSummary').textContent='正在理解参考图片…';$('#searchResults').innerHTML='<div class="empty-state"><b>正在比较素材画面</b><p>新索引仍在建立，结果来自已完成索引的素材。</p></div>';
+ const params=new URLSearchParams({kind:$('#searchKind').value||'image',limit:'20'});if($('#searchLibrary').value)params.set('library_id',$('#searchLibrary').value);
+ if(visualCrop)for(const [index,key] of ['left','top','right','bottom'].entries())params.set(key,visualCrop[index]);
+ try{const data=await api('/api/search/image?'+params,{method:'POST',headers:{'Content-Type':visualFile.type||'application/octet-stream'},body:visualFile});if(sequence!==state.searchSequence)return;state.searchResults=data.results||[];state.searchTotal=data.total;renderFileList($('#searchResults'),state.searchResults);$('#searchSummary').textContent=`以图搜图 · 找到 ${fmtCount(data.total)} 个素材`;}catch(error){if(sequence===state.searchSequence){toast(error.message,true);$('#searchSummary').textContent=error.message;}}
+});
+async function openClipModal(fileId,moment=0){
+ try{const file=await api(`/api/files/${fileId}`);if(file.kind!=='video')return;const form=$('#clipForm');const duration=Number(file.duration||0);form.elements.file_id.value=fileId;form.elements.start.value=Math.max(0,Number(moment)-3).toFixed(2);form.elements.end.value=Math.min(duration,Number(form.elements.start.value)+20).toFixed(2);form.elements.end.max=duration;openModal($('#clipModal'));}catch(error){toast(error.message,true)}
+}
+$('#clipForm').addEventListener('submit',async event=>{
+ event.preventDefault();const form=event.currentTarget;
+ try{await api(`/api/files/${form.elements.file_id.value}/clips`,{method:'POST',body:JSON.stringify({start:Number(form.elements.start.value),end:Number(form.elements.end.value)})});closeModal($('#clipModal'));toast('片段导出已加入任务中心，完成后可下载');await loadTasks();}catch(error){toast(error.message,true)}
+});
+async function loadRecovery(){
+ if(!isAdmin())return;
+ try{const data=await api('/api/operations/recovery');$('#externalNotifyStatus').textContent=data.notifications.configured?'外部通知已启用':'外部通知未配置';$('#recoveryList').innerHTML=data.items.length?data.items.map(item=>`<div class="snapshot-row"><span>${icon('backup')}</span><div><b>${esc(item.name)}</b><small>${fmtBytes(item.bytes)} · ${fmtTime(item.created_at)} · ${item.verified?'已校验':'需要校验'}</small></div><button class="secondary" data-recovery-verify="${esc(item.name)}">校验</button><button class="secondary" data-recovery-download="${esc(item.name)}">下载</button></div>`).join(''):'<div class="empty-state compact"><b>尚无完整恢复包</b><p>点击立即备份，或等待自动备份。</p></div>';}catch(error){toast(error.message,true)}
 }

@@ -35,6 +35,8 @@ CONTAINERS = {
     "reranker": "nas-ai-space-reranker-1",
     "qdrant": "nas-ai-space-qdrant-1",
     "speech": "nas-ai-space-speech-1",
+    "multimodal": "nas-ai-space-multimodal-1",
+    "multimodal-indexer": "nas-ai-space-multimodal-indexer-1",
 }
 MIN_MEMORY_MB = 256
 MAX_MEMORY_MB = 8192
