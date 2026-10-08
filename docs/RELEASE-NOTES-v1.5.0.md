@@ -18,3 +18,6 @@ The additional NAS services and verified external assets are documented in
 `docs/MULTIMODAL.md` and `deploy/embeddinggemma2-manifest.json`. The optional
 NAS-specific overlay has its own runtime requirements. Downloaded models,
 credentials, databases and appliance backups are not included in the release.
+
+The release also updates pypdf to 6.19.0. The dependency audit of the previous
+6.16.2 lock reported eight advisories; the NAS patch image applies this fix too.

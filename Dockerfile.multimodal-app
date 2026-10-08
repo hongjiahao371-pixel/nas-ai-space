@@ -1,4 +1,7 @@
 ARG NAS_AI_BASE_IMAGE=ghcr.io/hongjiahao371-pixel/nas-ai-space:1.4.1
 FROM ${NAS_AI_BASE_IMAGE}
 WORKDIR /opt/nas-ai-space
+COPY requirements.txt requirements.lock.txt ./
+# Apply the audited PDF parser fix while preserving appliance-specific dependencies.
+RUN python -m pip install --no-cache-dir pypdf==6.19.0 && python -m pip check
 COPY app ./app

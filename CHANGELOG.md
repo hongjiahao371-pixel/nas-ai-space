@@ -19,6 +19,8 @@ Semantic Versioning.
   candidates, so caption omissions cannot prevent direct-media discovery.
 - Preserve direct-media matches when a text-only reranker has insufficient
   caption evidence; retain text search when the optional model is unavailable.
+- Update pypdf to 6.19.0 to resolve the eight advisories reported by the release
+  dependency audit, including the NAS appliance patch image.
 
 ## [1.4.1] - 2026-08-27
 
