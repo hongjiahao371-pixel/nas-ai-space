@@ -1931,3 +1931,7 @@ button.productivity-feed-row { width: 100%; cursor: pointer; }
 #recoveryList .snapshot-row{flex-wrap:wrap}
 #recoveryList .snapshot-row b{overflow-wrap:anywhere}
 @media(max-width:560px){#multimodalPolicyForm{display:grid;grid-template-columns:1fr 1fr}#multimodalPolicyForm button{grid-column:1/-1}.snapshot-row>div{min-width:0}}
+
+@media(min-width:821px){#multimodalPolicyForm{grid-template-columns:minmax(140px,1.3fr) repeat(2,minmax(70px,.55fr)) minmax(140px,1.3fr) minmax(80px,.6fr) auto}}
+#multimodalPolicyForm label{min-width:0;display:block}
+#multimodalPolicyForm input[type=number]{width:100%;height:var(--ctl-h);margin-top:6px;padding:0 9px;border:1px solid var(--line);border-radius:8px;background:var(--field);color:var(--text-soft)}

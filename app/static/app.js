@@ -4891,7 +4891,7 @@ $('#submitVisualSearch').addEventListener('click',async()=>{
  if(!visualFile)return;closeModal($('#imageSearchModal'));showView('search');const sequence=++state.searchSequence;
  state.searchQuery='';state.currentSearchFeedbackQuery='';state.searchHasMore=false;$('#mainSearchInput').value='以图搜图';$('#searchMore').hidden=true;
  $('#searchSummary').textContent='正在理解参考图片…';$('#searchResults').innerHTML='<div class="empty-state"><b>正在比较素材画面</b><p>新索引仍在建立，结果来自已完成索引的素材。</p></div>';
- const params=new URLSearchParams({kind:$('#searchKind').value||'image',limit:'20'});if($('#searchLibrary').value)params.set('library_id',$('#searchLibrary').value);
+ const params=new URLSearchParams({kind:['image','video','audio'].includes(state.kind)?state.kind:'image',limit:'20'});if($('#searchLibrary').value)params.set('library_id',$('#searchLibrary').value);
  if(visualCrop)for(const [index,key] of ['left','top','right','bottom'].entries())params.set(key,visualCrop[index]);
  try{const data=await api('/api/search/image?'+params,{method:'POST',headers:{'Content-Type':visualFile.type||'application/octet-stream'},body:visualFile});if(sequence!==state.searchSequence)return;state.searchResults=data.results||[];state.searchTotal=data.total;renderFileList($('#searchResults'),state.searchResults);$('#searchSummary').textContent=`以图搜图 · 找到 ${fmtCount(data.total)} 个素材`;}catch(error){if(sequence===state.searchSequence){toast(error.message,true);$('#searchSummary').textContent=error.message;}}
 });

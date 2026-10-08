@@ -952,10 +952,15 @@ class TaskManager:
                     bundles=self.recovery.list()
                     interval=self.settings.automatic_backup_interval_hours*3600
                     if not bundles or bundles[0]['age_seconds']>=interval:
+                        result=None
                         async with self.quiesce():
-                            result=await asyncio.to_thread(self.recovery.create)
-                        self.maintenance_state['last_recovery']=result['name']
-                        self.external_notifications.enqueue('backup:'+result['name'],'backup.completed','完整索引备份已完成','元数据及双索引恢复包已校验')
+                            # Another manual/automatic capture may finish while this caller waits.
+                            current=self.recovery.list()
+                            if not current or current[0]['age_seconds']>=interval:
+                                result=await asyncio.to_thread(self.recovery.create)
+                        if result:
+                            self.maintenance_state['last_recovery']=result['name']
+                            self.external_notifications.enqueue('backup:'+result['name'],'backup.completed','完整索引备份已完成','元数据及双索引恢复包已校验')
                 if self.settings.multimodal_enabled:
                     mm=self.recovery.multimodal.status()
                     if mm.get('total_media') and not mm.get('pending_files'):

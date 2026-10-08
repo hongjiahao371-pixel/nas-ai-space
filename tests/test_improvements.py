@@ -182,3 +182,23 @@ class ApiImprovementsTests(unittest.TestCase):
   for fmt,signature in [('docx',b'PK'),('pptx',b'PK'),('pdf',b'%PDF')]:
    url=f"/api/artifacts/{artifact['id']}/versions/{version['id']}/download?format={fmt}"
    response=self.client.get(url,headers=headers);self.assertEqual(response.status_code,200,response.text[:200] if response.status_code!=200 else '');self.assertTrue(response.content.startswith(signature));self.assertEqual(self.client.get(url).status_code,401)
+
+class BackupCoordinationTests(unittest.TestCase):
+ setUp=ImprovementsTests.setUp
+ tearDown=ImprovementsTests.tearDown
+ def test_fresh_backup_appearing_while_quiescing_is_not_recaptured(self):
+  import asyncio
+  from app.services.tasks import TaskManager
+  cfg=replace(self.cfg,automatic_backup_enabled=True,automatic_backup_interval_hours=24)
+  manager=TaskManager(self.db,cfg,LocalAIClient(cfg),Mock())
+  manager.running_workers=1;appeared=False
+  def bundles():return [{'age_seconds':0}] if appeared else []
+  manager.recovery=Mock();manager.recovery.list.side_effect=bundles
+  manager.recovery.multimodal.status.return_value={'total_media':2,'pending_files':2}
+  async def sleep(seconds):
+   nonlocal appeared
+   if seconds==.2:appeared=True;manager.running_workers=0
+   if seconds==3600:raise asyncio.CancelledError()
+  with patch('app.services.tasks.asyncio.sleep',sleep):
+   with self.assertRaises(asyncio.CancelledError):asyncio.run(manager._maintenance_loop())
+  manager.recovery.create.assert_not_called();self.assertFalse(manager.quiescing)
