@@ -517,6 +517,47 @@ def require_auth(
 
 Auth = Annotated[dict[str, Any], Depends(require_auth)]
 
+_integration_vision_slot = threading.BoundedSemaphore(1)
+
+
+@app.get("/api/integrations/capabilities")
+def integration_capabilities(principal: Auth) -> dict[str, Any]:
+    return {
+        "version": app.version,
+        "search": {"endpoint": "/api/search", "method": "GET"},
+        "file": {"endpoint": "/api/files/{file_id}", "method": "GET"},
+        "ask": {"endpoint": "/api/ask", "method": "POST", "citations": True},
+        "vision": {"endpoint": "/api/integrations/vision", "method": "POST", "enabled": bool(settings.vision_model), "max_bytes": 8 * 1024 * 1024},
+        "moments": {"endpoint": "/api/files/{file_id}/moments", "method": "GET", "sampled": True},
+        "image_search": {"endpoint": "/api/search/image", "method": "POST"},
+        "limitations": ["检索结果与视频时间点是候选，细节需核对", "索引覆盖不完整时未找到不代表不存在", "看图回答不是实时家电状态查询"],
+    }
+
+
+@app.post("/api/integrations/vision")
+async def integration_vision(request: Request, principal: Auth,
+                             question: str = Query(default="请描述这张图片中能看清的内容。", min_length=2, max_length=1000)) -> dict[str, Any]:
+    if len(question.strip()) < 2:
+        raise HTTPException(400, "问题至少两个有效字符")
+    if not _integration_vision_slot.acquire(blocking=False):
+        raise HTTPException(503, "看图分析繁忙，请稍后重试", headers={"Retry-After": "5"})
+    try:
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > 8 * 1024 * 1024:
+                raise HTTPException(413, "图片最大8MB")
+            data.extend(chunk)
+        try:
+            answer = await asyncio.to_thread(state.ai.analyze_image, bytes(data), question.strip())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except (RuntimeError, httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
+            raise HTTPException(503, "看图模型暂时不可用，请稍后重试") from exc
+        return {"answer": answer, "source": "request_image", "stored": False,
+                "limitations": "仅依据传入图片，细节与文字可能误识别；不能代替实时设备状态"}
+    finally:
+        _integration_vision_slot.release()
+
 
 def _set_session_cookies(response: Response, request: Request, token: str) -> str:
     csrf = secrets.token_urlsafe(32)
