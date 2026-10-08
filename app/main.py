@@ -40,6 +40,7 @@ from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
 from app.services.multimodal import MultimodalService
+from app.services.video_moments import VideoMoments
 from app.services.watcher import LibraryWatcher
 from app.services.tasks import TaskManager
 from app.services.vectors import VectorStore
@@ -411,6 +412,7 @@ async def lifespan(_: FastAPI):
     state.vectors = VectorStore(settings)
     state.search = SearchService(state.database, state.ai, state.vectors)
     state.search.multimodal = MultimodalService(settings)
+    state.video_moments = VideoMoments(state.search.multimodal)
     state.tasks = TaskManager(state.database, settings, state.ai, state.vectors)
     state.productivity = state.tasks.productivity
     state.recycle = RecycleBin(state.database, settings, state.vectors)
@@ -427,7 +429,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.6.0",
+    version="1.6.1",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -3779,6 +3781,41 @@ def file_details(file_id: int, principal: Auth) -> dict[str, Any]:
         result["favorite"] = False
         result["tags"] = []
     return result
+
+
+def _moment_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
+    row = _visible_file(file_id, principal)
+    library = state.database.get_library(int(row["library_id"]))
+    if not library or not library.get("enabled"):
+        raise HTTPException(404, "媒体库未启用")
+    if row["kind"] != "video":
+        raise HTTPException(400, "只有视频可查看候选画面")
+    return row
+
+
+@app.get("/api/files/{file_id}/moments")
+def video_moments(file_id: int, principal: Auth, q: str = Query(default="", max_length=500)) -> dict[str, Any]:
+    row = _moment_file(file_id, principal)
+    try:
+        return state.video_moments.candidates(row, q.strip())
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "候选画面暂时无法搜索，请稍后重试") from exc
+
+
+@app.get("/api/files/{file_id}/frame")
+def video_frame(file_id: int, principal: Auth, time: float = Query(ge=0), revision: str = Query(default="", max_length=80)) -> Response:
+    row = _moment_file(file_id, principal)
+    if revision and revision != f"{row['mtime_ns']}:{row['size']}":
+        raise HTTPException(409, "素材版本已变化，请重新打开视频")
+    try:
+        data = state.video_moments.frame(row, time)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (TimeoutError, OSError) as exc:
+        raise HTTPException(503, "画面读取繁忙，请稍后重试") from exc
 
 
 @app.get("/api/files/{file_id}/similar")

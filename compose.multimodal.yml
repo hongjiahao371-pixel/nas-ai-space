@@ -2,7 +2,7 @@
 # Qwen/vision/speech/Qdrant services and their runtime mounts are preserved.
 services:
   app:
-    image: nas-ai-space:1.6.0
+    image: nas-ai-space:1.6.1
     build:
       context: .
       dockerfile: Dockerfile.multimodal-app
@@ -70,7 +70,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
 
   multimodal-indexer:
-    image: nas-ai-space:1.6.0
+    image: nas-ai-space:1.6.1
     restart: unless-stopped
     entrypoint: []
     command: ["python", "-m", "app.services.multimodal_worker"]

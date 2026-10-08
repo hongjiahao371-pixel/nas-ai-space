@@ -2,6 +2,8 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
+v1.6.1 新增视频候选画面核对：在单条视频内搜索抽样画面、预览实际帧并点击跳转。它辅助人工核对，不保证按钮数量、文字或动作先后自动识别正确。普通全库搜索无需额外视觉推理。
+
 v1.6.0 完善新索引调度、查询优先、双索引恢复包、以图搜图与局部框选、视频片段导出以及 Word/PDF/PowerPoint 成果下载。外部通知支持可选 Webhook；接收地址未配置时不会发送。见 [完整恢复说明](docs/RECOVERY.md)。
 
 v1.5.0 增加可选的 **EmbeddingGemma 2 素材语义检索**：直接索引图片、视频抽帧和音频片段，保留现有 Qwen 文字检索。Intel NAS 的独立服务、固定模型校验值和覆盖边界见 [部署说明](docs/MULTIMODAL.md)。首次启动会逐步建立新索引；安装完成不代表全库已索引完成。
@@ -40,7 +42,7 @@ scripts/nas-ai start
 `SHA256SUMS`，校验后解压：
 
 ```bash
-VERSION=v1.6.0
+VERSION=v1.6.1
 curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/nas-ai-space-${VERSION}.tar.gz"
 curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/SHA256SUMS"
 sha256sum -c SHA256SUMS
