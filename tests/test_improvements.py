@@ -169,3 +169,16 @@ class ApiImprovementsTests(unittest.TestCase):
   self.assertEqual(self.client.post(f"/api/files/{file['id']}/clips",json={'start':3,'end':2},headers=self.headers).status_code,400)
   self.assertEqual(self.client.post(f"/api/files/{file['id']}/clips",json={'start':0,'end':6},headers=self.headers).status_code,400)
   self.assertEqual(self.client.get('/api/clips/999999',headers=self.headers).status_code,404)
+ def test_native_downloads_use_existing_artifact_permissions(self):
+  from app.security import hash_password
+  user=self.db.create_user('export-qa','export-qa',hash_password('TestPassword123'),'admin',[])
+  login=self.client.post('/api/auth/login',json={'username':'export-qa','password':'TestPassword123'})
+  self.assertEqual(login.status_code,200,login.text)
+  headers={'Authorization':'Bearer '+login.json()['token']}
+  service=self.main.state.productivity
+  artifact=service.create_artifact('原生导出测试','report',user['id'])
+  with patch.object(service.ai,'generate_artifact',return_value='# 原生导出测试\n\n中文内容及最后一行。'):
+   version=service.generate_artifact_version(artifact['id'],'test',[self.files[0]['id']],user['id'])
+  for fmt,signature in [('docx',b'PK'),('pptx',b'PK'),('pdf',b'%PDF')]:
+   url=f"/api/artifacts/{artifact['id']}/versions/{version['id']}/download?format={fmt}"
+   response=self.client.get(url,headers=headers);self.assertEqual(response.status_code,200,response.text[:200] if response.status_code!=200 else '');self.assertTrue(response.content.startswith(signature));self.assertEqual(self.client.get(url).status_code,401)
