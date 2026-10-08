@@ -36,6 +36,7 @@ from app.services.local_ai import LocalAIClient
 from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
+from app.services.multimodal import MultimodalService
 from app.services.watcher import LibraryWatcher
 from app.services.tasks import TaskManager
 from app.services.vectors import VectorStore
@@ -406,6 +407,7 @@ async def lifespan(_: FastAPI):
     )
     state.vectors = VectorStore(settings)
     state.search = SearchService(state.database, state.ai, state.vectors)
+    state.search.multimodal = MultimodalService(settings)
     state.tasks = TaskManager(state.database, settings, state.ai, state.vectors)
     state.productivity = state.tasks.productivity
     state.recycle = RecycleBin(state.database, settings, state.vectors)
@@ -422,7 +424,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.4.1",
+    version="1.5.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -1509,6 +1511,11 @@ def system_metrics(_: Auth) -> dict[str, Any]:
 def watcher_status(principal: Auth) -> dict[str, Any]:
     _require_admin(principal)
     return state.watcher.status()
+
+
+@app.get("/api/system/multimodal")
+def multimodal_status(principal: Auth) -> dict[str, Any]:
+    return state.search.multimodal.status(_library_ids(principal))
 
 
 @app.get("/api/dashboard")
@@ -2985,6 +2992,7 @@ def index_status(principal: Auth) -> dict[str, Any]:
         "active": overview["active"],
         "active_tasks": state.database.active_task_count(),
         "overview": overview,
+        "multimodal": state.search.multimodal.status(_library_ids(principal)),
         "resources": {
             "available_memory_bytes": memory["available_bytes"],
             "minimum_memory_bytes": settings.min_available_memory_bytes,

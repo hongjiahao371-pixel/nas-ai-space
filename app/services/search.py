@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import re
 import sqlite3
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 from app.database import Database
 from app.services.local_ai import LocalAIClient
 from app.services.vectors import VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 SYNONYMS = {
@@ -234,6 +237,7 @@ class SearchService:
         self.database = database
         self.ai = ai
         self.vectors = vectors
+        self.multimodal = None
 
     def _files_by_ids(self, file_ids: list[int], columns: str = FILE_COLUMNS) -> dict[int, dict[str, Any]]:
         # 按 id 批量取回文件行建 dict，替代逐条 get_file（每条新开连接）的 N+1；
@@ -390,6 +394,9 @@ class SearchService:
 
         semantic_used = False
         semantic_scores: dict[int, float] = {}
+        multimodal_scores: dict[int, float] = {}
+        multimodal_used = False
+        semantic_requested = bool(semantic)
         if semantic and self.ai.settings.embedding_base_url and self.ai.settings.embedding_model:
             try:
                 embedding_query = self.ai.embedding_query(query) if hasattr(self.ai, "embedding_query") else query
@@ -449,6 +456,54 @@ class SearchService:
             except Exception:
                 semantic_used = False
 
+        if semantic_requested and self.multimodal and self.multimodal.enabled:
+            try:
+                media_filter = sorted(allowed_file_ids) if allowed_file_ids is not None else None
+                if media_filter is None and filter_sql is not None:
+                    clause, params = filter_sql
+                    media_filter = [int(row["id"]) for row in self.database.fetchall(
+                        f"SELECT f.id FROM files f WHERE {clause}", params)]
+                media_hits = []
+                if media_filter is None:
+                    media_hits = self.multimodal.search(query, candidate_limit, kind, library_ids)
+                else:
+                    for start in range(0, len(media_filter), 2000):
+                        media_hits.extend(self.multimodal.search(
+                            query, candidate_limit, kind, library_ids, media_filter[start:start + 2000]))
+                prefetched = self._files_by_ids([int(hit["payload"]["file_id"]) for hit in media_hits])
+                media_allowed = set(media_filter) if media_filter is not None else None
+                best_media = {}
+                for hit in media_hits:
+                    payload = hit.get("payload") or {}
+                    file_id = int(payload["file_id"])
+                    row = prefetched.get(file_id)
+                    if not row or (library_ids is not None and int(row["library_id"]) not in library_ids):
+                        continue
+                    if (kind and row["kind"] != kind) or (media_allowed is not None and file_id not in media_allowed):
+                        continue
+                    if int(payload.get("mtime_ns") or 0) != int(row["mtime_ns"]) or int(payload.get("size") or 0) != int(row["size"]):
+                        continue
+                    if file_id not in best_media or hit["score"] > best_media[file_id]["score"]:
+                        best_media[file_id] = hit
+                for position, hit in enumerate(sorted(best_media.values(), key=lambda item: item["score"], reverse=True)):
+                    payload = hit["payload"]
+                    file_id = int(payload["file_id"])
+                    row = prefetched[file_id]
+                    rows.setdefault(file_id, row)
+                    similarity = max(0.0, min(1.0, float(hit["score"])))
+                    multimodal_scores[file_id] = similarity
+                    scores[file_id] = scores.get(file_id, 0) + 1.2 / (24 + position) + similarity * 0.35
+                    sources.setdefault(file_id, set()).add("素材语义")
+                    sources[file_id].add(payload.get("source_label") or "直接素材")
+                    if file_id not in snippets or not snippets[file_id]:
+                        snippets[file_id] = payload.get("content") or "直接素材语义匹配"
+                    if payload.get("start_time") is not None:
+                        match_times[file_id] = float(payload["start_time"])
+                multimodal_used = bool(best_media)
+            except Exception:
+                # A unavailable new service must not take down the established text search.
+                logger.warning("素材语义检索暂不可用", exc_info=True)
+
         profiles: dict[int, dict[str, Any]] = {}
         feedback_rows = self.database.fetchall(
             """SELECT file_id, verdict, COUNT(*) AS count FROM file_feedback
@@ -496,12 +551,12 @@ class SearchService:
             if len(groups) > 1:
                 if profile["coverage"] == 1:
                     score += 0.14
-                elif profile["coverage"] == 0:
+                elif profile["coverage"] == 0 and file_id not in multimodal_scores:
                     score -= 0.08
             if profile["screenshot"] and not screenshot_intent:
                 score -= 0.06
             scores[file_id] = score
-            if file_id not in semantic_scores:
+            if file_id not in semantic_scores and file_id not in multimodal_scores:
                 # 纯词法行的 snippet 在合并阶段缺少 extracted_text，这里按原公式用完整文本重算；
                 # 语义行的 snippet 来自向量 payload，不依赖 extracted_text
                 text = row.get("extracted_text") or ""
@@ -516,7 +571,8 @@ class SearchService:
         precise_used = False
         if precise and ordered:
             candidates = []
-            for row in ordered[:4]:
+            # A text-only reranker cannot disprove a direct image/audio match using a missing caption.
+            for row in [row for row in ordered if int(row["id"]) not in multimodal_scores][:4]:
                 file_id = int(row["id"])
                 candidates.append({
                     "id": file_id,
@@ -526,6 +582,8 @@ class SearchService:
                     "content": snippets.get(file_id) or row["ai_caption"] or row.get("extracted_text") or "",
                 })
             try:
+                if not candidates:
+                    raise ValueError("仅有直接素材匹配，无文字候选需要重排")
                 reranked = self.ai.rerank(query, candidates)
                 for file_id, item in reranked.items():
                     if file_id in scores:
@@ -601,10 +659,13 @@ class SearchService:
                 "coverage": float(profiles.get(file_id, {}).get("coverage") or 0),
                 "rerank_reason": rerank_reasons.get(file_id, ""),
                 "semantic_score": semantic_scores.get(file_id),
+                "multimodal_score": multimodal_scores.get(file_id),
             })
         return {
             "query": query,
             "semantic": semantic_used,
+            "multimodal": multimodal_used,
+            "multimodal_available": bool(self.multimodal and self.multimodal.enabled),
             "precise": precise_used,
             "terms": [group[0] for group in groups],
             "total": total_candidates,

@@ -1,0 +1,20 @@
+{
+  "model_repo": "ggml-org/embeddinggemma-2-GGUF",
+  "model_revision": "bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+  "model_license": "Apache-2.0",
+  "files": {
+    "embeddinggemma-2-Q8_0.gguf": {
+      "size": 309855456,
+      "sha256": "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135"
+    },
+    "mmproj-embeddinggemma-2-Q8_0.gguf": {
+      "size": 554821024,
+      "sha256": "c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f"
+    }
+  },
+  "runtime": {
+    "tag": "b11480",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11480/llama-b11480-bin-ubuntu-x64.tar.gz",
+    "sha256": "ae6c025591931df1600d1670a4f6f5e96909a1f710f34abc85b4b59a8bd7e507"
+  }
+}

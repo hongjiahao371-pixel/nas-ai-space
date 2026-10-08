@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+project=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$project"
+compose=(docker compose --env-file .env -f compose.nas-intel.yml -f compose.multimodal.yml)
+case "${1:-status}" in
+  start)
+    python3 - <<'PY'
+import hashlib,json,pathlib
+manifest=json.loads(pathlib.Path('deploy/embeddinggemma2-manifest.json').read_text())
+root=pathlib.Path('runtime/embeddinggemma2')
+for name,info in manifest['files'].items():
+    path=root/name
+    if not path.is_file() or path.stat().st_size != info['size']:
+        raise SystemExit('Incomplete model file: '+name)
+    digest=hashlib.sha256()
+    with path.open('rb') as handle:
+        while block:=handle.read(1024*1024): digest.update(block)
+    if digest.hexdigest()!=info['sha256']: raise SystemExit('Model checksum mismatch: '+name)
+print('EmbeddingGemma 2 model checksums verified')
+PY
+    "${compose[@]}" up -d --no-deps multimodal
+    "${compose[@]}" up -d --no-deps app multimodal-indexer
+    ;;
+  build) "${compose[@]}" build app ;;
+  stop) "${compose[@]}" stop multimodal-indexer multimodal ;;
+  restart) "${compose[@]}" restart multimodal multimodal-indexer ;;
+  status) "${compose[@]}" ps app multimodal multimodal-indexer ;;
+  logs) "${compose[@]}" logs --tail 100 -f multimodal multimodal-indexer ;;
+  *) printf 'Usage: scripts/nas-ai-multimodal start|build|stop|restart|status|logs\n' >&2; exit 2 ;;
+esac

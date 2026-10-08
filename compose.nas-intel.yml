@@ -14,7 +14,7 @@ services:
       args:
         NAS_BASE_IMAGE: ${NAS_BASE_IMAGE:-ai-subtitle-generator-ai-subtitle:latest}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
-    image: nas-ai-space:local
+    image: ${NAS_AI_APP_IMAGE:-nas-ai-space:local}
     restart: unless-stopped
     ports:
       - "${NAS_AI_PORT:-8766}:8000"
@@ -63,6 +63,9 @@ services:
       NAS_AI_CHAT_URL: http://vision:8080
       NAS_AI_RERANK_URL: http://reranker:8080
       NAS_AI_EMBEDDING_MODEL: qwen3-embedding:0.6b
+      NAS_AI_MULTIMODAL_ENABLED: ${NAS_AI_MULTIMODAL_ENABLED:-false}
+      NAS_AI_MULTIMODAL_URL: ${NAS_AI_MULTIMODAL_URL:-http://multimodal:8080}
+      NAS_AI_MULTIMODAL_COLLECTION: ${NAS_AI_MULTIMODAL_COLLECTION:-nas_ai_media_gemma2_q8_v1}
       NAS_AI_VISION_MODEL: qwen3-vl:2b
       NAS_AI_CHAT_MODEL: qwen3-vl:2b
       NAS_AI_RERANK_MODEL: ${NAS_AI_RERANK_MODEL:-qwen3:0.6b}

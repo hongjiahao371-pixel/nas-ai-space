@@ -1,0 +1,113 @@
+# Overlay: docker compose -f compose.nas-intel.yml -f compose.multimodal.yml up -d
+# Qwen/vision/speech/Qdrant services and their runtime mounts are preserved.
+services:
+  app:
+    image: nas-ai-space:1.5.0
+    build:
+      context: .
+      dockerfile: Dockerfile.multimodal-app
+      args:
+        NAS_AI_BASE_IMAGE: ${NAS_AI_BASE_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.4.1}
+    environment:
+      NAS_AI_MULTIMODAL_ENABLED: "true"
+      NAS_AI_MULTIMODAL_URL: http://multimodal:8080
+      NAS_AI_MULTIMODAL_COLLECTION: nas_ai_media_gemma2_q8_v1
+      NAS_AI_MULTIMODAL_MIN_SCORE: ${NAS_AI_MULTIMODAL_MIN_SCORE:-0.12}
+
+  multimodal:
+    image: ${NAS_AI_MULTIMODAL_RUNTIME_IMAGE:-nas-ai-llamacpp:local}
+    restart: unless-stopped
+    entrypoint: ["/opt/gemma-runtime/llama-server"]
+    command:
+      - --model
+      - /models/embeddinggemma-2-Q8_0.gguf
+      - --mmproj
+      - /models/mmproj-embeddinggemma-2-Q8_0.gguf
+      - --alias
+      - embeddinggemma2
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --embedding
+      - --pooling
+      - mean
+      - --parallel
+      - "2"
+      - --ctx-size
+      - "8192"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --threads
+      - "2"
+      - --threads-batch
+      - "2"
+      - --n-gpu-layers
+      - "0"
+      - --no-mmproj-offload
+    environment:
+      LD_LIBRARY_PATH: /opt/gemma-runtime
+    volumes:
+      - ./runtime/embeddinggemma2/llama-b11480:/opt/gemma-runtime:ro
+      - ./runtime/embeddinggemma2:/models:ro
+    mem_limit: 3g
+    cpus: 2.0
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:size=128m"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  multimodal-indexer:
+    image: nas-ai-space:1.5.0
+    restart: unless-stopped
+    entrypoint: []
+    command: ["python", "-m", "app.services.multimodal_worker"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      NAS_AI_DATA_DIR: /opt/nas-ai-space/data
+      NAS_AI_CACHE_DIR: /opt/nas-ai-space/data/cache
+      NAS_AI_SCAN_ROOT: /library
+      NAS_AI_UPLOAD_ROOT: /uploads
+      NAS_AI_QDRANT_URL: http://qdrant:6333
+      NAS_AI_MULTIMODAL_ENABLED: "true"
+      NAS_AI_MULTIMODAL_URL: http://multimodal:8080
+      NAS_AI_MULTIMODAL_COLLECTION: nas_ai_media_gemma2_q8_v1
+      NAS_AI_MULTIMODAL_BATCH_SIZE: ${NAS_AI_MULTIMODAL_BATCH_SIZE:-20}
+      NAS_AI_MULTIMODAL_POLL_SECONDS: ${NAS_AI_MULTIMODAL_POLL_SECONDS:-15}
+      NAS_AI_MULTIMODAL_MEMORY_FLOOR_MB: ${NAS_AI_MULTIMODAL_MEMORY_FLOOR_MB:-2048}
+    volumes:
+      - ./data:/opt/nas-ai-space/data
+      - ${NAS_LIBRARY_PATH:-./library}:/library:ro
+      - ${NAS_UPLOAD_PATH:-./uploads}:/uploads:ro
+    user: "${NAS_UID:-1000}:${NAS_GID:-10}"
+    depends_on:
+      multimodal:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:size=256m"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3,time; c=sqlite3.connect('file:/opt/nas-ai-space/data/multimodal-index.db?mode=ro',uri=True); r=c.execute('select heartbeat from worker_status where id=1').fetchone(); assert r and time.time()-r[0]<900"]
+      interval: 60s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

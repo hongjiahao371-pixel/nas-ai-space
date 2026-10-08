@@ -100,6 +100,15 @@ class Settings:
     face_detection_model: Path
     face_recognition_model: Path
     face_match_threshold: float
+    multimodal_enabled: bool = False
+    multimodal_base_url: str = ""
+    multimodal_collection: str = "nas_ai_media_gemma2_q8_v1"
+    multimodal_video_frames: int = 6
+    multimodal_audio_segments: int = 12
+    multimodal_batch_size: int = 20
+    multimodal_poll_seconds: int = 15
+    multimodal_memory_floor_mb: int = 2048
+    multimodal_min_score: float = 0.12
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -205,6 +214,15 @@ class Settings:
             allow_query_token=_bool_env("NAS_AI_ALLOW_QUERY_TOKEN", False),
             qdrant_url=os.getenv("NAS_AI_QDRANT_URL", "http://qdrant:6333").strip().rstrip("/"),
             qdrant_collection=os.getenv("NAS_AI_QDRANT_COLLECTION", "nas_ai_chunks").strip(),
+            multimodal_enabled=_bool_env("NAS_AI_MULTIMODAL_ENABLED", False),
+            multimodal_base_url=os.getenv("NAS_AI_MULTIMODAL_URL", "").strip().rstrip("/"),
+            multimodal_collection=os.getenv("NAS_AI_MULTIMODAL_COLLECTION", "nas_ai_media_gemma2_q8_v1").strip(),
+            multimodal_video_frames=_int_env("NAS_AI_MULTIMODAL_VIDEO_FRAMES", 6, 1, 12),
+            multimodal_audio_segments=_int_env("NAS_AI_MULTIMODAL_AUDIO_SEGMENTS", 12, 1, 60),
+            multimodal_batch_size=_int_env("NAS_AI_MULTIMODAL_BATCH_SIZE", 20, 1, 200),
+            multimodal_poll_seconds=_int_env("NAS_AI_MULTIMODAL_POLL_SECONDS", 15, 1, 3600),
+            multimodal_memory_floor_mb=_int_env("NAS_AI_MULTIMODAL_MEMORY_FLOOR_MB", 2048, 512, 65536),
+            multimodal_min_score=_float_env("NAS_AI_MULTIMODAL_MIN_SCORE", 0.12, -1.0, 1.0),
             vectors_on_disk=_bool_env("NAS_AI_VECTORS_ON_DISK", True),
             ops_url=os.getenv("NAS_AI_OPS_URL", "http://ops:9100").strip().rstrip("/"),
             face_detection_model=Path(os.getenv(

@@ -1,0 +1,4 @@
+ARG NAS_AI_BASE_IMAGE=ghcr.io/hongjiahao371-pixel/nas-ai-space:1.4.1
+FROM ${NAS_AI_BASE_IMAGE}
+WORKDIR /opt/nas-ai-space
+COPY app ./app

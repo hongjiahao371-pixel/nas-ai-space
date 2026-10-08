@@ -31,6 +31,10 @@ os.environ["NAS_AI_LOCAL_AI_URL"] = ""
 os.environ["NAS_AI_EMBEDDING_MODEL"] = ""
 os.environ["NAS_AI_VISION_MODEL"] = ""
 os.environ["NAS_AI_CHAT_MODEL"] = ""
+# Tests must never discover the production Qdrant/model services through Docker DNS.
+os.environ["NAS_AI_QDRANT_URL"] = "http://127.0.0.1:1"
+os.environ["NAS_AI_MULTIMODAL_ENABLED"] = "false"
+os.environ["NAS_AI_MULTIMODAL_URL"] = ""
 
 from fastapi.testclient import TestClient
 from PIL import Image, UnidentifiedImageError

@@ -2,6 +2,8 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
+v1.5.0 增加可选的 **EmbeddingGemma 2 素材语义检索**：直接索引图片、视频抽帧和音频片段，保留现有 Qwen 文字检索。Intel NAS 的独立服务、固定模型校验值和覆盖边界见 [部署说明](docs/MULTIMODAL.md)。首次启动会逐步建立新索引；安装完成不代表全库已索引完成。
+
 ## 适用范围
 
 公开安装版当前面向安装了 Docker Engine 与 Docker Compose v2 的 **x86-64
@@ -36,7 +38,7 @@ scripts/nas-ai start
 `SHA256SUMS`，校验后解压：
 
 ```bash
-VERSION=v1.4.1
+VERSION=v1.5.0
 curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/nas-ai-space-${VERSION}.tar.gz"
 curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/SHA256SUMS"
 sha256sum -c SHA256SUMS

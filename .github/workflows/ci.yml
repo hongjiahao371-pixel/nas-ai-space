@@ -32,7 +32,7 @@ jobs:
       - name: Verify static assets and scripts
         run: |
           node --check app/static/app.js
-          bash -n scripts/nas-ai scripts/*.sh
+          bash -n scripts/nas-ai scripts/nas-ai-multimodal scripts/*.sh
           git diff --check
           scripts/release-check.sh
       - name: Validate Compose profiles
@@ -44,6 +44,7 @@ jobs:
           docker compose -f docker-compose.yml -f compose.amd-vulkan.yml config --quiet
           docker compose -f docker-compose.yml -f compose.nvidia.yml config --quiet
           docker compose -f compose.nas-intel.yml config --quiet
+          docker compose -f compose.nas-intel.yml -f compose.multimodal.yml config --quiet
           docker compose -f compose.nas-intel.yml -f compose.nas-nvidia.yml config --quiet
       - name: Audit Python dependencies
         run: |

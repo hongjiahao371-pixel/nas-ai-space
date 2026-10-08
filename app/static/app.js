@@ -821,6 +821,11 @@ async function loadIndexStatus(refreshForm = false, quiet = false) {
     const retryWaiting = Number(data.stages.retry_waiting || 0);
     $('#indexControlSummary').innerHTML = [
       indexSummaryItem('语义覆盖', fmtPercent(overview.semantic_percent), `${fmtCount(overview.semantic_ready)} / ${fmtCount(overview.total)}`),
+      ...(data.multimodal?.enabled ? [
+        indexSummaryItem('素材语义', `${fmtCount(data.multimodal.indexed_files)} / ${fmtCount(data.multimodal.total_media)} 个`,
+          data.multimodal.worker_alive ? '直接理解素材 · 后台持续建立索引' : '等待素材索引服务'),
+        indexSummaryItem('素材片段', `${fmtCount(data.multimodal.indexed_points)} 个`, '图片直接检索 · 视频按抽帧覆盖'),
+      ] : []),
       indexSummaryItem('待索引', `${fmtCount(data.pending.total)} 个`, fmtBytes(data.pending.bytes)),
       indexSummaryItem('待修复', `${fmtCount(data.stages.repairable)} 个`, '仅重跑缺失阶段'),
       indexSummaryItem('退避等待', `${fmtCount(retryWaiting)} 个`, '按指数退避自动重试'),
@@ -1246,9 +1251,10 @@ function renderSearchResults(data, append = false, phase = 'fast') {
   state.searchOffset = Number(data.offset || 0) + data.results.length;
   if (append) state.searchResults.push(...data.results);
   else state.searchResults = data.results;
-  const label = phase === 'precise' && data.precise
+  const textLabel = phase === 'precise' && data.precise
     ? '全文 + 语义 + 精准重排'
     : data.semantic ? '全文 + 语义' : '全文索引';
+  const label = data.multimodal ? `${textLabel} + 素材语义` : textLabel;
   const dateHint = data.applied_filters
     ? ` · 已识别日期 ${esc(data.applied_filters.date_from)} 至 ${esc(data.applied_filters.date_to)}`
     : '';
@@ -1282,15 +1288,16 @@ async function runSearch(query, append = false) {
   params.set('limit', '20');
   params.set('offset', String(offset));
   params.set('precise', 'false');
-  params.set('semantic', 'false');
+  params.set('semantic', append && state.multimodalAvailable ? 'true' : 'false');
   try {
     const fast = await api(`/api/search?${params}`);
+    state.multimodalAvailable = Boolean(fast.multimodal_available);
     if (sequence !== state.searchSequence) return;
     localStorage.setItem('nasAiFirstSearchDone', '1');
     renderOnboarding();
     renderSearchResults(fast, append, 'fast');
-    if (state.preciseSearch && !append && fast.results.length) {
-      params.set('precise', 'true');
+    if ((state.preciseSearch || fast.multimodal_available) && !append) {
+      params.set('precise', String(Boolean(state.preciseSearch)));
       params.set('semantic', 'true');
       const precise = await api(`/api/search?${params}`);
       if (sequence !== state.searchSequence) return;

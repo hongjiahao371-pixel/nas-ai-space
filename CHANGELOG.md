@@ -3,6 +3,23 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
+## [1.5.0] - 2026-10-08
+
+### Added
+
+- Optional local EmbeddingGemma 2 direct image, sampled video-frame and sampled
+  audio-segment retrieval, stored in a separate 768-dimensional collection.
+- A restartable background media indexer with source-change detection, memory
+  headroom protection, retry backoff and permission-scoped coverage status.
+- Media provenance and matching video/audio timestamps in search results.
+
+### Fixed
+
+- Continue semantic retrieval even when the first lexical search returns no
+  candidates, so caption omissions cannot prevent direct-media discovery.
+- Preserve direct-media matches when a text-only reranker has insufficient
+  caption evidence; retain text search when the optional model is unavailable.
+
 ## [1.4.1] - 2026-08-27
 
 ### Added
