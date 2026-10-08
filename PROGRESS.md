@@ -11,8 +11,8 @@ NAS AI Space 是部署在 NAS 内的本地多模态 AI 生产力平台。主链�
 - 验证设备：Intel i3-1315U、约 16 GB 内存、Intel 核显
 - 部署方式：Docker Compose，项目目录与持久化目录由安装向导生成
 - 默认服务端口：`8766`
-- 运行栈：app、ops、vision、embedding、reranker、qdrant、speech
-- 已验证版本：v1.4.1；数据库、模型、向量索引和媒体数据均为持久化卷
+- 运行栈：app、ops、vision、embedding、reranker、qdrant、speech；可选 multimodal、multimodal-indexer
+- 已验证版本：v1.5.0；数据库、模型、向量索引和媒体数据均为持久化卷
 
 ## v1.4.0 开源发布准备
 
@@ -146,3 +146,11 @@ v1.3.0 只有在以下条件全部满足后才能标记完成：
 - NAS 回归测试初次误连接了生产向量服务，缺失的 3 条旧记录已从快照精确恢复。完整逐点核对：12,824 条旧向量的 ID、payload、vector 全部与快照一致。测试环境随后显式隔离生产服务；原文件和应用数据库未被测试写入。
 - /api/ready 返回 ready=true，所有关键检查通过；degraded 来自此前 9 张图片描述升级人工检查项。该问题不是这次新增索引错误。
 - 部署/覆盖/回退说明见 docs/MULTIMODAL.md。源码仓库和生产程序同步，公开镜像发布结果以 GitHub Actions 与 Release 为准。
+
+### v1.5.0 发布收尾
+
+- GitHub CI run 37717754161 全部通过，包括 175 项单元/API 测试、静态与 Compose 检查、依赖漏洞检查。旧 pypdf 6.16.2 的 8 项漏洞已修复，NAS 实装 pypdf 6.19.0，pip check 通过。
+- NAS 上的新多模态专项 10 项测试在禁网容器中通过。额外尝试整套测试时，受隔离容器环境影响出现失败/超时，已终止；不据此声称整套 NAS 回归通过。生产接口、真实媒体路径与浏览器体验另行实测。
+- v1.5.0 Release run 37717928565 成功；源码包与 SHA256SUMS 已公开，实际下载校验通过。源码包 SHA-256：b54f0d9f4f7f3c3fca8da61b8633e4e0810b92fac8d2f2b1b95ca0d5ffd2cb41。
+- GHCR 1.5.0 匿名读取 manifest 返回 HTTP 200，包含 Linux amd64；OCI 摘要 sha256:61866ee736a3fda7d570cbc89c0e07463de680435e10b13a434281f3f4717fb0。
+- 生产源文件与应用镜像内七个改动文件逐一核对 SHA-256 一致；升级前备份及旧镜像保留。后台索引仍持续运行，未标记全库完成。
