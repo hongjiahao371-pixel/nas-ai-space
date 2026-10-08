@@ -230,6 +230,8 @@ function closeModal(modal) {
   if (!modal?.classList.contains('open')) return;
   // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
   if (modal.id === 'fileModal') {
+    fileViewerRequest += 1;
+    videoMomentRequest += 1;
     state.currentFile = null;
     state.currentFileUrl = '';
     $('#filePreview').innerHTML = '';
@@ -1065,7 +1067,7 @@ function resultCard(item) {
   const feedback = state.searchQuery
     ? `<span class="card-feedback"><button data-card-feedback="relevant" data-feedback-file="${item.id}" title="相关">✓</button><button data-card-feedback="irrelevant" data-feedback-file="${item.id}" title="不相关">×</button></span>`
     : '';
-  const clipExport = item.kind==='video' ? `<button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
+  const clipExport = item.kind==='video' ? `<button class="find-similar" data-video-moments="${item.id}" data-time="${item.match_time ?? ''}">核对片段</button><button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
   return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
 }
@@ -1947,20 +1949,80 @@ function closeFileViewer() {
   closeModal($('#fileModal'));
 }
 
+let fileViewerRequest = 0;
+let videoMomentRequest = 0;
+
+async function loadMomentFrames(root, current) {
+  // Original video decoding is more expensive than existing thumbnail reads.
+  for (const image of $$('img[data-moment-frame]', root)) {
+    if (!current() || !image.isConnected) return;
+    const path = image.dataset.momentFrame;
+    try {
+      let url = state.thumbnailUrls.get(path);
+      if (!url) {
+        url = await authenticatedBlobUrl(path);
+        if (!current() || !image.isConnected) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+      touchThumbnail(path, url);
+      image.src = url;
+    } catch (error) {
+      if (!current()) return;
+      image.alt = '画面暂不可用，可点击时间点播放原视频';
+      image.classList.add('thumbnail-error');
+    }
+  }
+}
+
+async function loadVideoMoments(fileId, query = '') {
+  const request = ++videoMomentRequest;
+  const root = $('#videoMomentResults');
+  const button = $('#videoMomentForm button');
+  button.disabled = true;
+  root.innerHTML = '<p class="muted">正在查找候选画面…</p>';
+  const current = () => request === videoMomentRequest && Number(state.currentFile?.id) === Number(fileId) && $('#fileModal').classList.contains('open');
+  try {
+    const data = await api(`/api/files/${fileId}/moments?q=${encodeURIComponent(query)}`);
+    if (!current()) return;
+    root.innerHTML = data.moments.length
+      ? `<div class="moment-grid">${data.moments.map(item => `<button type="button" data-seek="${item.time}" title="跳到 ${item.time.toFixed(2)} 秒"><img data-moment-frame="/api/files/${fileId}/frame?time=${item.time}&revision=${encodeURIComponent(data.revision || '')}" alt="${item.time.toFixed(2)} 秒的实际画面"><span>${item.time.toFixed(2)} 秒</span></button>`).join('')}</div>`
+      : '<p class="muted">这段视频暂时没有可用的画面索引，可直接播放原视频核对。</p>';
+    loadMomentFrames(root, current);
+  } catch (error) {
+    if (current()) root.innerHTML = `<p class="muted">${esc(error.message)}。可清空关键词后再次查找，或直接播放原视频。</p>`;
+  } finally {
+    if (current()) button.disabled = false;
+  }
+}
+
+$('#videoMomentForm').addEventListener('submit', event => {
+  event.preventDefault();
+  if (state.currentFile?.kind === 'video') loadVideoMoments(state.currentFile.id, $('#videoMomentQuery').value.trim());
+});
+
 async function openFileViewer(fileId, matchTime = null) {
+  const request = ++fileViewerRequest;
+  videoMomentRequest += 1;
   const modal = $('#fileModal');
   openModal(modal);
+  state.currentFile = null;
+  state.currentFileUrl = '';
   $('#filePreview').innerHTML = '<div class="viewer-loading">正在安全读取原文件…</div>';
   $('#fileName').textContent = '正在载入';
   $('#filePath').textContent = '';
   $('#fileFacts').innerHTML = '';
   $('#fileCaption').innerHTML = '';
   $('#fileTimeline').innerHTML = '';
+  $('#videoMoments').hidden = true;
+  $('#videoMomentResults').innerHTML = '';
   try {
     const [details, ticket] = await Promise.all([
       api(`/api/files/${fileId}`),
       api(`/api/files/${fileId}/ticket`, { method: 'POST' }),
     ]);
+    if (request !== fileViewerRequest || !modal.classList.contains('open')) return;
     state.currentFile = details;
     state.currentFileUrl = ticket.url;
     $('#fileKind').textContent = details.kind === 'image' ? '照片详情' : details.kind === 'video' ? '视频详情' : '文件详情';
@@ -2006,6 +2068,9 @@ async function openFileViewer(fileId, matchTime = null) {
       $('#filePreview').innerHTML = `<video controls preload="metadata" src="${esc(ticket.url)}"></video>`;
       const video = $('#filePreview video');
       if (matchTime != null && Number.isFinite(Number(matchTime))) video.addEventListener('loadedmetadata', () => { video.currentTime = Number(matchTime); }, { once: true });
+      $('#videoMoments').hidden = false;
+      $('#videoMomentQuery').value = state.searchQuery || '';
+      loadVideoMoments(fileId, $('#videoMomentQuery').value);
     } else if (details.kind === 'audio') {
       $('#filePreview').innerHTML = `<div class="audio-preview">${icon('audio')}<audio controls src="${esc(ticket.url)}"></audio></div>`;
     } else if (details.mime_type === 'application/pdf') {
@@ -2014,6 +2079,7 @@ async function openFileViewer(fileId, matchTime = null) {
       $('#filePreview').innerHTML = `<div class="generic-preview">${icon({ document: 'document', archive: 'archive' }[details.kind] || 'files')}<p>${esc(details.name)}</p></div>`;
     }
   } catch (error) {
+    if (request !== fileViewerRequest) return;
     toast(error.message, true);
     closeFileViewer();
   }
@@ -3471,6 +3537,8 @@ document.addEventListener('click', async event => {
     workbench.classList.remove('rail-open');
     return;
   }
+  const momentDetail = event.target.closest('[data-video-moments]');
+  if (momentDetail) return openFileViewer(momentDetail.dataset.videoMoments, momentDetail.dataset.time === '' ? null : Number(momentDetail.dataset.time));
   const inspectorDetail = event.target.closest('[data-inspector-detail]');
   if (inspectorDetail) return openFileViewer(inspectorDetail.dataset.inspectorDetail);
   const inspectorOpen = event.target.closest('[data-inspector-open]');

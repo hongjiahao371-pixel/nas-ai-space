@@ -40,6 +40,7 @@ from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
 from app.services.multimodal import MultimodalService
+from app.services.video_moments import VideoMoments
 from app.services.watcher import LibraryWatcher
 from app.services.tasks import TaskManager
 from app.services.vectors import VectorStore
@@ -411,6 +412,7 @@ async def lifespan(_: FastAPI):
     state.vectors = VectorStore(settings)
     state.search = SearchService(state.database, state.ai, state.vectors)
     state.search.multimodal = MultimodalService(settings)
+    state.video_moments = VideoMoments(state.search.multimodal)
     state.tasks = TaskManager(state.database, settings, state.ai, state.vectors)
     state.productivity = state.tasks.productivity
     state.recycle = RecycleBin(state.database, settings, state.vectors)
@@ -427,7 +429,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.6.0",
+    version="1.6.1",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -514,6 +516,47 @@ def require_auth(
 
 
 Auth = Annotated[dict[str, Any], Depends(require_auth)]
+
+_integration_vision_slot = threading.BoundedSemaphore(1)
+
+
+@app.get("/api/integrations/capabilities")
+def integration_capabilities(principal: Auth) -> dict[str, Any]:
+    return {
+        "version": app.version,
+        "search": {"endpoint": "/api/search", "method": "GET"},
+        "file": {"endpoint": "/api/files/{file_id}", "method": "GET"},
+        "ask": {"endpoint": "/api/ask", "method": "POST", "citations": True},
+        "vision": {"endpoint": "/api/integrations/vision", "method": "POST", "enabled": bool(settings.vision_model), "max_bytes": 8 * 1024 * 1024},
+        "moments": {"endpoint": "/api/files/{file_id}/moments", "method": "GET", "sampled": True},
+        "image_search": {"endpoint": "/api/search/image", "method": "POST"},
+        "limitations": ["检索结果与视频时间点是候选，细节需核对", "索引覆盖不完整时未找到不代表不存在", "看图回答不是实时家电状态查询"],
+    }
+
+
+@app.post("/api/integrations/vision")
+async def integration_vision(request: Request, principal: Auth,
+                             question: str = Query(default="请描述这张图片中能看清的内容。", min_length=2, max_length=1000)) -> dict[str, Any]:
+    if len(question.strip()) < 2:
+        raise HTTPException(400, "问题至少两个有效字符")
+    if not _integration_vision_slot.acquire(blocking=False):
+        raise HTTPException(503, "看图分析繁忙，请稍后重试", headers={"Retry-After": "5"})
+    try:
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > 8 * 1024 * 1024:
+                raise HTTPException(413, "图片最大8MB")
+            data.extend(chunk)
+        try:
+            answer = await asyncio.to_thread(state.ai.analyze_image, bytes(data), question.strip())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except (RuntimeError, httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
+            raise HTTPException(503, "看图模型暂时不可用，请稍后重试") from exc
+        return {"answer": answer, "source": "request_image", "stored": False,
+                "limitations": "仅依据传入图片，细节与文字可能误识别；不能代替实时设备状态"}
+    finally:
+        _integration_vision_slot.release()
 
 
 def _set_session_cookies(response: Response, request: Request, token: str) -> str:
@@ -3779,6 +3822,41 @@ def file_details(file_id: int, principal: Auth) -> dict[str, Any]:
         result["favorite"] = False
         result["tags"] = []
     return result
+
+
+def _moment_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
+    row = _visible_file(file_id, principal)
+    library = state.database.get_library(int(row["library_id"]))
+    if not library or not library.get("enabled"):
+        raise HTTPException(404, "媒体库未启用")
+    if row["kind"] != "video":
+        raise HTTPException(400, "只有视频可查看候选画面")
+    return row
+
+
+@app.get("/api/files/{file_id}/moments")
+def video_moments(file_id: int, principal: Auth, q: str = Query(default="", max_length=500)) -> dict[str, Any]:
+    row = _moment_file(file_id, principal)
+    try:
+        return state.video_moments.candidates(row, q.strip())
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "候选画面暂时无法搜索，请稍后重试") from exc
+
+
+@app.get("/api/files/{file_id}/frame")
+def video_frame(file_id: int, principal: Auth, time: float = Query(ge=0), revision: str = Query(default="", max_length=80)) -> Response:
+    row = _moment_file(file_id, principal)
+    if revision and revision != f"{row['mtime_ns']}:{row['size']}":
+        raise HTTPException(409, "素材版本已变化，请重新打开视频")
+    try:
+        data = state.video_moments.frame(row, time)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (TimeoutError, OSError) as exc:
+        raise HTTPException(503, "画面读取繁忙，请稍后重试") from exc
 
 
 @app.get("/api/files/{file_id}/similar")

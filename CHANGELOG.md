@@ -3,6 +3,16 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
+## [1.6.1] - 2026-10-08
+
+### Added
+- File-scoped video moment search, chronological sampled-frame browsing and authenticated actual-frame previews with direct playback seeking.
+- Bounded in-memory previews, permission/revision validation and stale dialog-response protection.
+- Authenticated integration capability discovery and bounded, non-persistent image questions; async Jarvis backend client with source-aware search, evidence questions and candidate video moments.
+
+### Notes
+- Candidate frames support visual verification; fine counts and UI states still require review. No extra visual-model inference is added to ordinary search, and neither index needs rebuilding.
+
 ## [1.6.0] - 2026-10-08
 
 ### Added
