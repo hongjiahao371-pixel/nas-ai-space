@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+import wave
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,7 @@ class MultimodalService:
         db.execute("CREATE TABLE IF NOT EXISTS controls(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS interactive_requests(id TEXT PRIMARY KEY,expires_at REAL)")
         db.execute("CREATE TABLE IF NOT EXISTS retry_state(file_id INTEGER PRIMARY KEY,attempts INTEGER,next_retry REAL,terminal INTEGER)")
+        db.execute("CREATE TABLE IF NOT EXISTS media_warnings(file_id INTEGER PRIMARY KEY,signature TEXT NOT NULL,message TEXT NOT NULL,updated_at REAL NOT NULL)")
         try:
             with db:
                 yield db
@@ -231,16 +233,33 @@ class MultimodalService:
                 entries=[dict(r) for r in db.execute("""SELECT m.*,f.mtime_ns,f.size,f.kind FROM media_index m
                     JOIN source.files f ON f.id=m.file_id JOIN source.libraries l ON l.id=f.library_id
                     WHERE l.enabled=1"""+clause,params)]
-                valid=[r for r in entries if r['status']=='ready' and r['signature']==self.signature(r)]
+                current=[r for r in entries if r['signature']==self.signature(r)]
+                valid=[r for r in current if r['status']=='ready' and r['points']>0]
+                failed=[r for r in current if r['status']=='error']
                 result.update(indexed_files=len(valid),indexed_points=sum(r['points'] for r in valid),
-                              errors=sum(r['status']=='error' for r in entries))
+                              errors=len(failed))
                 result['pending_files']=max(0,result['total_media']-len(valid))
+                terminal_ids=set()
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='retry_state'").fetchone():
+                    terminal_ids={r[0] for r in db.execute('SELECT file_id FROM retry_state WHERE terminal=1')}
+                result['terminal_errors']=sum(r['file_id'] in terminal_ids for r in failed)
+                result['processable_pending_files']=max(0,result['pending_files']-result['terminal_errors'])
+                result['queue_complete']=result['total_media']>0 and result['processable_pending_files']==0
+                result['fully_indexed']=result['total_media']>0 and result['pending_files']==0
                 recent=sorted(r['updated_at'] for r in valid if r['updated_at']>time.time()-3600)
                 rate=(len(recent)-1)*3600/(recent[-1]-recent[0]) if len(recent)>1 and recent[-1]>recent[0] else 0
-                result.update(files_per_hour=round(rate,1),eta_seconds=round(result['pending_files']*3600/rate) if rate else None)
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name='retry_state'").fetchone():
-                    result['terminal_errors']=db.execute('SELECT COUNT(*) FROM retry_state WHERE terminal=1').fetchone()[0] if library_ids is None else 0
-                result['error_files']=[{'file_id':r['file_id'],'error':r['error']} for r in entries if r['status']=='error'][:20]
+                result.update(files_per_hour=round(rate,1),eta_seconds=round(result['processable_pending_files']*3600/rate)
+                              if rate and result['processable_pending_files'] else None)
+                result['error_files']=[{'file_id':r['file_id'],'error':r['error'],
+                    'action': '请从可靠备份恢复原图后重试，系统不会补写或忽略缺失数据'
+                    if 'truncated' in r['error'].lower() or '图片数据不完整' in r['error']
+                    else '查看失败原因后单独重试该素材'} for r in failed][:20]
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='media_warnings'").fetchone():
+                    valid_ids = {r['file_id']: r['signature'] for r in valid}
+                    warnings = [dict(r) for r in db.execute('SELECT file_id,signature,message FROM media_warnings')
+                                if valid_ids.get(r['file_id']) == r['signature']]
+                    result['partial_files'] = len(warnings)
+                    result['warning_files'] = [{'file_id':r['file_id'],'warning':r['message']} for r in warnings[:20]]
                 worker = db.execute("SELECT heartbeat,status FROM worker_status WHERE id=1").fetchone()
                 if worker:
                     result.update(worker_alive=time.time() - worker[0] < 900, worker_status=worker[1])
@@ -276,7 +295,12 @@ class MultimodalService:
                 _convert_image(path, converted)
                 image = Image.open(converted)
             with image:
-                prepared = ImageOps.exif_transpose(image).convert("RGB")
+                try:
+                    prepared = ImageOps.exif_transpose(image).convert("RGB")
+                except OSError as exc:
+                    if 'truncated' in str(exc).lower() or 'broken data stream' in str(exc).lower():
+                        raise ValueError('原始图片数据不完整，请从可靠备份恢复后重试') from exc
+                    raise
                 prepared.thumbnail((960, 960))
                 buffer = io.BytesIO()
                 prepared.save(buffer, format="JPEG", quality=88)
@@ -288,10 +312,11 @@ class MultimodalService:
         if kind == "image":
             yield self.image_input(path), "直接图片", None, None
             return
-        from app.services.extractors import _extract_video_frames, _probe_media
+        from app.services.extractors import _probe_media
         duration = float(file.get("duration") or _probe_media(path).get("duration") or 0)
         if kind == "video":
-            frames = _extract_video_frames(path, temporary, duration, self.settings.multimodal_video_frames)
+            from app.services.media_sampling import sample_video_frames
+            frames = sample_video_frames(path, temporary, duration, self.settings.multimodal_video_frames)
             from app.services.media_exports import scene_frames
             if self.settings.multimodal_scene_frames:
                 frames += scene_frames(path,temporary,self.settings.multimodal_scene_frames,duration)
@@ -301,19 +326,27 @@ class MultimodalService:
                 seen.append(timestamp)
                 yield self.image_input(frame), "直接视频画面", timestamp, timestamp
             if self.settings.multimodal_video_audio and _probe_media(path).get('metadata',{}).get('audio_codec'):
-                for content,label,start,end in self.media_inputs({**file,'kind':'audio'},path,temporary):
-                    yield content,'视频音轨',start,end
+                try:
+                    for content,label,start,end in self.media_inputs({**file,'kind':'audio'},path,temporary):
+                        yield content,'视频音轨',start,end
+                except (ValueError, subprocess.SubprocessError, OSError):
+                    # Optional audio must not discard already extracted visual evidence.
+                    yield None, '视频音轨未完成：抽样音轨读取失败，画面索引保留', None, None
         elif kind == "audio" and duration > 0:
             count = min(self.settings.multimodal_audio_segments, max(1, math.ceil(duration / 30)))
             for index in range(count):
                 start = index * 30 if duration <= count * 30 else (duration - 30) * index / max(1, count - 1)
                 target = temporary / f"audio-{index}.wav"
-                subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(start),
+                subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "1", "-filter_threads", "1", "-y", "-ss", str(start),
                                 "-i", str(path), "-t", "30", "-vn", "-ac", "1", "-ar", "16000",
                                 "-c:a", "pcm_s16le", str(target)], check=True, capture_output=True, timeout=120)
+                from app.services.media_sampling import validated_audio
+                audio_bytes = validated_audio(target)
+                with wave.open(io.BytesIO(audio_bytes), 'rb') as audio:
+                    sample_duration = audio.getnframes() / audio.getframerate()
                 content = {"content": [{"type": "input_audio", "input_audio": {
-                    "data": base64.b64encode(target.read_bytes()).decode(), "format": "wav"}}]}
-                yield content, "直接音频片段", start, min(duration, start + 30)
+                    "data": base64.b64encode(audio_bytes).decode(), "format": "wav"}}]}
+                yield content, "直接音频片段", start, min(duration, start + sample_duration)
 
     def index_file(self, file: dict):
         with self.maintenance_lock():
@@ -323,19 +356,31 @@ class MultimodalService:
         path = self.source_path(file)
         signature = self.signature(file)
         points = []
+        warnings = []
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=self.settings.cache_dir, prefix="gemma-media-") as tmp:
             for index, (content, label, start, end) in enumerate(self.media_inputs(file, path, Path(tmp))):
+                if content is None:
+                    warnings.append(label)
+                    continue
                 self.heartbeat('indexing')
                 # Queries use a separate inference slot and prevent subsequent background requests.
                 if self.wait_reason():
                     raise InterruptedError('索引让出交互或维护窗口')
-                vector = self.embed(content)
+                try:
+                    vector = self.embed(content)
+                except (httpx.HTTPError, ValueError):
+                    if file['kind'] != 'video' or label != '视频音轨':
+                        raise
+                    warnings.append('视频音轨未完成：音轨向量生成失败，画面索引保留')
+                    continue
                 payload = {"file_id": int(file["id"]), "library_id": int(file["library_id"]),
                            "kind": file["kind"], "mtime_ns": int(file["mtime_ns"]), "size": int(file["size"]),
                            "signature": signature, "source_label": label, "start_time": start, "end_time": end,
                            "content": label + (f" · {start:.1f} 秒" if start is not None else ""),
                            "model_revision": MODEL_REVISION}
+                if file['kind'] == 'video':
+                    payload['sampling_revision'] = 'boundary-v3'
                 points.append({"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"nas-ai:{file['id']}:{signature}:{index}")),
                                "vector": vector, "payload": payload})
         if not points:
@@ -345,10 +390,11 @@ class MultimodalService:
         url = f"{self.settings.qdrant_url}/collections/{self.settings.multimodal_collection}/points"
         response = self._http.put(url + "?wait=true", json={"points": points}, timeout=60)
         response.raise_for_status()
-        # Publish first, then remove earlier generations. Qwen vectors are untouched.
+        # Publish first, then remove previous generations and excess points from
+        # a same-generation retry with fewer successfully decoded segments.
         response = self._http.post(url + "/delete?wait=true", json={"filter": {
             "must": [{"key": "file_id", "match": {"value": int(file["id"])}}],
-            "must_not": [{"key": "signature", "match": {"value": signature}}]}}, timeout=60)
+            "must_not": [{"has_id": [point['id'] for point in points]}]}}, timeout=60)
         response.raise_for_status()
         coverage = "image" if file["kind"] == "image" else "sampled_frames" if file["kind"] == "video" else "sampled_audio"
         with self._state() as db:
@@ -356,6 +402,10 @@ class MultimodalService:
                        (file["id"], signature, "ready", len(points), coverage, "", time.time()))
         with self._state() as db:
             db.execute('DELETE FROM retry_state WHERE file_id=?',(file['id'],))
+            db.execute('DELETE FROM media_warnings WHERE file_id=?',(file['id'],))
+            if warnings:
+                db.execute('INSERT INTO media_warnings VALUES (?,?,?,?)',
+                           (file['id'],signature,'；'.join(dict.fromkeys(warnings)),time.time()))
         return len(points)
 
     def run_batch(self) -> dict:
@@ -392,7 +442,7 @@ class MultimodalService:
             previous=indexed.get(int(file['id']))
             same=previous and previous['signature']==self.signature(file)
             retry=retries.get(int(file['id']),{}) if same else {}
-            if same and (previous['status']=='ready' or retry.get('terminal') or time.time()<retry.get('next_retry',0)):
+            if same and ((previous['status']=='ready' and previous['points']>0) or retry.get('terminal') or time.time()<retry.get('next_retry',0)):
                 continue
             reason=self.wait_reason()
             if reason:

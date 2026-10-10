@@ -230,6 +230,8 @@ function closeModal(modal) {
   if (!modal?.classList.contains('open')) return;
   // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
   if (modal.id === 'fileModal') {
+    fileViewerRequest += 1;
+    videoMomentRequest += 1;
     state.currentFile = null;
     state.currentFileUrl = '';
     $('#filePreview').innerHTML = '';
@@ -1065,7 +1067,7 @@ function resultCard(item) {
   const feedback = state.searchQuery
     ? `<span class="card-feedback"><button data-card-feedback="relevant" data-feedback-file="${item.id}" title="相关">✓</button><button data-card-feedback="irrelevant" data-feedback-file="${item.id}" title="不相关">×</button></span>`
     : '';
-  const clipExport = item.kind==='video' ? `<button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
+  const clipExport = item.kind==='video' ? `<button class="find-similar" data-video-moments="${item.id}" data-time="${item.match_time ?? ''}">核对片段</button><button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
   return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
 }
@@ -1947,20 +1949,87 @@ function closeFileViewer() {
   closeModal($('#fileModal'));
 }
 
+let fileViewerRequest = 0;
+let videoMomentRequest = 0;
+
+async function loadMomentFrames(root, current) {
+  // Original video decoding is more expensive than existing thumbnail reads.
+  for (const image of $$('img[data-moment-frame]', root)) {
+    if (!current() || !image.isConnected) return;
+    const path = image.dataset.momentFrame;
+    try {
+      let url = state.thumbnailUrls.get(path);
+      if (!url) {
+        url = await authenticatedBlobUrl(path);
+        if (!current() || !image.isConnected) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+      touchThumbnail(path, url);
+      image.src = url;
+    } catch (error) {
+      if (!current()) return;
+      image.alt = '画面暂不可用，可点击时间点播放原视频';
+      image.classList.add('thumbnail-error');
+    }
+  }
+}
+
+async function loadVideoMoments(fileId, query = '', refine = false) {
+  const request = ++videoMomentRequest;
+  const root = $('#videoMomentResults');
+  const button = $('#videoMomentForm button');
+  button.disabled = true;
+  $('#refineVideoMoment').disabled = true;
+  root.innerHTML = `<p class="muted">${refine ? '正在补读实际画面，请稍候…' : '正在查找候选画面…'}</p>`;
+  const current = () => request === videoMomentRequest && Number(state.currentFile?.id) === Number(fileId) && $('#fileModal').classList.contains('open');
+  try {
+    const data = await api(`/api/files/${fileId}/moments?q=${encodeURIComponent(query)}&refine=${refine}`);
+    if (!current()) return;
+    root.innerHTML = data.moments.length
+      ? `${data.refined ? `<p class="muted">已补查 ${data.sample_count} 个首尾画面，共 ${data.candidate_count} 个候选${data.unavailable_samples ? `，${data.unavailable_samples} 个位置未能读取` : ''}；请播放核对具体细节。</p>` : ''}<div class="moment-grid">${data.moments.map(item => `<button type="button" data-seek="${item.time}" title="跳到 ${item.time.toFixed(2)} 秒"><img data-moment-frame="/api/files/${fileId}/frame?time=${item.time}&revision=${encodeURIComponent(data.revision || '')}" alt="${item.time.toFixed(2)} 秒的实际画面"><span>${item.time.toFixed(2)} 秒</span></button>`).join('')}</div>`
+      : '<p class="muted">这段视频暂时没有可用的画面索引，可直接播放原视频核对。</p>';
+    loadMomentFrames(root, current);
+  } catch (error) {
+    if (current()) root.innerHTML = `<p class="muted">${esc(error.message)}。可清空关键词后再次查找，或直接播放原视频。</p>`;
+  } finally {
+    if (current()) { button.disabled = false; $('#refineVideoMoment').disabled = false; }
+  }
+}
+
+$('#videoMomentForm').addEventListener('submit', event => {
+  event.preventDefault();
+  if (state.currentFile?.kind === 'video') loadVideoMoments(state.currentFile.id, $('#videoMomentQuery').value.trim());
+});
+
+$('#refineVideoMoment').addEventListener('click', () => {
+  const query = $('#videoMomentQuery').value.trim();
+  if (!query) { toast('请输入要查找的画面'); return; }
+  if (state.currentFile?.kind === 'video') loadVideoMoments(state.currentFile.id, query, true);
+});
+
 async function openFileViewer(fileId, matchTime = null) {
+  const request = ++fileViewerRequest;
+  videoMomentRequest += 1;
   const modal = $('#fileModal');
   openModal(modal);
+  state.currentFile = null;
+  state.currentFileUrl = '';
   $('#filePreview').innerHTML = '<div class="viewer-loading">正在安全读取原文件…</div>';
   $('#fileName').textContent = '正在载入';
   $('#filePath').textContent = '';
   $('#fileFacts').innerHTML = '';
   $('#fileCaption').innerHTML = '';
   $('#fileTimeline').innerHTML = '';
+  $('#videoMoments').hidden = true;
+  $('#videoMomentResults').innerHTML = '';
   try {
     const [details, ticket] = await Promise.all([
       api(`/api/files/${fileId}`),
       api(`/api/files/${fileId}/ticket`, { method: 'POST' }),
     ]);
+    if (request !== fileViewerRequest || !modal.classList.contains('open')) return;
     state.currentFile = details;
     state.currentFileUrl = ticket.url;
     $('#fileKind').textContent = details.kind === 'image' ? '照片详情' : details.kind === 'video' ? '视频详情' : '文件详情';
@@ -2006,6 +2075,9 @@ async function openFileViewer(fileId, matchTime = null) {
       $('#filePreview').innerHTML = `<video controls preload="metadata" src="${esc(ticket.url)}"></video>`;
       const video = $('#filePreview video');
       if (matchTime != null && Number.isFinite(Number(matchTime))) video.addEventListener('loadedmetadata', () => { video.currentTime = Number(matchTime); }, { once: true });
+      $('#videoMoments').hidden = false;
+      $('#videoMomentQuery').value = state.searchQuery || '';
+      loadVideoMoments(fileId, $('#videoMomentQuery').value);
     } else if (details.kind === 'audio') {
       $('#filePreview').innerHTML = `<div class="audio-preview">${icon('audio')}<audio controls src="${esc(ticket.url)}"></audio></div>`;
     } else if (details.mime_type === 'application/pdf') {
@@ -2014,6 +2086,7 @@ async function openFileViewer(fileId, matchTime = null) {
       $('#filePreview').innerHTML = `<div class="generic-preview">${icon({ document: 'document', archive: 'archive' }[details.kind] || 'files')}<p>${esc(details.name)}</p></div>`;
     }
   } catch (error) {
+    if (request !== fileViewerRequest) return;
     toast(error.message, true);
     closeFileViewer();
   }
@@ -3471,6 +3544,8 @@ document.addEventListener('click', async event => {
     workbench.classList.remove('rail-open');
     return;
   }
+  const momentDetail = event.target.closest('[data-video-moments]');
+  if (momentDetail) return openFileViewer(momentDetail.dataset.videoMoments, momentDetail.dataset.time === '' ? null : Number(momentDetail.dataset.time));
   const inspectorDetail = event.target.closest('[data-inspector-detail]');
   if (inspectorDetail) return openFileViewer(inspectorDetail.dataset.inspectorDetail);
   const inspectorOpen = event.target.closest('[data-inspector-open]');
@@ -4850,22 +4925,31 @@ if (state.publicMode) {
 function renderMultimodal(data,refresh=false) {
   const panel=$('#multimodalPanel');panel.hidden=!data?.enabled;if(!data?.enabled)return;
   const labels={running:'正在处理',indexing:'正在处理',waiting:'等待新素材',paused:'已暂停',scheduled:'等待处理窗口',interactive:'优先响应查询',low_memory:'等待可用内存',low_swap:'等待可用资源'};
-  $('#multimodalBadge').textContent=data.worker_alive?(labels[data.worker_status]||'在线'):'索引服务离线';
+  $('#multimodalBadge').textContent=data.worker_alive?(data.queue_complete&&data.terminal_errors?'队列已结束 · 有失败待检查':labels[data.worker_status]||'在线'):'索引服务离线';
   $('#multimodalSummary').innerHTML=[
     indexSummaryItem('已完成',`${fmtCount(data.indexed_files)} / ${fmtCount(data.total_media)}`,fmtPercent(data.total_media?data.indexed_files/data.total_media*100:0)),
-    indexSummaryItem('剩余素材',fmtCount(data.pending_files),'包含待处理与失败素材'),
+    indexSummaryItem('待处理',fmtCount(data.processable_pending_files??data.pending_files),'不包含已停止自动重试的失败素材'),
     indexSummaryItem('可检索片段',fmtCount(data.indexed_points),'图片、视频画面与音轨'),
     indexSummaryItem('近期吞吐',`${fmtCount(data.files_per_hour)} 个/小时`,'按最近一小时的完成记录估算'),
-    indexSummaryItem('预计剩余',fmtEta(data.eta_seconds),'按近期吞吐估算；暂停及时间窗口另计'),
-    indexSummaryItem('失败素材',fmtCount(data.errors),`${fmtCount(data.terminal_errors)} 个需要人工检查`)
+    indexSummaryItem('预计剩余',data.queue_complete?'队列已结束':fmtEta(data.eta_seconds),'仅估算可处理素材；失败需另行处理'),
+    indexSummaryItem('失败素材',fmtCount(data.errors),`${fmtCount(data.terminal_errors)} 个需要人工检查`),
+    indexSummaryItem('部分覆盖',fmtCount(data.partial_files||0),'已有画面可搜索，音轨尚未完成')
   ].join('');
   $('#toggleMultimodal').textContent=data.policy?.paused?'继续索引':'暂停索引';
   $('#retryMultimodal').disabled=!data.errors;
-  $('#multimodalErrors').innerHTML=(data.error_files||[]).map(x=>`<button class="secondary" data-file="${x.file_id}">查看失败素材 ${x.file_id}</button>`).join(' ');
+  $('#multimodalErrors').innerHTML=(data.error_files||[]).map(x=>`<p><button class="secondary" data-file="${x.file_id}">查看失败素材 ${x.file_id}</button> ${esc(x.action||'查看失败原因后单独重试')}${isAdmin()?` <button class="secondary" data-mm-retry="${x.file_id}">单独重试</button>`:''}</p>`).join('')
+    +(data.warning_files||[]).map(x=>`<p><button class="secondary" data-file="${x.file_id}">查看部分覆盖素材 ${x.file_id}</button> ${esc(x.warning)}</p>`).join('');
   if(refresh||!state.mmPolicyLoaded){
     const form=$('#multimodalPolicyForm');for(const name of ['mode','start_hour','end_hour','order','batch_size'])form.elements[name].value=data.policy[name];state.mmPolicyLoaded=true;
   }
 }
+document.addEventListener('click',async event=>{
+ const button=event.target.closest('[data-mm-retry]');if(!button)return;
+ button.disabled=true;
+ try{await api(`/api/index/multimodal/${button.dataset.mmRetry}/retry`,{method:'POST'});toast('该素材已加入重试队列');await loadIndexStatus(true);}
+ catch(error){toast(error.message,true);}
+ finally{button.disabled=false;}
+});
 $('#multimodalPolicyForm').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;const values={...state.indexStatus.multimodal.policy};
  for(const name of ['mode','start_hour','end_hour','order','batch_size'])values[name]=['mode','order'].includes(name)?form.elements[name].value:Number(form.elements[name].value);
