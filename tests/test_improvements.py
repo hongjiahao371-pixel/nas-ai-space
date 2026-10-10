@@ -163,6 +163,20 @@ class ApiImprovementsTests(unittest.TestCase):
   state=self.main.state;state.tasks.quiescing=True
   self.assertEqual(self.client.post('/api/index/multimodal/retry',headers=self.headers).status_code,503)
   state.tasks.quiescing=False
+ def test_individual_media_retry_preserves_other_terminal_failures(self):
+  service=self.main.state.search.multimodal
+  for file in self.files:
+   with service._state() as db:
+    db.execute('INSERT INTO media_index VALUES (?,?,?,?,?,?,?)',(file['id'],service.signature(file),'error',0,'','test',1))
+    db.execute('INSERT INTO retry_state VALUES (?,?,?,?)',(file['id'],3,0,1))
+  target=self.files[0]['id'];other=self.files[1]['id']
+  self.assertEqual(self.client.post(f'/api/index/multimodal/{target}/retry').status_code,401)
+  response=self.client.post(f'/api/index/multimodal/{target}/retry',headers=self.headers)
+  self.assertEqual(response.status_code,200,response.text)
+  with service._state() as db:
+   self.assertEqual(db.execute('SELECT status FROM media_index WHERE file_id=?',(target,)).fetchone()[0],'pending')
+   self.assertEqual(db.execute('SELECT terminal FROM retry_state WHERE file_id=?',(other,)).fetchone()[0],1)
+  self.assertEqual(self.client.post('/api/index/multimodal/9999/retry',headers=self.headers).status_code,404)
  def test_clip_api_rejects_image_and_bad_intervals(self):
   file=self.files[0];r=self.client.post(f"/api/files/{file['id']}/clips",json={'start':0,'end':2},headers=self.headers);self.assertEqual(r.status_code,400)
   self.db.execute("UPDATE files SET kind='video',duration=5 WHERE id=?",(file['id'],))

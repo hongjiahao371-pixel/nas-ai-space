@@ -5,6 +5,9 @@ import math
 import sqlite3
 import tempfile
 import unittest
+import wave
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -48,6 +51,7 @@ class MultimodalTests(unittest.TestCase):
         self.cfg = replace(settings, database_path=self.root / "source.db", data_dir=self.root / "data",
                            cache_dir=self.root / "cache", scan_root=self.library_path,
                            scan_roots=(self.library_path,), upload_root=self.root / "uploads",
+                           vector_backup_dir=self.root / 'snapshots',
                            embedding_base_url="", embedding_model="", multimodal_enabled=True,
                            multimodal_base_url="http://127.0.0.1:8080")
         path = self.library_path / "IMG_001.jpg"
@@ -137,6 +141,31 @@ class MultimodalTests(unittest.TestCase):
             service.index_file(self.file)
         service._http.put.assert_not_called()
 
+    def test_terminal_failure_is_scoped_and_not_a_processable_queue_or_eta(self):
+        service=MultimodalService(self.cfg)
+        with service._state() as db:
+            db.execute('INSERT INTO media_index VALUES (?,?,?,?,?,?,?)',
+                       (self.file['id'],service.signature(self.file),'error',0,'','truncated',1))
+            db.execute('INSERT INTO retry_state VALUES (?,?,?,?)',(self.file['id'],3,0,1))
+            db.execute('INSERT INTO retry_state VALUES (?,?,?,?)',(9999,3,0,1))
+        scoped=service.status([self.library['id']])
+        self.assertEqual(scoped['terminal_errors'],1)
+        self.assertEqual(scoped['processable_pending_files'],0)
+        self.assertTrue(scoped['queue_complete']);self.assertFalse(scoped['fully_indexed'])
+        self.assertIsNone(scoped['eta_seconds'])
+        self.assertEqual(service.status([-1])['terminal_errors'],0)
+
+    def test_changed_source_does_not_inherit_terminal_failure_status(self):
+        service=MultimodalService(self.cfg)
+        with service._state() as db:
+            db.execute('INSERT INTO media_index VALUES (?,?,?,?,?,?,?)',
+                       (self.file['id'],'old-signature','error',0,'','truncated',1))
+            db.execute('INSERT INTO retry_state VALUES (?,?,?,?)',(self.file['id'],3,0,1))
+        status=service.status()
+        self.assertEqual(status['errors'],0);self.assertEqual(status['terminal_errors'],0)
+        self.assertEqual(status['processable_pending_files'],1)
+        self.assertFalse(status['queue_complete']);self.assertFalse(status['error_files'])
+
     def test_source_path_cannot_escape_library(self):
         service = MultimodalService(self.cfg)
         outside = self.root / "outside.jpg"
@@ -154,3 +183,113 @@ class MultimodalTests(unittest.TestCase):
         self.assertEqual(len(vector), DIMENSION)
         service.query_embedding("红伞")
         self.assertEqual(service._http.post.call_count, 1)
+
+    def test_empty_and_truncated_pcm_are_rejected_before_embedding(self):
+        from app.services.media_sampling import validated_audio
+        target = self.root / 'sample.wav'
+        def wav(count):
+            with wave.open(str(target), 'wb') as f:
+                f.setnchannels(1); f.setsampwidth(2); f.setframerate(16000)
+                f.writeframes(b'\0\0' * count)
+        wav(0)
+        with self.assertRaisesRegex(ValueError, '过短'): validated_audio(target)
+        wav(16000)
+        self.assertGreater(len(validated_audio(target)), 32000)
+        target.write_bytes(target.read_bytes()[:-2000])
+        with self.assertRaisesRegex(ValueError, '不完整'): validated_audio(target)
+
+    def test_audio_end_uses_decoded_length_instead_of_requested_window(self):
+        service=MultimodalService(self.cfg)
+        def decode(command,**kwargs):
+            with wave.open(command[-1], 'wb') as audio:
+                audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(16000)
+                audio.writeframes(b'\0\0'*16000)
+            return Mock(returncode=0)
+        with patch('app.services.multimodal.subprocess.run',side_effect=decode):
+            segments=list(service.media_inputs({**self.file,'kind':'audio','duration':90},Path(self.file['path']),self.root))
+        self.assertEqual([(start,end) for _,_,start,end in segments],[(0,1),(30,31),(60,61)])
+
+    def test_optional_video_audio_failure_publishes_visual_points_with_warning(self):
+        service = MultimodalService(self.cfg)
+        video = {**self.file, 'kind':'video'}
+        service.media_inputs = Mock(return_value=iter([
+            ({'frame':'first'}, '直接视频画面', .1, .1),
+            ({'audio':'bad'}, '视频音轨', 0, 30),
+        ]))
+        service.embed = Mock(side_effect=[validate_embedding([1.] * DIMENSION), ValueError('audio bad')])
+        service.vectors._ensure_collection = Mock(); service._http = Mock()
+        self.db.execute("UPDATE files SET kind='video' WHERE id=?", (self.file['id'],))
+        count = service.index_file(video)
+        self.assertEqual(count, 1)
+        with service._state() as db:
+            self.assertEqual(db.execute('SELECT status,points FROM media_index').fetchone()[:], ('ready',1))
+            self.assertIn('音轨向量生成失败', db.execute('SELECT message FROM media_warnings').fetchone()[0])
+        status=service.status([self.library['id']])
+        self.assertEqual(status['partial_files'],1)
+        self.assertEqual(status['errors'],0)
+        # Warnings are scoped to visible libraries, not leaked to other members.
+        self.assertEqual(service.status([-1]).get('warning_files'), [])
+        body=service._http.put.call_args.kwargs['json']
+        self.assertEqual(body['points'][0]['payload']['sampling_revision'],'boundary-v3')
+        cleanup=service._http.post.call_args.kwargs['json']['filter']
+        self.assertEqual(cleanup['must_not'],[{'has_id':[p['id'] for p in body['points']]}])
+
+    def test_image_failure_is_not_silently_promoted_to_ready(self):
+        service=MultimodalService(self.cfg)
+        service.embed=Mock(side_effect=ValueError('invalid image'))
+        service._http=Mock()
+        with self.assertRaises(ValueError):service.index_file(self.file)
+        service._http.put.assert_not_called()
+
+    def test_boundary_sampling_includes_actual_final_scene(self):
+        from app.services.media_sampling import boundary_times
+        stamps=boundary_times(34.4344)
+        self.assertAlmostEqual(stamps[-1],34.1344)
+        for duration in [.01,.1,1,34.4344]:
+            self.assertTrue(all(0 <= t < duration for t in boundary_times(duration)))
+        self.assertFalse(boundary_times(math.nan))
+
+    def test_video_sampling_stops_at_total_budget(self):
+        from app.services.media_sampling import sample_video_frames
+        with patch('app.services.media_sampling.time.monotonic',side_effect=[0,0,61]), \
+             patch('app.services.media_sampling.subprocess.run',return_value=Mock(returncode=1)) as decode:
+            self.assertFalse(sample_video_frames(self.library_path/'video.mp4',self.root,100))
+            self.assertEqual(decode.call_count,1)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_actual_sampling_reads_opening_and_closing_without_touching_source(self):
+        from app.services.media_sampling import sample_video_frames
+        source=self.library_path/'two-scenes.mp4'
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=c=red:s=128x128:d=1',
+                        '-f','lavfi','-i','color=c=blue:s=128x128:d=1',
+                        '-filter_complex','[0:v][1:v]concat=n=2:v=1:a=0[v]',
+                        '-map','[v]','-c:v','libx264',str(source)],check=True)
+        before=hashlib.sha256(source.read_bytes()).hexdigest()
+        frames=sample_video_frames(source,self.root,2,count=2)
+        self.assertEqual(len(frames),4)
+        with Image.open(frames[0][1]) as img:self.assertGreater(img.getpixel((20,20))[0],200)
+        with Image.open(frames[1][1]) as img:self.assertGreater(img.getpixel((20,20))[2],200)
+        self.assertEqual(before,hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def test_interrupted_snapshot_does_not_publish_or_expire_recovery_files(self):
+        from contextlib import contextmanager
+        from app.services.vectors import VectorStore
+        store=VectorStore(self.cfg);client=Mock();store._http=Mock(return_value=client)
+        client.get.return_value.status_code=200
+        client.post.return_value.json.return_value={'result':{'name':'new.snapshot'}}
+        @contextmanager
+        def stream(*args,**kwargs):
+            response=Mock()
+            def chunks():
+                yield b'partial'
+                raise OSError('connection dropped')
+            response.iter_bytes.side_effect=chunks
+            yield response
+        client.stream.side_effect=stream
+        directory=self.cfg.vector_backup_dir;directory.mkdir(parents=True,exist_ok=True)
+        old=directory/'good.snapshot';old.write_bytes(b'old verified backup')
+        with self.assertRaises(OSError):store.create_snapshot(retain=1)
+        self.assertEqual(old.read_bytes(),b'old verified backup')
+        self.assertFalse((directory/'new.snapshot').exists())
+        self.assertFalse((directory/'new.snapshot.part').exists())
+        client.delete.assert_not_called()

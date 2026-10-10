@@ -1976,30 +1976,37 @@ async function loadMomentFrames(root, current) {
   }
 }
 
-async function loadVideoMoments(fileId, query = '') {
+async function loadVideoMoments(fileId, query = '', refine = false) {
   const request = ++videoMomentRequest;
   const root = $('#videoMomentResults');
   const button = $('#videoMomentForm button');
   button.disabled = true;
-  root.innerHTML = '<p class="muted">正在查找候选画面…</p>';
+  $('#refineVideoMoment').disabled = true;
+  root.innerHTML = `<p class="muted">${refine ? '正在补读实际画面，请稍候…' : '正在查找候选画面…'}</p>`;
   const current = () => request === videoMomentRequest && Number(state.currentFile?.id) === Number(fileId) && $('#fileModal').classList.contains('open');
   try {
-    const data = await api(`/api/files/${fileId}/moments?q=${encodeURIComponent(query)}`);
+    const data = await api(`/api/files/${fileId}/moments?q=${encodeURIComponent(query)}&refine=${refine}`);
     if (!current()) return;
     root.innerHTML = data.moments.length
-      ? `<div class="moment-grid">${data.moments.map(item => `<button type="button" data-seek="${item.time}" title="跳到 ${item.time.toFixed(2)} 秒"><img data-moment-frame="/api/files/${fileId}/frame?time=${item.time}&revision=${encodeURIComponent(data.revision || '')}" alt="${item.time.toFixed(2)} 秒的实际画面"><span>${item.time.toFixed(2)} 秒</span></button>`).join('')}</div>`
+      ? `${data.refined ? `<p class="muted">已补查 ${data.sample_count} 个首尾画面，共 ${data.candidate_count} 个候选${data.unavailable_samples ? `，${data.unavailable_samples} 个位置未能读取` : ''}；请播放核对具体细节。</p>` : ''}<div class="moment-grid">${data.moments.map(item => `<button type="button" data-seek="${item.time}" title="跳到 ${item.time.toFixed(2)} 秒"><img data-moment-frame="/api/files/${fileId}/frame?time=${item.time}&revision=${encodeURIComponent(data.revision || '')}" alt="${item.time.toFixed(2)} 秒的实际画面"><span>${item.time.toFixed(2)} 秒</span></button>`).join('')}</div>`
       : '<p class="muted">这段视频暂时没有可用的画面索引，可直接播放原视频核对。</p>';
     loadMomentFrames(root, current);
   } catch (error) {
     if (current()) root.innerHTML = `<p class="muted">${esc(error.message)}。可清空关键词后再次查找，或直接播放原视频。</p>`;
   } finally {
-    if (current()) button.disabled = false;
+    if (current()) { button.disabled = false; $('#refineVideoMoment').disabled = false; }
   }
 }
 
 $('#videoMomentForm').addEventListener('submit', event => {
   event.preventDefault();
   if (state.currentFile?.kind === 'video') loadVideoMoments(state.currentFile.id, $('#videoMomentQuery').value.trim());
+});
+
+$('#refineVideoMoment').addEventListener('click', () => {
+  const query = $('#videoMomentQuery').value.trim();
+  if (!query) { toast('请输入要查找的画面'); return; }
+  if (state.currentFile?.kind === 'video') loadVideoMoments(state.currentFile.id, query, true);
 });
 
 async function openFileViewer(fileId, matchTime = null) {
@@ -4918,22 +4925,31 @@ if (state.publicMode) {
 function renderMultimodal(data,refresh=false) {
   const panel=$('#multimodalPanel');panel.hidden=!data?.enabled;if(!data?.enabled)return;
   const labels={running:'正在处理',indexing:'正在处理',waiting:'等待新素材',paused:'已暂停',scheduled:'等待处理窗口',interactive:'优先响应查询',low_memory:'等待可用内存',low_swap:'等待可用资源'};
-  $('#multimodalBadge').textContent=data.worker_alive?(labels[data.worker_status]||'在线'):'索引服务离线';
+  $('#multimodalBadge').textContent=data.worker_alive?(data.queue_complete&&data.terminal_errors?'队列已结束 · 有失败待检查':labels[data.worker_status]||'在线'):'索引服务离线';
   $('#multimodalSummary').innerHTML=[
     indexSummaryItem('已完成',`${fmtCount(data.indexed_files)} / ${fmtCount(data.total_media)}`,fmtPercent(data.total_media?data.indexed_files/data.total_media*100:0)),
-    indexSummaryItem('剩余素材',fmtCount(data.pending_files),'包含待处理与失败素材'),
+    indexSummaryItem('待处理',fmtCount(data.processable_pending_files??data.pending_files),'不包含已停止自动重试的失败素材'),
     indexSummaryItem('可检索片段',fmtCount(data.indexed_points),'图片、视频画面与音轨'),
     indexSummaryItem('近期吞吐',`${fmtCount(data.files_per_hour)} 个/小时`,'按最近一小时的完成记录估算'),
-    indexSummaryItem('预计剩余',fmtEta(data.eta_seconds),'按近期吞吐估算；暂停及时间窗口另计'),
-    indexSummaryItem('失败素材',fmtCount(data.errors),`${fmtCount(data.terminal_errors)} 个需要人工检查`)
+    indexSummaryItem('预计剩余',data.queue_complete?'队列已结束':fmtEta(data.eta_seconds),'仅估算可处理素材；失败需另行处理'),
+    indexSummaryItem('失败素材',fmtCount(data.errors),`${fmtCount(data.terminal_errors)} 个需要人工检查`),
+    indexSummaryItem('部分覆盖',fmtCount(data.partial_files||0),'已有画面可搜索，音轨尚未完成')
   ].join('');
   $('#toggleMultimodal').textContent=data.policy?.paused?'继续索引':'暂停索引';
   $('#retryMultimodal').disabled=!data.errors;
-  $('#multimodalErrors').innerHTML=(data.error_files||[]).map(x=>`<button class="secondary" data-file="${x.file_id}">查看失败素材 ${x.file_id}</button>`).join(' ');
+  $('#multimodalErrors').innerHTML=(data.error_files||[]).map(x=>`<p><button class="secondary" data-file="${x.file_id}">查看失败素材 ${x.file_id}</button> ${esc(x.action||'查看失败原因后单独重试')}${isAdmin()?` <button class="secondary" data-mm-retry="${x.file_id}">单独重试</button>`:''}</p>`).join('')
+    +(data.warning_files||[]).map(x=>`<p><button class="secondary" data-file="${x.file_id}">查看部分覆盖素材 ${x.file_id}</button> ${esc(x.warning)}</p>`).join('');
   if(refresh||!state.mmPolicyLoaded){
     const form=$('#multimodalPolicyForm');for(const name of ['mode','start_hour','end_hour','order','batch_size'])form.elements[name].value=data.policy[name];state.mmPolicyLoaded=true;
   }
 }
+document.addEventListener('click',async event=>{
+ const button=event.target.closest('[data-mm-retry]');if(!button)return;
+ button.disabled=true;
+ try{await api(`/api/index/multimodal/${button.dataset.mmRetry}/retry`,{method:'POST'});toast('该素材已加入重试队列');await loadIndexStatus(true);}
+ catch(error){toast(error.message,true);}
+ finally{button.disabled=false;}
+});
 $('#multimodalPolicyForm').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;const values={...state.indexStatus.multimodal.policy};
  for(const name of ['mode','start_hour','end_hour','order','batch_size'])values[name]=['mode','order'].includes(name)?form.elements[name].value:Number(form.elements[name].value);

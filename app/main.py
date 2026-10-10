@@ -429,7 +429,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.6.1",
+    version="1.6.3",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -1600,6 +1600,19 @@ def retry_multimodal(principal:Auth):
     count=state.search.multimodal.retry()
     _audit(principal,'multimodal.retry','index','multimodal',{'files':count})
     return {'files':count}
+
+@app.post('/api/index/multimodal/{file_id}/retry')
+def retry_multimodal_file(file_id:int,principal:Auth):
+    _require_admin(principal)
+    file=_visible_file(file_id,principal)
+    if file['kind'] not in {'image','video','audio'}:
+        raise HTTPException(400,'仅支持图片、视频和音频素材')
+    if not state.search.multimodal.enabled:
+        raise HTTPException(409,'素材语义模型尚未启用')
+    with state.search.multimodal.maintenance_lock():
+        count=state.search.multimodal.retry([file_id])
+    _audit(principal,'multimodal.retry_file','file',str(file_id),{'files':count})
+    return {'files':count,'file_id':file_id}
 
 @app.post('/api/operations/caption-failures/retry',status_code=202)
 async def retry_caption_failures(principal:Auth):
@@ -3835,14 +3848,16 @@ def _moment_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/files/{file_id}/moments")
-def video_moments(file_id: int, principal: Auth, q: str = Query(default="", max_length=500)) -> dict[str, Any]:
+def video_moments(file_id: int, principal: Auth, q: str = Query(default="", max_length=500), refine: bool = False) -> dict[str, Any]:
     row = _moment_file(file_id, principal)
     try:
-        return state.video_moments.candidates(row, q.strip())
+        return state.video_moments.refine(row, q.strip()) if refine else state.video_moments.candidates(row, q.strip())
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(409, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(503, "候选画面暂时无法搜索，请稍后重试") from exc
+    except (TimeoutError, OSError) as exc:
+        raise HTTPException(503, "画面细查繁忙，请稍后重试", headers={'Retry-After':'5'}) from exc
 
 
 @app.get("/api/files/{file_id}/frame")

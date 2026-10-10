@@ -50,6 +50,49 @@ class VideoMomentTests(unittest.TestCase):
         service.media.query_embedding.assert_not_called()
         self.assertTrue(service.media._http.post.call_args.args[0].endswith('/points/scroll'))
 
+    def test_refinement_covers_missing_tail_and_reorders_actual_frames_without_index_writes(self):
+        service=self.service()
+        self.response(service,[self.hit(1.62),self.hit(2),self.hit(3),self.hit(4.862)])
+        service.media.query_embedding.return_value=[1.,0.]
+        service.media.interactive_request.side_effect=lambda: __import__('contextlib').nullcontext()
+        # Tail image has the highest query agreement; indexed candidates are retained.
+        service.frame=Mock(return_value=b'jpeg')
+        service.media.embed=Mock(side_effect=lambda content,timeout: [1.,0.] if service.media.embed.call_count==2 else [.1,.99])
+        result=service.refine(self.file,'人站在垃圾桶旁')
+        self.assertEqual(result['moments'][0]['time'],9.7)
+        self.assertIn(4.862,[r['time'] for r in result['moments']])
+        self.assertLessEqual(service.frame.call_count,8)
+        self.assertFalse(result['verified'])
+        self.assertTrue(result['refined'])
+        service.media._http.put.assert_not_called()
+        self.assertFalse(any('/delete' in c.args[0] for c in service.media._http.post.call_args_list))
+
+    def test_refinement_busy_and_empty_query_do_not_start_decode(self):
+        service=self.service()
+        with self.assertRaises(ValueError):service.refine(self.file,' ')
+        service._refiner.acquire()
+        try:
+            with self.assertRaises(TimeoutError):service.refine(self.file,'menu')
+        finally:service._refiner.release()
+
+    def test_refinement_discards_results_when_source_changes(self):
+        service=self.service()
+        service.candidates=Mock(return_value={'moments':[],'indexed':True})
+        service.frame=Mock(side_effect=ValueError('source changed'))
+        service.media.source_path.side_effect=[self.library/'test.mp4',ValueError('source changed')]
+        service.media.interactive_request.side_effect=lambda: __import__('contextlib').nullcontext()
+        with self.assertRaises(ValueError):service.refine(self.file,'tail')
+
+    def test_refinement_reports_missing_frames_without_claiming_verified_match(self):
+        service=self.service()
+        service.candidates=Mock(return_value={'moments':[],'indexed':False})
+        service.frame=Mock(side_effect=TimeoutError('read failed'))
+        service.media.interactive_request.side_effect=lambda: __import__('contextlib').nullcontext()
+        result=service.refine(self.file,'tail')
+        self.assertFalse(result['moments'])
+        self.assertGreater(result['unavailable_samples'],0)
+        self.assertFalse(result['verified'])
+
     def test_disabled_or_missing_collection_is_empty_without_creation(self):
         service = self.service()
         service.media.enabled = False

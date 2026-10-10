@@ -3,6 +3,27 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
+## [1.6.3] - 2026-10-11
+
+### Fixed
+- Distinguish processable work from terminal failures; a drained queue no longer advertises an ETA for files that require manual recovery.
+- Scope terminal-failure counts to visible libraries and current source revisions.
+- Add an authenticated administrator-only single-file media retry, preserving other failed files.
+- Audio segment end timestamps use the actual decoded PCM length rather than the requested window.
+
+## [1.6.2] - 2026-10-10
+
+### Improved
+- Optional file-scoped refinement reuses up to six indexed candidates and reads at most two additional actual boundary frames, ranks them by media similarity and exposes playback alternatives without changing either index.
+- Newly processed videos include bounded opening/closing samples. Existing indexed files remain valid; no automatic library rebuild.
+- Validate PCM samples before embedding; optional audio failure preserves successful visual points and records permission-scoped partial-coverage warnings.
+- Snapshot creation uses a bounded longer timeout; interrupted downloads are never published or used to expire verified backups.
+- Same-generation retries remove obsolete extra media points after successful publication.
+- Truncated images remain failed with actionable backup-recovery guidance; no missing bytes are fabricated.
+
+### Limits
+- Refinement is an optional sampled visual search, not verified counting, OCR or full-video action recognition. Independent audio quality and whole-library retrieval quality remain unverified.
+
 ## [1.6.1] - 2026-10-08
 
 ### Added

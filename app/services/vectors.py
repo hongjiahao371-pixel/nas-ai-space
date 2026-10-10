@@ -312,13 +312,16 @@ class VectorStore:
             if exists.status_code == 404:
                 raise RuntimeError("向量集合尚未建立")
             exists.raise_for_status()
-            response = client.post(f"{self.settings.qdrant_url}/collections/{collection}/snapshots", timeout=30)
+            # Snapshot creation can outlast normal query timeouts on a busy NAS.
+            response = client.post(f"{self.settings.qdrant_url}/collections/{collection}/snapshots", timeout=300)
             response.raise_for_status()
             result = response.json().get("result") or {}
             name = Path(str(result.get("name") or "")).name
             if not name:
                 raise RuntimeError("Qdrant 未返回快照名称")
             destination = directory / name
+            partial = destination.with_suffix(destination.suffix + '.part')
+            downloaded = False
             try:
                 with client.stream(
                     "GET",
@@ -326,13 +329,21 @@ class VectorStore:
                     timeout=600,
                 ) as download:
                     download.raise_for_status()
-                    with destination.open("wb") as handle:
+                    with partial.open("wb") as handle:
                         for chunk in download.iter_bytes():
                             handle.write(chunk)
-                destination.chmod(0o600)
+                if not partial.stat().st_size:
+                    raise RuntimeError('向量快照下载为空')
+                partial.chmod(0o600)
+                partial.replace(destination)
+                downloaded = True
+            except Exception:
+                partial.unlink(missing_ok=True)
+                raise
             finally:
+                # A failed download remains available on the server for recovery.
                 try:
-                    client.delete(
+                    if downloaded: client.delete(
                         f"{self.settings.qdrant_url}/collections/{collection}/snapshots/{name}",
                         timeout=30,
                     )
