@@ -42,7 +42,7 @@ finally:
 
 ## Jarvis 工具接入位置
 
-当前 Jarvis 的 `voice_tools.py` 用 `TOOLS` 发布工具，`execute()` 分派调用。本包提供四个工具：`ai_space_search`、`ai_space_ask`、`ai_space_see_image`、`ai_space_video_moments`。
+当前 Jarvis 的 `voice_tools.py` 用 `TOOLS` 发布工具，`execute()` 分派调用。本包提供四个工具：`self.jarvis.ai_space_search`、`self.jarvis.ai_space_ask`、`self.jarvis.ai_space_see_image`、`self.jarvis.ai_space_video_moments`。
 
 在 Jarvis 启动时创建一个 `AISpaceClient`，附加本包 `TOOLS` 到现有工具清单；在已有分派函数前面识别这四个完整工具名，再调用 `execute_ai_space(client, name, arguments)`，退出时关闭 client。捕获 `AISpaceError` 返回工具错误，不能把超时/鉴权失败变成“没找到”。原有灯具状态查询仍应走 Home Assistant 的实时查询。
 
