@@ -167,6 +167,22 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS video_moment_annotations (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+ query_key TEXT NOT NULL, query TEXT NOT NULL, time REAL NOT NULL, revision TEXT NOT NULL,
+ note TEXT NOT NULL DEFAULT '', created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+ created_at TEXT NOT NULL, UNIQUE(file_id, query_key, revision)
+);
+CREATE TABLE IF NOT EXISTS integration_keys (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+ token_prefix TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT, revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS integration_key_libraries (
+ key_id INTEGER NOT NULL REFERENCES integration_keys(id) ON DELETE CASCADE,
+ library_id INTEGER NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+ PRIMARY KEY(key_id, library_id)
+);
+
 CREATE TABLE IF NOT EXISTS user_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

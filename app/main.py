@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import secrets
+import unicodedata
 import shutil
 import threading
 import time
@@ -41,6 +42,7 @@ from app.services.recycle import RecycleBin
 from app.services.search import SearchService
 from app.services.multimodal import MultimodalService
 from app.services.video_moments import VideoMoments
+from app.services.integration_keys import create_key, public_keys, resolve_key, allowed_request
 from app.services.watcher import LibraryWatcher
 from app.services.tasks import TaskManager
 from app.services.vectors import VectorStore
@@ -65,6 +67,19 @@ class AskRequest(BaseModel):
     space_id: Optional[int] = None
     project_id: Optional[int] = None
     file_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+class MomentAnnotationCreate(BaseModel):
+    query: str = Field(min_length=2, max_length=500)
+    time: float = Field(ge=0)
+    revision: str = Field(min_length=1, max_length=80)
+    note: str = Field(default='', max_length=300)
+
+
+class IntegrationKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    library_ids: list[int] = Field(min_length=1, max_length=100)
+    expires_days: Optional[int] = Field(default=None, ge=1, le=365)
 
 
 class LoginRequest(BaseModel):
@@ -429,7 +444,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.6.3",
+    version="1.6.4",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -463,7 +478,7 @@ async def production_headers(request: Request, call_next: Any) -> Any:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; "
-        "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; "
         "frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
     )
     if request.url.path.startswith("/api/") and not request.url.path.startswith(("/api/media/", "/api/files/")):
@@ -491,6 +506,13 @@ def require_auth(
             "library_ids": None,
             "auth_type": "api_token",
         }
+    if candidate.startswith('ais_read_'):
+        principal = resolve_key(state.database, candidate)
+        if not principal:
+            raise HTTPException(401, '集成密钥已失效')
+        if not allowed_request(request.method, request.url.path.rstrip('/')):
+            raise HTTPException(403, '此集成密钥只允许检索、问答和素材预览')
+        return principal
     if candidate:
         user = state.database.resolve_session(token_digest(candidate))
         if user:
@@ -520,10 +542,41 @@ Auth = Annotated[dict[str, Any], Depends(require_auth)]
 _integration_vision_slot = threading.BoundedSemaphore(1)
 
 
+@app.get('/api/integrations/keys')
+def integration_key_list(principal: Auth) -> list[dict[str, Any]]:
+    _require_admin(principal)
+    return public_keys(state.database)
+
+
+@app.post('/api/integrations/keys', status_code=201)
+def integration_key_create(payload: IntegrationKeyCreate, principal: Auth) -> dict[str, Any]:
+    _require_admin(principal)
+    try:
+        result = create_key(state.database, payload.name, payload.library_ids, payload.expires_days)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _audit(principal, 'integration.key.create', 'integration_key', str(result['id']),
+           {'name': result['name'], 'library_ids': result['library_ids'], 'expires_at': result['expires_at']})
+    return result
+
+
+@app.delete('/api/integrations/keys/{key_id}')
+def integration_key_revoke(key_id: int, principal: Auth) -> dict[str, bool]:
+    _require_admin(principal)
+    if not state.database.fetchone('SELECT id FROM integration_keys WHERE id=?', (key_id,)):
+        raise HTTPException(404, '集成密钥不存在')
+    state.database.execute("UPDATE integration_keys SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+                           (datetime.now(timezone.utc).isoformat(timespec='seconds'), key_id))
+    _audit(principal, 'integration.key.revoke', 'integration_key', str(key_id))
+    return {'revoked': True}
+
+
 @app.get("/api/integrations/capabilities")
 def integration_capabilities(principal: Auth) -> dict[str, Any]:
     return {
         "version": app.version,
+        "credential": {"kind": principal['auth_type'], "readonly": principal['auth_type'] == 'integration_key',
+                       "library_ids": _library_ids(principal)},
         "search": {"endpoint": "/api/search", "method": "GET"},
         "file": {"endpoint": "/api/files/{file_id}", "method": "GET"},
         "ask": {"endpoint": "/api/ask", "method": "POST", "citations": True},
@@ -3851,13 +3904,72 @@ def _moment_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
 def video_moments(file_id: int, principal: Auth, q: str = Query(default="", max_length=500), refine: bool = False) -> dict[str, Any]:
     row = _moment_file(file_id, principal)
     try:
-        return state.video_moments.refine(row, q.strip()) if refine else state.video_moments.candidates(row, q.strip())
+        result = state.video_moments.refine(row, q.strip()) if refine else state.video_moments.candidates(row, q.strip())
+        result = dict(result)
+        if q.strip():
+            annotation = state.database.fetchone(
+                'SELECT id,time,note,created_by FROM video_moment_annotations WHERE file_id=? AND query_key=? AND revision=?',
+                (file_id, _moment_query_key(q), result.get('revision', '')))
+            if annotation:
+                result['unassisted_first_time'] = result['moments'][0]['time'] if result['moments'] else None
+                result['moments'] = [{'time': annotation['time'], 'source_label':'人工确认画面',
+                    'annotation_id': annotation['id'], 'note': annotation['note'], 'human_confirmed':True,
+                    'can_unconfirm': _is_admin(principal) or (principal.get('user_id') is not None and annotation['created_by'] == principal.get('user_id'))}] + [
+                    item for item in result['moments'] if abs(item['time']-annotation['time']) > .001]
+                result['manual_confirmation'] = True
+        return result
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(409, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(503, "候选画面暂时无法搜索，请稍后重试") from exc
     except (TimeoutError, OSError) as exc:
         raise HTTPException(503, "画面细查繁忙，请稍后重试", headers={'Retry-After':'5'}) from exc
+
+
+def _moment_query_key(query: str) -> str:
+    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', query).casefold())
+
+
+@app.post('/api/files/{file_id}/moments/annotations', status_code=201)
+def confirm_video_moment(file_id: int, payload: MomentAnnotationCreate, principal: Auth) -> dict[str, Any]:
+    row = _moment_file(file_id, principal)
+    query = payload.query.strip()
+    if len(query) < 2:
+        raise HTTPException(400, '请输入至少两个有效字符的画面描述')
+    revision = f"{row['mtime_ns']}:{row['size']}"
+    if payload.revision != revision:
+        raise HTTPException(409, '素材版本已变化，请重新观看后确认')
+    try:
+        stamp = state.video_moments.valid_time(row, payload.time)
+        state.video_moments.frame(row, stamp)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (TimeoutError, OSError) as exc:
+        raise HTTPException(503, '画面暂时无法核对，请稍后重试') from exc
+    previous = state.database.fetchone('SELECT created_by FROM video_moment_annotations WHERE file_id=? AND query_key=? AND revision=?', (file_id, _moment_query_key(query), revision))
+    if previous and not _is_admin(principal) and previous['created_by'] != principal.get('user_id'):
+        raise HTTPException(403, '只能修改自己的画面确认记录')
+    state.database.execute(
+        """INSERT INTO video_moment_annotations(file_id,query_key,query,time,revision,note,created_by,created_at)
+           VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(file_id,query_key,revision) DO UPDATE SET
+           time=excluded.time,note=excluded.note,created_by=excluded.created_by,created_at=excluded.created_at""",
+        (file_id, _moment_query_key(query), query, stamp, revision, payload.note.strip(), principal.get('user_id'),
+         datetime.now(timezone.utc).isoformat(timespec='seconds')))
+    _audit(principal, 'video.moment.confirm', 'file', str(file_id), {'time':stamp, 'revision':revision})
+    return {'time':stamp, 'revision':revision, 'human_confirmed':True}
+
+
+@app.delete('/api/files/{file_id}/moments/annotations/{annotation_id}')
+def delete_video_moment_annotation(file_id: int, annotation_id: int, principal: Auth) -> dict[str, bool]:
+    _moment_file(file_id, principal)
+    annotation = state.database.fetchone('SELECT * FROM video_moment_annotations WHERE id=? AND file_id=?', (annotation_id, file_id))
+    if not annotation:
+        raise HTTPException(404, '画面确认记录不存在')
+    if not _is_admin(principal) and annotation['created_by'] != principal.get('user_id'):
+        raise HTTPException(403, '只能撤销自己的画面确认记录')
+    state.database.execute('DELETE FROM video_moment_annotations WHERE id=?', (annotation_id,))
+    _audit(principal, 'video.moment.unconfirm', 'file', str(file_id))
+    return {'deleted':True}
 
 
 @app.get("/api/files/{file_id}/frame")
@@ -4314,6 +4426,9 @@ def _focus_answer_evidence(source: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/ask")
 def ask(payload: AskRequest, principal: Auth) -> dict[str, Any]:
+    if principal.get('auth_type') == 'integration_key' and any(
+        value is not None for value in (payload.conversation_id, payload.project_id, payload.space_id)):
+        raise HTTPException(403, '集成密钥仅允许授权媒体库或文件范围的问答')
     question = payload.question.strip()
     if payload.space_id is not None and payload.project_id is not None:
         raise HTTPException(status_code=400, detail="知识空间和项目范围不能同时指定")

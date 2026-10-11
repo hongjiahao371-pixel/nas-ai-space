@@ -1,5 +1,6 @@
 // GLB / glTF 预览：基于 vendor 目录下的 three.js（r180），完全本地渲染，不依赖任何外部资源
 import * as THREE from './vendor/three/three.module.js';
+import { DRACOLoader } from './vendor/three/DRACOLoader.js';
 import { GLTFLoader } from './vendor/three/GLTFLoader.js';
 import { RoomEnvironment } from './vendor/three/RoomEnvironment.js';
 
@@ -13,13 +14,17 @@ export async function mountGltfViewer(canvas, url, fileName) {
   }
   const payload = /\.gltf$/i.test(fileName) ? await response.text() : await response.arrayBuffer();
   const loader = new GLTFLoader();
+  const draco = new DRACOLoader().setDecoderPath('/assets/vendor/three/draco/').setDecoderConfig({type:'wasm'}).setWorkerLimit(1);
+  loader.setDRACOLoader(draco);
   let gltf;
   try {
     // resourcePath 置空：.gltf 若引用外部 .bin/贴图会在解析阶段报错，仅支持自包含 glTF
     gltf = await new Promise((resolve, reject) => loader.parse(payload, '', resolve, reject));
   } catch (error) {
+    draco.dispose();
     throw new Error(`glTF 解析失败：${error?.message || error}（含外部 .bin/贴图的 .gltf 请先转为 GLB）`);
   }
+  draco.dispose();
   const model = gltf.scene || gltf.scenes?.[0];
   if (!model) throw new Error('模型中没有可显示的场景');
 

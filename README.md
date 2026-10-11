@@ -2,7 +2,7 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
-v1.6.3 将待处理、停止重试和部分覆盖分开显示，支持管理员单个素材重试，并按实际解码长度记录音轨时间。收尾验收与功能边界见 [验收记录](docs/ACCEPTANCE-v1.6.3.md)。
+v1.6.4 新增可按媒体库授权、到期和撤销的应用只读密钥，适用于 Jarvis 等服务端调用。此前 v1.6.3 将待处理、停止重试和部分覆盖分开显示，支持管理员单个素材重试，并按实际解码长度记录音轨时间。收尾验收与功能边界见 [验收记录](docs/ACCEPTANCE-v1.6.3.md)。
 
 v1.6.2 新增按需细查视频首尾和候选画面；新处理的视频补采首尾，音轨失败时保留已成功的画面并明确标注部分覆盖。现有索引无需全量重建。视频候选画面核对：在单条视频内搜索抽样画面、预览实际帧并点击跳转。它辅助人工核对，不保证按钮数量、文字或动作先后自动识别正确。普通全库搜索无需额外视觉推理。
 
@@ -44,7 +44,7 @@ scripts/nas-ai start
 `SHA256SUMS`，校验后解压：
 
 ```bash
-VERSION=v1.6.3
+VERSION=v1.6.4
 curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/nas-ai-space-${VERSION}.tar.gz"
 curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/SHA256SUMS"
 sha256sum -c SHA256SUMS
