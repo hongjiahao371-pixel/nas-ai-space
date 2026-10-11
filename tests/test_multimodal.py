@@ -89,6 +89,32 @@ class MultimodalTests(unittest.TestCase):
         self.assertFalse(search.search("红色雨伞", kind="video") ["results"])
         self.assertFalse(search.search("红色雨伞", filter_sql=("f.id = ?", [-1])) ["results"])
 
+    def test_media_first_skips_qwen_for_valid_media_hits(self):
+        search=self.search([self.hit()])
+        search.ai.settings=replace(self.cfg,embedding_base_url='http://qwen',embedding_model='qwen')
+        search.ai.embeddings=Mock(side_effect=AssertionError('Qwen must not delay valid media'))
+        result=search.search('红色雨伞',kind='image',library_ids=[self.library['id']],media_first=True)
+        self.assertEqual(result['retrieval_strategy'],'media_first')
+        self.assertEqual([r['id'] for r in result['results']],[self.file['id']])
+        search.ai.embeddings.assert_not_called()
+
+    def test_media_first_falls_back_to_qwen_on_empty_or_stale_media(self):
+        for hits in [[],[self.hit(mtime_ns=1)]]:
+            search=self.search(hits)
+            search.ai.settings=replace(self.cfg,embedding_base_url='http://qwen',embedding_model='qwen')
+            search.ai.embeddings=Mock(return_value=[[0.1]])
+            result=search.search('红色雨伞',kind='image',media_first=True)
+            self.assertEqual(result['retrieval_strategy'],'hybrid_fallback')
+            search.ai.embeddings.assert_called_once()
+
+    def test_media_first_respects_scope_and_disabled_semantic(self):
+        search=self.search([self.hit()]);search.ai.embeddings=Mock()
+        self.assertFalse(search.search('红色雨伞',kind='image',library_ids=[],media_first=True)['results'])
+        search.multimodal.calls.clear()
+        search.search('红色雨伞',kind='image',semantic=False,media_first=True)
+        self.assertFalse(search.multimodal.calls)
+        search.ai.embeddings.assert_not_called()
+
     def test_stale_media_vectors_are_rejected(self):
         self.assertFalse(self.search([self.hit(mtime_ns=1)]).search("红色雨伞")["results"])
         self.assertFalse(self.search([self.hit(size=1)]).search("红色雨伞")["results"])

@@ -444,7 +444,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.6.4",
+    version="1.6.5",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -577,7 +577,7 @@ def integration_capabilities(principal: Auth) -> dict[str, Any]:
         "version": app.version,
         "credential": {"kind": principal['auth_type'], "readonly": principal['auth_type'] == 'integration_key',
                        "library_ids": _library_ids(principal)},
-        "search": {"endpoint": "/api/search", "method": "GET"},
+        "search": {"endpoint": "/api/search", "method": "GET", "media_first": True},
         "file": {"endpoint": "/api/files/{file_id}", "method": "GET"},
         "ask": {"endpoint": "/api/ask", "method": "POST", "citations": True},
         "vision": {"endpoint": "/api/integrations/vision", "method": "POST", "enabled": bool(settings.vision_model), "max_bytes": 8 * 1024 * 1024},
@@ -4205,6 +4205,7 @@ def _search_filter_sql(
     event_id: int | None = None,
     favorite: bool = False,
     tag: str = "",
+    library_scope_downstream: bool = False,
 ) -> tuple[str, list[Any]] | None:
     # 过滤条件以 SQL 片段（作用于 files 别名 f）返回，由搜索侧下推为 JOIN/子查询，
     # 不再物化全量 id 拼巨型 IN 列表。
@@ -4218,8 +4219,9 @@ def _search_filter_sql(
     elif allowed is not None:
         if not allowed:
             return ("1 = 0", [])
-        clauses.append(f"f.library_id IN ({','.join('?' for _ in allowed)})")
-        params.extend(allowed)
+        if not library_scope_downstream:
+            clauses.append(f"f.library_id IN ({','.join('?' for _ in allowed)})")
+            params.extend(allowed)
     time_value = "COALESCE(NULLIF(f.captured_at, ''), datetime(f.mtime_ns / 1000000000.0, 'unixepoch'))"
     if date_from:
         clauses.append(f"{time_value} >= ?")
@@ -4320,6 +4322,7 @@ def search(
     offset: int = Query(default=0, ge=0, le=1000),
     precise: bool = True,
     semantic: bool = True,
+    media_first: bool = False,
     library_id: Optional[int] = None,
     date_from: str = "",
     date_to: str = "",
@@ -4335,10 +4338,11 @@ def search(
         inferred_from, inferred_to, effective_query = _natural_date_filter(effective_query)
         date_from, date_to = inferred_from, inferred_to
     filter_sql = _search_filter_sql(
-        principal, library_id, date_from, date_to, person_id, place_id, event_id, favorite, tag
+        principal, library_id, date_from, date_to, person_id, place_id, event_id, favorite, tag,
+        library_scope_downstream=True,
     )
     result = state.search.search(
-        effective_query, kind, limit, _library_ids(principal), precise, None, offset, semantic, filter_sql=filter_sql
+        effective_query, kind, limit, _library_ids(principal), precise, None, offset, semantic, filter_sql=filter_sql, media_first=media_first
     )
     if inferred_from:
         result["applied_filters"] = {"date_from": inferred_from, "date_to": inferred_to}

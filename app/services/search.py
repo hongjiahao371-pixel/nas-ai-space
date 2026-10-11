@@ -344,6 +344,7 @@ class SearchService:
         offset: int = 0,
         semantic: bool = True,
         filter_sql: tuple[str, list[Any]] | None = None,
+        media_first: bool = False,
     ) -> dict[str, Any]:
         page_size = max(1, limit)
         offset = max(0, offset)
@@ -397,64 +398,71 @@ class SearchService:
         multimodal_scores: dict[int, float] = {}
         multimodal_used = False
         semantic_requested = bool(semantic)
-        if semantic and self.ai.settings.embedding_base_url and self.ai.settings.embedding_model:
-            try:
-                embedding_query = self.ai.embedding_query(query) if hasattr(self.ai, "embedding_query") else query
-                embedding = self.ai.embeddings([embedding_query], interactive=True)[0]
-                # 过滤条件下推：SQL 过滤（filter_sql）只在这里物化一次 id 列表供向量过滤用，
-                # 不再拼进词法查询的 IN；超过 Qdrant 单批上限时按 2000 分批原生 filter，
-                # 避免旧逻辑超过 2000 个 id 就静默放弃过滤导致的召回丢失。
-                vector_id_filter: list[int] | None = None
-                if file_ids is not None:
-                    vector_id_filter = sorted({int(file_id) for file_id in file_ids})
-                elif filter_sql is not None:
-                    clause, clause_params = filter_sql
-                    id_rows = self.database.fetchall(f"SELECT f.id FROM files f WHERE {clause}", clause_params)
-                    allowed_file_ids = {int(row["id"]) for row in id_rows}
-                    vector_id_filter = sorted(allowed_file_ids)
-                hits: list[dict[str, Any]] = []
-                if vector_id_filter is not None:
-                    for start in range(0, len(vector_id_filter), 2000):
-                        chunk = vector_id_filter[start:start + 2000]
-                        if chunk:
-                            hits.extend(self.vectors.search(embedding, candidate_limit, kind, library_ids, chunk))
-                else:
-                    hits = self.vectors.search(embedding, candidate_limit, kind, library_ids, None)
-                best_hits: dict[int, dict[str, Any]] = {}
-                for hit in hits:
-                    payload = hit.get("payload", {})
-                    file_id = int(payload["file_id"])
-                    if allowed_file_ids is not None and file_id not in allowed_file_ids:
-                        continue
-                    if file_id not in best_hits or float(hit.get("score") or 0) > float(best_hits[file_id].get("score") or 0):
-                        best_hits[file_id] = hit
-                semantic = sorted(best_hits.values(), key=lambda hit: float(hit.get("score") or 0), reverse=True)
-                semantic_used = True
-                # 语义候选未命中词法结果时一次批量取回，替代逐条 get_file 的 N+1
-                prefetched = self._files_by_ids(
-                    [int(hit.get("payload", {})["file_id"]) for hit in semantic]
-                )
-                for position, hit in enumerate(semantic):
-                    payload = hit.get("payload", {})
-                    file_id = int(payload["file_id"])
-                    if file_id not in rows:
-                        row = prefetched.get(file_id)
-                        if not row:
+        def add_qwen_candidates():
+            nonlocal allowed_file_ids, semantic_used
+            if semantic_requested and self.ai.settings.embedding_base_url and self.ai.settings.embedding_model:
+                try:
+                    embedding_query = self.ai.embedding_query(query) if hasattr(self.ai, "embedding_query") else query
+                    embedding = self.ai.embeddings([embedding_query], interactive=True)[0]
+                    # 过滤条件下推：SQL 过滤（filter_sql）只在这里物化一次 id 列表供向量过滤用，
+                    # 不再拼进词法查询的 IN；超过 Qdrant 单批上限时按 2000 分批原生 filter，
+                    # 避免旧逻辑超过 2000 个 id 就静默放弃过滤导致的召回丢失。
+                    vector_id_filter: list[int] | None = None
+                    if file_ids is not None:
+                        vector_id_filter = sorted({int(file_id) for file_id in file_ids})
+                    elif filter_sql is not None:
+                        clause, clause_params = filter_sql
+                        id_rows = self.database.fetchall(f"SELECT f.id FROM files f WHERE {clause}", clause_params)
+                        allowed_file_ids = {int(row["id"]) for row in id_rows}
+                        vector_id_filter = sorted(allowed_file_ids)
+                    hits: list[dict[str, Any]] = []
+                    if vector_id_filter is not None:
+                        for start in range(0, len(vector_id_filter), 2000):
+                            chunk = vector_id_filter[start:start + 2000]
+                            if chunk:
+                                hits.extend(self.vectors.search(embedding, candidate_limit, kind, library_ids, chunk))
+                    else:
+                        hits = self.vectors.search(embedding, candidate_limit, kind, library_ids, None)
+                    best_hits: dict[int, dict[str, Any]] = {}
+                    for hit in hits:
+                        payload = hit.get("payload", {})
+                        file_id = int(payload["file_id"])
+                        if allowed_file_ids is not None and file_id not in allowed_file_ids:
                             continue
-                        if library_ids is not None and int(row["library_id"]) not in library_ids:
-                            continue
-                        rows[file_id] = row
-                    similarity = max(0.0, min(1.0, float(hit.get("score") or 0)))
-                    semantic_scores[file_id] = similarity
-                    scores[file_id] = scores.get(file_id, 0.0) + 1.15 / (24 + position) + similarity * 0.18
-                    sources.setdefault(file_id, set()).add("语义")
-                    snippets[file_id] = payload.get("content", "")[:500]
-                    if payload.get("source_label"):
-                        sources.setdefault(file_id, set()).add(str(payload["source_label"]))
-                    if payload.get("start_time") is not None and file_id not in match_times:
-                        match_times[file_id] = float(payload["start_time"])
-            except Exception:
-                semantic_used = False
+                        if file_id not in best_hits or float(hit.get("score") or 0) > float(best_hits[file_id].get("score") or 0):
+                            best_hits[file_id] = hit
+                    semantic = sorted(best_hits.values(), key=lambda hit: float(hit.get("score") or 0), reverse=True)
+                    semantic_used = True
+                    # 语义候选未命中词法结果时一次批量取回，替代逐条 get_file 的 N+1
+                    prefetched = self._files_by_ids(
+                        [int(hit.get("payload", {})["file_id"]) for hit in semantic]
+                    )
+                    for position, hit in enumerate(semantic):
+                        payload = hit.get("payload", {})
+                        file_id = int(payload["file_id"])
+                        if file_id not in rows:
+                            row = prefetched.get(file_id)
+                            if not row:
+                                continue
+                            if library_ids is not None and int(row["library_id"]) not in library_ids:
+                                continue
+                            rows[file_id] = row
+                        similarity = max(0.0, min(1.0, float(hit.get("score") or 0)))
+                        semantic_scores[file_id] = similarity
+                        scores[file_id] = scores.get(file_id, 0.0) + 1.15 / (24 + position) + similarity * 0.18
+                        sources.setdefault(file_id, set()).add("语义")
+                        snippets[file_id] = payload.get("content", "")[:500]
+                        if payload.get("source_label"):
+                            sources.setdefault(file_id, set()).add(str(payload["source_label"]))
+                        if payload.get("start_time") is not None and file_id not in match_times:
+                            match_times[file_id] = float(payload["start_time"])
+                except Exception:
+                    semantic_used = False
+
+        prefer_media = bool(media_first and semantic_requested and kind in {'image','video','audio'}
+                            and self.multimodal and self.multimodal.enabled)
+        if not prefer_media:
+            add_qwen_candidates()
 
         if semantic_requested and self.multimodal and self.multimodal.enabled:
             try:
@@ -503,6 +511,9 @@ class SearchService:
             except Exception:
                 # A unavailable new service must not take down the established text search.
                 logger.warning("素材语义检索暂不可用", exc_info=True)
+
+        if prefer_media and not multimodal_used:
+            add_qwen_candidates() # Empty, stale or failed media results retain Qwen fallback.
 
         profiles: dict[int, dict[str, Any]] = {}
         feedback_rows = self.database.fetchall(
@@ -673,6 +684,7 @@ class SearchService:
             "query": query,
             "semantic": semantic_used,
             "multimodal": multimodal_used,
+            "retrieval_strategy": "media_first" if prefer_media and multimodal_used else "hybrid_fallback" if prefer_media else "hybrid",
             "multimodal_available": bool(self.multimodal and self.multimodal.enabled),
             "precise": precise_used,
             "terms": [group[0] for group in groups],
