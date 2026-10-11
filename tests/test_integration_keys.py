@@ -60,6 +60,18 @@ class IntegrationKeyTests(unittest.TestCase):
         self.main.state.database.execute('UPDATE libraries SET enabled=0 WHERE id=?',(self.lib['id'],))
         self.assertEqual(self.client.get('/api/files/'+str(self.files[0]['id']),headers=headers).status_code,404)
 
+    def test_search_uses_native_scope_without_expanding_all_library_files(self):
+        _,headers=self.key()
+        with patch.object(self.main.state.search,'search',return_value={'results':[]}) as search:
+            response=self.client.get('/api/search',headers=headers,params={'q':'红色雨伞','kind':'image','media_first':'true','precise':'false'})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(search.call_args.args[3],[self.lib['id']])
+            self.assertIsNone(search.call_args.kwargs['filter_sql'])
+            self.assertTrue(search.call_args.kwargs['media_first'])
+            response=self.client.get('/api/search',headers=headers,params={'q':'红色雨伞','date_from':'2026-01-01'})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertIn('>= ?',search.call_args.kwargs['filter_sql'][0])
+
     def test_expiry_revocation_and_member_cannot_create_keys(self):
         data, headers=self.key()
         self.main.state.database.execute("UPDATE integration_keys SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",(data['id'],))

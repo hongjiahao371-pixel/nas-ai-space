@@ -77,10 +77,10 @@ class AISpaceClient:
         query = _query(query)
         if kind not in {"", "image", "video", "audio", "document"} or type(limit) is not int or not 1 <= limit <= 10:
             raise ValueError("素材类型或数量无效")
-        data = await self._json("GET", "/api/search", params={"q": query, "kind": kind, "limit": limit, "precise": "false", "semantic": "true"}, timeout=45)
+        data = await self._json("GET", "/api/search", params={"q": query, "kind": kind, "limit": limit, "precise": "false", "semantic": "true", "media_first": "true" if kind in {"image", "video", "audio"} else "false"}, timeout=45)
         rows = [_source(row) for row in data.get("results", [])[:limit]]
         return {"query": query, "results": rows, "returned": len(rows),
-                "applied_filters": data.get("applied_filters", {}),
+                "applied_filters": data.get("applied_filters", {}), "retrieval_strategy": data.get("retrieval_strategy", "hybrid"),
                 "notice": "检索候选不是已核实事实；视频时间点来自采样；未找到不代表素材不存在。"}
 
     async def ask(self, question, file_ids=None, kind=""):
