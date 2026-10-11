@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg poppler-utils libgl1 libglib2.0-0 pciutils fonts-wqy-zenhei \
+    && apt-get install -y --no-install-recommends ghostscript ffmpeg poppler-utils libgl1 libglib2.0-0 pciutils fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

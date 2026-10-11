@@ -228,6 +228,7 @@ function openModal(modal) {
 
 function closeModal(modal) {
   if (!modal?.classList.contains('open')) return;
+  if (modal.id === 'integrationKeyModal') $('#integrationKeyValue').value = '';
   // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
   if (modal.id === 'fileModal') {
     fileViewerRequest += 1;
@@ -1774,6 +1775,7 @@ async function loadUsers() {
     const [users, libraries] = await Promise.all([api('/api/users'), api('/api/libraries')]);
     state.users = users;
     state.libraries = libraries;
+    await loadIntegrationKeys();
     $('#userList').innerHTML = users.length ? users.map(userCard).join('') : '<div class="empty-state"><b>还没有独立账号</b></div>';
   } catch (error) {
     toast(error.message, true);
@@ -1951,6 +1953,7 @@ function closeFileViewer() {
 
 let fileViewerRequest = 0;
 let videoMomentRequest = 0;
+let currentMomentRevision = '';
 
 async function loadMomentFrames(root, current) {
   // Original video decoding is more expensive than existing thumbnail reads.
@@ -1987,8 +1990,9 @@ async function loadVideoMoments(fileId, query = '', refine = false) {
   try {
     const data = await api(`/api/files/${fileId}/moments?q=${encodeURIComponent(query)}&refine=${refine}`);
     if (!current()) return;
+    currentMomentRevision = data.revision || '';
     root.innerHTML = data.moments.length
-      ? `${data.refined ? `<p class="muted">已补查 ${data.sample_count} 个首尾画面，共 ${data.candidate_count} 个候选${data.unavailable_samples ? `，${data.unavailable_samples} 个位置未能读取` : ''}；请播放核对具体细节。</p>` : ''}<div class="moment-grid">${data.moments.map(item => `<button type="button" data-seek="${item.time}" title="跳到 ${item.time.toFixed(2)} 秒"><img data-moment-frame="/api/files/${fileId}/frame?time=${item.time}&revision=${encodeURIComponent(data.revision || '')}" alt="${item.time.toFixed(2)} 秒的实际画面"><span>${item.time.toFixed(2)} 秒</span></button>`).join('')}</div>`
+      ? `${data.manual_confirmation ? `<p class="muted">首位为已观看的人工确认画面；模型原始首位 ${data.unassisted_first_time == null ? '没有可用候选' : Number(data.unassisted_first_time).toFixed(2) + ' 秒'}。${data.moments[0].can_unconfirm ? `<button class="secondary" data-unconfirm-moment="${data.moments[0].annotation_id}">撤销确认</button>` : ''}</p>` : ''}${data.refined ? `<p class="muted">已补查 ${data.sample_count} 个首尾画面，共 ${data.candidate_count} 个候选${data.unavailable_samples ? `，${data.unavailable_samples} 个位置未能读取` : ''}；请播放核对具体细节。</p>` : ''}<div class="moment-grid">${data.moments.map(item => `<button type="button" data-seek="${item.time}" title="跳到 ${item.time.toFixed(2)} 秒"><img data-moment-frame="/api/files/${fileId}/frame?time=${item.time}&revision=${encodeURIComponent(data.revision || '')}" alt="${item.time.toFixed(2)} 秒的实际画面"><span>${item.time.toFixed(2)} 秒${item.human_confirmed ? ' · 人工确认' : ''}</span></button>`).join('')}</div>`
       : '<p class="muted">这段视频暂时没有可用的画面索引，可直接播放原视频核对。</p>';
     loadMomentFrames(root, current);
   } catch (error) {
@@ -2009,7 +2013,25 @@ $('#refineVideoMoment').addEventListener('click', () => {
   if (state.currentFile?.kind === 'video') loadVideoMoments(state.currentFile.id, query, true);
 });
 
+$('#confirmVideoMoment').addEventListener('click', async () => {
+  const file = state.currentFile, query = $('#videoMomentQuery').value.trim();
+  const raw = $('#confirmedMomentTime').value;
+  if (!file || file.kind !== 'video' || !query || raw === '' || !currentMomentRevision) return toast('请填写画面描述和已核对的时间点', true);
+  if (!await confirmDialog({title:'确认已观看此画面', body:'只保存你已实际观看核对的时间点。同一描述下会优先显示它，并明确标记为人工确认。', confirmText:'保存确认'})) return;
+  const button = $('#confirmVideoMoment'); button.disabled = true;
+  try { await api(`/api/files/${file.id}/moments/annotations`, {method:'POST',body:JSON.stringify({query,time:Number(raw),revision:currentMomentRevision})}); await loadVideoMoments(file.id,query); }
+  catch (error) { toast(error.message,true); }
+  finally { button.disabled = false; }
+});
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-unconfirm-moment]');
+  if (!button || !state.currentFile) return;
+  try { await api(`/api/files/${state.currentFile.id}/moments/annotations/${button.dataset.unconfirmMoment}`,{method:'DELETE'}); await loadVideoMoments(state.currentFile.id,$('#videoMomentQuery').value.trim()); }
+  catch (error) { toast(error.message,true); }
+});
+
 async function openFileViewer(fileId, matchTime = null) {
+  currentMomentRevision = ''; $('#confirmedMomentTime').value = '';
   const request = ++fileViewerRequest;
   videoMomentRequest += 1;
   const modal = $('#fileModal');
@@ -2530,7 +2552,7 @@ async function loadReviewVersion(versionId, seekTime = null) {
       const help = isGltf ? '拖动旋转 · 右键平移 · 滚轮缩放 · 本地 WebGL 渲染' : '拖动旋转 · 滚轮缩放 · 本地 WebGL 渲染';
       $('#reviewCanvas').insertAdjacentHTML('afterbegin', `<canvas class="model-review-canvas" aria-label="3D 模型预览"></canvas><span class="model-review-help">${help}</span>`);
       const mountViewer = isGltf
-        ? (await import('/assets/gltf-viewer.js?v=1')).mountGltfViewer
+        ? (await import('/assets/gltf-viewer.js?v=2')).mountGltfViewer
         : (await import('/assets/model-viewer.js?v=2')).mountModelViewer;
       const modelCanvas = $('.model-review-canvas', $('#reviewCanvas'));
       const disposeViewer = await mountViewer(modelCanvas, ticket.url, version.file_name);
@@ -4990,3 +5012,36 @@ async function loadRecovery(){
  if(!isAdmin())return;
  try{const data=await api('/api/operations/recovery');$('#externalNotifyStatus').textContent=data.notifications.configured?'外部通知已启用':'外部通知未配置';$('#recoveryList').innerHTML=data.items.length?data.items.map(item=>`<div class="snapshot-row"><span>${icon('backup')}</span><div><b>${esc(item.name)}</b><small>${fmtBytes(item.bytes)} · ${fmtTime(item.created_at)} · ${item.verified?'已校验':'需要校验'}</small></div><button class="secondary" data-recovery-verify="${esc(item.name)}">校验</button><button class="secondary" data-recovery-download="${esc(item.name)}">下载</button></div>`).join(''):'<div class="empty-state compact"><b>尚无完整恢复包</b><p>点击立即备份，或等待自动备份。</p></div>';}catch(error){toast(error.message,true)}
 }
+
+
+async function loadIntegrationKeys() {
+  const keys = await api('/api/integrations/keys');
+  $('#integrationKeyLibraries').innerHTML = state.libraries.filter(x => x.enabled).map(x => `<label><input type="checkbox" name="library_ids" value="${x.id}"><span>${esc(x.name)}</span></label>`).join('');
+  $('#integrationKeyList').innerHTML = keys.map(x => `<article class="user-card integration-key-card"><div class="user-card-main"><h3>${esc(x.name)}</h3><p>${esc(x.token_prefix)} · ${x.active ? '生效中' : '已失效'}</p><small>${esc(x.library_ids.map(id => state.libraries.find(l => l.id === id)?.name || '已删除').join('、'))} · ${x.expires_at ? esc(fmtTime(x.expires_at)) + '到期' : '直到撤销'}</small></div>${x.active ? `<button class="danger" data-revoke-integration="${x.id}">撤销</button>` : ''}</article>`).join('') || '<p class="hint">尚未创建集成密钥</p>';
+}
+$('#integrationKeyForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector('button');
+  const ids = Array.from(form.querySelectorAll('[name="library_ids"]:checked'), x => Number(x.value));
+  if (!ids.length) return toast('至少选择一个媒体库', true);
+  button.disabled = true;
+  try {
+    const result = await api('/api/integrations/keys', {method:'POST', body:JSON.stringify({name:form.elements.name.value, library_ids:ids, expires_days:form.elements.expires_days.value ? Number(form.elements.expires_days.value) : null})});
+    $('#integrationKeyValue').value = result.token;
+    openModal($('#integrationKeyModal'));
+    await loadIntegrationKeys();
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; }
+});
+document.addEventListener('click', async event => {
+  const revoke = event.target.closest('[data-revoke-integration]');
+  if (revoke) {
+    if (!await confirmDialog({title:'撤销集成密钥', body:'该应用将无法继续访问素材。', danger:true, confirmText:'撤销'})) return;
+    try { await api('/api/integrations/keys/' + revoke.dataset.revokeIntegration, {method:'DELETE'}); await loadIntegrationKeys(); toast('密钥已撤销'); }
+    catch (error) { toast(error.message, true); }
+  }
+  if (event.target.closest('#copyIntegrationKey')) {
+    try { await navigator.clipboard.writeText($('#integrationKeyValue').value); toast('已复制'); }
+    catch { $('#integrationKeyValue').select(); toast('请手动复制选中的密钥'); }
+  }
+});

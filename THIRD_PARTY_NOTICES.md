@@ -32,3 +32,7 @@ license files when redistributing a combined image or appliance.
 ## Native export runtime dependencies
 
 Native exports install python-docx 1.2.0 (MIT), python-pptx 1.0.2 (MIT), ReportLab 5.0.1 (BSD), lxml 6.1.3 (BSD) and XlsxWriter 3.2.9 (BSD). Package license notices remain in the installed distributions. Chinese PDF rendering uses the system WenQuanYi Zen Hei font when available; its font license remains in the OS package. These components retain their upstream licenses.
+
+## Compressed 3D and EPS previews
+
+The vendored Three.js r180 DRACOLoader (MIT) uses the Google Draco WASM decoder (Apache-2.0), served locally. Its license and upstream decoder notes are retained under `app/static/vendor/three/draco/`. No external decoder CDN is contacted. The OS Ghostscript package (AGPL-3.0-or-later) is used as a separate executable for EPS previews; its package copyright/source notices remain available in the installed Debian distribution.
