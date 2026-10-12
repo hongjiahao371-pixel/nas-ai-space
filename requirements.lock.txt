@@ -14,7 +14,7 @@ httptools==0.8.0
 httpx==0.28.1
 idna==3.19
 numpy==1.26.4
-opencv-python-headless==4.10.0.84
+opencv-python-headless==5.0.0.93
 pillow==12.3.0
 psd-tools==1.17.4
 pydantic==2.10.4
