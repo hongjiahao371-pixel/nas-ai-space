@@ -7,6 +7,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import threading
+import subprocess
 import unittest
 import urllib.error
 import urllib.request
@@ -57,6 +58,24 @@ class ReleaseInstallTests(unittest.TestCase):
         names = manager.unpack_release(archive, self.root / 'stage', 'v1.7.0', checks)
         self.assertEqual(len(names), 4)
         self.assertEqual((self.root / 'stage/scripts/nas-ai').stat().st_mode & 0o777, 0o755)
+
+    def test_intel_corporation_is_not_mistaken_for_ati(self):
+        script = '''script=$1; set -- help; source "$script" >/dev/null
+has() { [[ "$1" == lspci ]]; }
+function [ () { if [[ "$1" == '-d' && "$2" == '/dev/dri' ]]; then return 0; fi; builtin [ "$@"; }
+lspci() { printf '%s\\n' '00:02.0 VGA compatible controller: Intel Corporation Raptor Lake-P [UHD Graphics]'; }
+detect_profile
+lspci() { printf '%s\\n' '03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi'; }
+detect_profile
+'''
+        result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], text=True)
+        self.assertEqual(result.splitlines(), ['intel', 'amd-vulkan'])
+
+    def test_download_proxy_validation(self):
+        self.assertEqual(manager.validate_proxy('http://192.0.2.1:8080/'), 'http://192.0.2.1:8080')
+        self.assertEqual(manager.validate_proxy(''), '')
+        for value in ['file:///etc/passwd', 'socks5://localhost:1080', 'http://u:p@localhost:8080', 'http://localhost', 'http://localhost:8/a', 'http://localhost:8\n']:
+            with self.subTest(value=value), self.assertRaises(ValueError): manager.validate_proxy(value)
 
     def test_hash_mismatch_does_not_extract(self):
         archive, checks = self.bundle()

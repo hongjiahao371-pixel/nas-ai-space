@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,19 @@ def set_config(values):
     temporary.write_text('\n'.join(lines) + '\n')
     temporary.chmod(0o600)
     temporary.replace(path)
+
+
+def validate_proxy(value):
+    if not value:
+        return ''
+    parsed = urlsplit(value)
+    if (len(value) > 2048 or any(c.isspace() for c in value) or parsed.scheme not in {'http', 'https'}
+            or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.path not in {'', '/'}):
+        raise ValueError('下载代理请填写 http://地址:端口，不支持带账号密码的代理地址')
+    if parsed.port is None:
+        raise ValueError('下载代理需要填写端口')
+    return value.rstrip('/')
 
 
 def run(*args, capture=False):
@@ -331,6 +345,8 @@ def main():
     commands.add_parser('rollback')
     mode = commands.add_parser('mode')
     mode.add_argument('mode', choices=['media', 'text'])
+    network = commands.add_parser('download-proxy')
+    network.add_argument('url')
     args = parser.parse_args()
     if args.command == 'update':
         if args.archive and not (args.version and args.checksums):
@@ -340,6 +356,12 @@ def main():
         restore(args)
     elif args.command == 'mode':
         change_mode(args.mode)
+    elif args.command == 'download-proxy':
+        if not (ROOT / '.nas-ai-profile').is_file():
+            raise ValueError('手工部署目录请使用原网络配置流程')
+        set_config({'NAS_AI_DOWNLOAD_PROXY': validate_proxy(args.url)})
+        print('下载网络设置已保存，正在继续启动', flush=True)
+        run('start')
     else:
         choices = sorted((ROOT / '.nas-ai-releases').glob('*/state.json'))
         if not choices:

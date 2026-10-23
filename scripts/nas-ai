@@ -104,7 +104,7 @@ detect_profile() {
   if [ -d /dev/dri ]; then
     local gpu_info=""
     has lspci && gpu_info=$(lspci 2>/dev/null | grep -Ei 'VGA|Display|3D' || true)
-    if printf '%s' "$gpu_info" | grep -Eqi 'AMD|ATI'; then
+    if printf '%s' "$gpu_info" | grep -Eqi '(^|[^[:alnum:]])(AMD|ATI)([^[:alnum:]]|$)|Advanced Micro Devices'; then
       printf 'amd-vulkan\n'
       return
     fi
@@ -242,11 +242,12 @@ validate_choice() {
 }
 
 setup_command() {
-  local profile="" preset="" library="" uploads="" recycle="" port="8766" force=0 search=""
+  local profile="" preset="" library="" uploads="" recycle="" port="8766" force=0 search="" download_proxy=""
   NON_INTERACTIVE=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --search) [ "$#" -ge 2 ] || die "--search 缺少值"; search=$2; shift 2 ;;
+      --download-proxy) [ "$#" -ge 2 ] || die "--download-proxy 缺少值"; download_proxy=$2; shift 2 ;;
       --profile) [ "$#" -ge 2 ] || die "--profile 缺少值"; profile=$2; shift 2 ;;
       --preset) [ "$#" -ge 2 ] || die "--preset 缺少值"; preset=$2; shift 2 ;;
       --library) [ "$#" -ge 2 ] || die "--library 缺少值"; library=$2; shift 2 ;;
@@ -310,6 +311,7 @@ setup_command() {
   {
     printf 'TZ=Asia/Shanghai\n'
     printf 'NAS_AI_SEARCH_MODE=%s\n' "$search"
+    printf 'NAS_AI_DOWNLOAD_PROXY=%s\n' "$(env_quote "$download_proxy")"
     printf 'COMPOSE_PROJECT_NAME=nas-ai-%s\n' "$(printf '%s' "$PROJECT_DIR" | cksum | awk '{print $1}')"
     printf 'NAS_AI_PORT=%s\n' "$port"
     printf 'NAS_UID=%s\n' "${SUDO_UID:-$(id -u)}"
@@ -673,6 +675,7 @@ case "$command" in
   compose-exec) compose "$@" ;;
   rollback) python3 "$SCRIPT_DIR/manage.py" rollback ;;
   mode) python3 "$SCRIPT_DIR/manage.py" mode "$@" ;;
+  download-proxy) python3 "$SCRIPT_DIR/manage.py" download-proxy "$@" ;;
   setup) setup_command "$@" ;;
   doctor) doctor_command ;;
   start|up) start_command ;;

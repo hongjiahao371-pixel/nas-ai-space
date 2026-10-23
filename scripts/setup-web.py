@@ -88,10 +88,15 @@ class Wizard:
             with socket.socket() as probe:
                 probe.bind(('0.0.0.0', port))
             commands = [['setup', '--non-interactive', '--library', str(library), '--search', mode, '--port', str(port)], ['start']]
+            proxy = manage.validate_proxy(str(payload.get('proxy', '')))
+            if proxy:
+                commands[0] += ['--download-proxy', proxy]
         elif action in {'start', 'update', 'backup', 'rollback'} and config:
             commands = [[action]]
         elif action == 'mode' and config and payload.get('mode') in {'text', 'media'}:
             commands = [['mode', payload['mode']]]
+        elif action == 'network' and config:
+            commands = [['download-proxy', manage.validate_proxy(str(payload.get('proxy', '')))]]
         elif action == 'restore' and config:
             name = str(payload.get('name', ''))
             if name not in self.status()['backups'] or payload.get('confirm') != '恢复':

@@ -4,6 +4,8 @@ services:
   app:
     build:
       context: .
+      args:
+        HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
     image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0}
     restart: unless-stopped
     ports:
@@ -130,6 +132,9 @@ services:
     environment:
       UVICORN_HOST: 0.0.0.0
       UVICORN_PORT: "8000"
+      HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
+      HTTP_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,app,ollama,qdrant,multimodal,speaches
     security_opt:
       - no-new-privileges:true
 

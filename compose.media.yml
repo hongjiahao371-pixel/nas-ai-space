@@ -13,6 +13,10 @@ services:
       dockerfile: docker/multimodal-runtime.Dockerfile
     image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space-media:1.7.0}
     restart: unless-stopped
+    environment:
+      HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
+      HTTP_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,app,ollama,qdrant,multimodal,speaches
     volumes:
       - media-models:/models
     mem_limit: 3g

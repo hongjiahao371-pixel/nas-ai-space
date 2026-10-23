@@ -31,6 +31,7 @@ def download(url, path, sha256, size=None):
     for attempt in range(4):
         try:
             offset = partial.stat().st_size if partial.exists() else 0
+            print(f'正在连接模型下载源：{path.name}（第{attempt + 1}次，已保留{offset // 1048576} MB）', flush=True)
             request = urllib.request.Request(url, headers={'Range': f'bytes={offset}-'} if offset else {})
             with urllib.request.urlopen(request, timeout=60) as response:
                 resumed = offset and response.status == 206
@@ -59,6 +60,7 @@ def download(url, path, sha256, size=None):
         except Exception:
             if attempt == 3:
                 raise
+            print('下载中断，保留进度并自动重试；持续失败时请检查网络或在维护向导设置下载代理。', flush=True)
             time.sleep(2 ** attempt)
 
 
