@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+PROJECT_DIR=${NAS_AI_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}
 ENV_FILE="$PROJECT_DIR/.env"
 PROFILE_FILE="$PROJECT_DIR/.nas-ai-profile"
 DOCKER_CMD=(docker)
@@ -16,6 +16,11 @@ has() { command -v "$1" >/dev/null 2>&1; }
 ensure_docker_access() {
   [ "$DOCKER_ACCESS_READY" = 1 ] && return 0
   has docker || return 1
+  if [ -z "${DOCKER_CONFIG:-}" ] && [ -e "$HOME/.docker/buildx/current" ] && [ ! -r "$HOME/.docker/buildx/current" ]; then
+    export DOCKER_CONFIG="$PROJECT_DIR/.nas-ai-docker"
+    (umask 077; mkdir -p "$DOCKER_CONFIG")
+    warn "旧Docker构建配置不可读，使用本安装的独立配置继续"
+  fi
   if docker info >/dev/null 2>&1; then
     DOCKER_CMD=(docker)
     DOCKER_ACCESS_READY=1
@@ -45,6 +50,7 @@ NAS AI Space 管理工具
 用法：scripts/nas-ai <命令> [选项]
 
 命令：
+  wizard     打开浏览器安装与维护向导（需要 Python 3）
   setup      交互式生成配置；支持 --non-interactive 用于自动化
   doctor     检查 Docker、目录、端口、内存、硬件与 Compose 配置
   start      构建并启动服务
@@ -52,9 +58,11 @@ NAS AI Space 管理工具
   restart    重启服务
   status     显示容器和应用健康状态
   logs       持续查看日志，可追加服务名
-  backup     创建 SQLite 在线备份
-  restore    从已验证的 SQLite 备份恢复，并修复向量索引
-  update     备份、拉取当前分支并重建服务
+  backup     创建数据库与索引备份
+  restore    恢复完整恢复包；兼容旧版 SQLite 备份
+  update     校验官方版本、备份并升级（Git 与压缩包安装均支持）
+  rollback   恢复上次升级前的程序
+  mode       切换 media 完整素材 / text 轻量文字检索，保留已有数据
   uninstall  移除容器和网络，保留配置、资料、数据库与模型
   config     输出最终 Compose 配置
   help       显示帮助
@@ -62,6 +70,7 @@ NAS AI Space 管理工具
 setup 选项：
   --profile cpu|intel|amd-vulkan|amd-rocm|nvidia|intel-openvino
   --preset lite|standard|full
+  --search media|text（完整素材检索 / 轻量文字检索）
   --library PATH  --uploads PATH  --recycle PATH  --port PORT
   --non-interactive  --force
 
@@ -138,6 +147,7 @@ profile_files() {
     intel-openvino) printf '%s\n' docker-compose.yml compose.intel-openvino.yml ;;
     *) die "未知硬件方案：$profile" ;;
   esac
+  if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ]; then printf '%s\n' compose.media.yml; fi
 }
 
 read_profile() {
@@ -232,10 +242,11 @@ validate_choice() {
 }
 
 setup_command() {
-  local profile="" preset="" library="" uploads="" recycle="" port="8766" force=0
+  local profile="" preset="" library="" uploads="" recycle="" port="8766" force=0 search=""
   NON_INTERACTIVE=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --search) [ "$#" -ge 2 ] || die "--search 缺少值"; search=$2; shift 2 ;;
       --profile) [ "$#" -ge 2 ] || die "--profile 缺少值"; profile=$2; shift 2 ;;
       --preset) [ "$#" -ge 2 ] || die "--preset 缺少值"; preset=$2; shift 2 ;;
       --library) [ "$#" -ge 2 ] || die "--library 缺少值"; library=$2; shift 2 ;;
@@ -255,6 +266,13 @@ setup_command() {
   preset=$(prompt_value "资源预设（lite/standard/full）" "$preset")
   validate_choice "$profile" "cpu intel amd-vulkan amd-rocm nvidia intel-openvino" "硬件方案"
   validate_choice "$preset" "lite standard full" "资源预设"
+
+  if [ -z "$search" ]; then
+    search=media
+    [ "$(total_memory_mb)" -ge 12288 ] || search=text
+    search=$(prompt_value "检索方案（media 完整素材检索，建议12GB以上；text 轻量文字检索）" "$search")
+  fi
+  validate_choice "$search" "media text" "检索方案"
 
   library=${library:-$(prompt_value "媒体目录（只读）" "$PROJECT_DIR/library")}
   uploads=${uploads:-$(prompt_value "上传与 AI 成果目录（可写）" "$PROJECT_DIR/uploads")}
@@ -291,6 +309,8 @@ setup_command() {
   umask 077
   {
     printf 'TZ=Asia/Shanghai\n'
+    printf 'NAS_AI_SEARCH_MODE=%s\n' "$search"
+    printf 'COMPOSE_PROJECT_NAME=nas-ai-%s\n' "$(printf '%s' "$PROJECT_DIR" | cksum | awk '{print $1}')"
     printf 'NAS_AI_PORT=%s\n' "$port"
     printf 'NAS_UID=%s\n' "${SUDO_UID:-$(id -u)}"
     printf 'NAS_GID=%s\n' "${SUDO_GID:-$(id -g)}"
@@ -305,6 +325,9 @@ setup_command() {
     printf 'NAS_AI_MIN_AVAILABLE_MEMORY_MB=%s\n' "$min_memory"
     printf 'NAS_AI_MIN_FREE_SWAP_MB=512\n'
     printf 'NAS_AI_FACE_WORKERS=%s\n' "$face_workers"
+    # Keep one Qwen model resident on ordinary NAS devices; larger hosts can retain two.
+    if [ "$preset" = full ]; then printf 'OLLAMA_MAX_LOADED_MODELS=2\n'; else printf 'OLLAMA_MAX_LOADED_MODELS=1\n'; fi
+    printf 'OLLAMA_KEEP_ALIVE=2m\n'
     printf 'NAS_AI_AUTO_INDEX_ENABLED=false\n'
     printf 'NAS_AI_AUTOMATIC_BACKUP_ENABLED=true\n'
     printf 'NAS_AI_WATCH_ENABLED=true\n'
@@ -449,7 +472,7 @@ doctor_command() {
       warn "Compose 配置校验失败"; failures=$((failures + 1))
     fi
     image=$(env_value NAS_AI_APP_IMAGE)
-    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.6.5}
+    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0}
     if "${DOCKER_CMD[@]}" manifest inspect "$image" >/dev/null 2>&1; then
       say "✓ 预构建应用镜像可读取：$image"
     else
@@ -489,11 +512,10 @@ compose_up_with_model_progress() {
   while kill -0 "$up_pid" 2>/dev/null; do
     if [ "$track_models" = 1 ]; then
       current_progress=$(
-        compose logs --no-color --tail 20 model-init 2>/dev/null \
+        compose logs --no-color --tail 20 model-init $(if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ]; then printf multimodal; fi) 2>/dev/null \
           | tr '\r' '\n' \
-          | grep -E '([[:digit:]]{1,3}%|success)' \
+          | grep -E '([[:digit:]]{1,3}%|success|MB|已校验|正在启动)' \
           | tail -n 1 \
-          | tr -cd '\11\12\15\40-\176' \
           || true
       )
       if [ -n "$current_progress" ] && [ "$current_progress" != "$previous_progress" ]; then
@@ -508,11 +530,13 @@ compose_up_with_model_progress() {
 
 start_command() {
   doctor_command
-  say "正在构建并启动服务。首次运行会下载固定版本容器镜像和约 2.5 GB 模型，请为 Docker 存储预留至少 15 GB；中断后重新运行 start 会续传。"
+  say "正在准备容器和模型。首次下载可能需要10–60分钟或更久；完整素材方案另需约0.9GB模型，中断后重试会续传。"
   local build_local=${NAS_AI_BUILD_LOCAL:-}
   [ -n "$build_local" ] || build_local=$(env_value NAS_AI_BUILD_LOCAL)
   build_local=${build_local:-false}
-  if [ "$build_local" != true ] && compose pull app; then
+  local pull_services=(app)
+  [ "$(env_value NAS_AI_SEARCH_MODE)" != media ] || pull_services+=(multimodal)
+  if [ "$build_local" != true ] && compose pull "${pull_services[@]}"; then
     say "✓ 已取得预构建应用镜像"
     compose_up_with_model_progress up -d --no-build
   else
@@ -551,6 +575,11 @@ backup_command() {
 }
 
 restore_command() {
+  if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ] || [[ "${1:-}" == *.tar ]]; then
+    has python3 || die "完整恢复需要 Python 3"
+    python3 "$SCRIPT_DIR/manage.py" restore "$@"
+    return
+  fi
   local backup_name="" assume_yes=0 backup_path database_path token port answer app_stopped=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -633,18 +662,17 @@ uninstall_command() {
 }
 
 update_command() {
-  has git || die "update 命令需要 git"
-  [ -d "$PROJECT_DIR/.git" ] || die "当前目录不是 Git 克隆，不能自动更新"
-  [ -z "$(git -C "$PROJECT_DIR" status --porcelain)" ] || die "工作区有未提交改动，请先处理后再更新"
-  say "先创建在线备份…"
-  backup_command
-  git -C "$PROJECT_DIR" pull --ff-only
-  start_command
+  has python3 || die "升级需要 Python 3"
+  python3 "$SCRIPT_DIR/manage.py" update "$@"
 }
 
 command=${1:-help}
 [ "$#" -eq 0 ] || shift
 case "$command" in
+  wizard) python3 "$SCRIPT_DIR/setup-web.py" "$@" ;;
+  compose-exec) compose "$@" ;;
+  rollback) python3 "$SCRIPT_DIR/manage.py" rollback ;;
+  mode) python3 "$SCRIPT_DIR/manage.py" mode "$@" ;;
   setup) setup_command "$@" ;;
   doctor) doctor_command ;;
   start|up) start_command ;;
@@ -654,7 +682,7 @@ case "$command" in
   logs) compose logs -f --tail=200 "$@" ;;
   backup) backup_command ;;
   restore) restore_command "$@" ;;
-  update) update_command ;;
+  update) update_command "$@" ;;
   uninstall) uninstall_command "$@" ;;
   config) compose config ;;
   help|-h|--help) usage ;;

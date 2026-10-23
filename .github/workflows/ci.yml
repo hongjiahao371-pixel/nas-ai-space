@@ -38,6 +38,7 @@ jobs:
       - name: Validate Compose profiles
         run: |
           docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml -f compose.media.yml config --quiet
           docker compose -f docker-compose.yml -f compose.intel.yml config --quiet
           docker compose -f docker-compose.yml -f compose.intel-openvino.yml config --quiet
           docker compose -f docker-compose.yml -f compose.amd.yml config --quiet

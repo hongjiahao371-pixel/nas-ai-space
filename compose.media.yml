@@ -1,0 +1,69 @@
+# Portable public installation. No appliance-specific images or runtime files.
+services:
+  app:
+    environment:
+      NAS_AI_MULTIMODAL_ENABLED: "true"
+      NAS_AI_MULTIMODAL_URL: http://multimodal:8080
+    depends_on:
+      multimodal:
+        condition: service_healthy
+  multimodal:
+    build:
+      context: .
+      dockerfile: docker/multimodal-runtime.Dockerfile
+    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space-media:1.7.0}
+    restart: unless-stopped
+    volumes:
+      - media-models:/models
+    mem_limit: 3g
+    cpus: 2.0
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 3600s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  multimodal-indexer:
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0}
+    restart: unless-stopped
+    command: ["python", "-m", "app.services.multimodal_worker"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      NAS_AI_DATA_DIR: /app/data
+      NAS_AI_CACHE_DIR: /app/data/cache
+      NAS_AI_SCAN_ROOT: /library
+      NAS_AI_UPLOAD_ROOT: /uploads
+      NAS_AI_QDRANT_URL: http://qdrant:6333
+      NAS_AI_MULTIMODAL_ENABLED: "true"
+      NAS_AI_MULTIMODAL_URL: http://multimodal:8080
+      NAS_AI_MULTIMODAL_MEMORY_FLOOR_MB: ${NAS_AI_MULTIMODAL_MEMORY_FLOOR_MB:-2048}
+      NAS_AI_MULTIMODAL_BATCH_SIZE: 2
+    volumes:
+      - ${NAS_AI_DATA_PATH:-./data}:/app/data
+      - ${NAS_LIBRARY_PATH:-./library}:/library:ro
+      - ${NAS_UPLOAD_PATH:-./uploads}:/uploads:ro
+    user: "${NAS_UID:-1000}:${NAS_GID:-1000}"
+    depends_on:
+      app:
+        condition: service_healthy
+      multimodal:
+        condition: service_healthy
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:size=256m"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3,time; c=sqlite3.connect('file:/app/data/multimodal-index.db?mode=ro',uri=True); r=c.execute('select heartbeat from worker_status where id=1').fetchone(); assert r and time.time()-r[0]<900"]
+      interval: 60s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+volumes:
+  media-models:

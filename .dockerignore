@@ -21,3 +21,9 @@ __pycache__
 *.pyc
 *.tar.gz
 .DS_Store
+
+.nas-ai-releases
+.nas-ai-restores
+
+.nas-ai-docker
+.nas-ai-operation.lock

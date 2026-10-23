@@ -7,7 +7,8 @@ cd "$PROJECT_DIR"
 required=(
   LICENSE THIRD_PARTY_NOTICES.md SECURITY.md CONTRIBUTING.md CHANGELOG.md
   README.md .env.example requirements.txt requirements.lock.txt
-  scripts/nas-ai
+  scripts/nas-ai scripts/manage.py scripts/setup-web.py scripts/setup.html install.sh
+  compose.media.yml docker/multimodal-runtime.Dockerfile docker/prepare-multimodal.py
 )
 for path in "${required[@]}"; do
   [ -s "$path" ] || { printf 'Missing required release file: %s\n' "$path" >&2; exit 1; }

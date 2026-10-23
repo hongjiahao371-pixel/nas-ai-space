@@ -1966,3 +1966,8 @@ button.productivity-feed-row { width: 100%; cursor: pointer; }
 #integrationKeyList .user-card-main { min-width:0;overflow-wrap:anywhere; }
 #integrationKeyList .user-card-main p { display:block; }
 @media(max-width:560px){#integrationKeyList .integration-key-card { grid-template-columns:minmax(0,1fr); }#integrationKeyList .integration-key-card > button { grid-column:1; }}
+
+.folder-picker { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+.folder-picker-list { display: flex; gap: 8px; flex-wrap: wrap; max-height: 210px; overflow: auto; margin: 12px 0; }
+.folder-picker-list button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+#libraryFolderLocation { overflow-wrap: anywhere; }

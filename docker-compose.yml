@@ -4,7 +4,7 @@ services:
   app:
     build:
       context: .
-    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.6.5}
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0}
     restart: unless-stopped
     ports:
       - "${NAS_AI_PORT:-8766}:8000"
@@ -53,7 +53,7 @@ services:
       NAS_AI_QDRANT_URL: http://qdrant:6333
       NAS_AI_VECTORS_ON_DISK: ${NAS_AI_VECTORS_ON_DISK:-true}
     volumes:
-      - ./data:/app/data
+      - ${NAS_AI_DATA_PATH:-./data}:/app/data
       - ${NAS_LIBRARY_PATH:-./library}:/library:ro
       - ${NAS_LIBRARY_PATH:-./library}:/maintenance/library
       - ${NAS_UPLOAD_PATH:-./uploads}:/uploads
@@ -135,5 +135,6 @@ services:
 
 volumes:
   qdrant-data:
+    name: ${NAS_AI_QDRANT_VOLUME:-${COMPOSE_PROJECT_NAME:-nas-ai-space}_qdrant-data}
   ollama-models:
   speech-models:

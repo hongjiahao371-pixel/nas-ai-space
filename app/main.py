@@ -444,7 +444,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.6.5",
+    version="1.7.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -1009,7 +1009,7 @@ def _safe_library_path(value: str) -> Path:
     path = Path(value).expanduser().resolve()
     for root in settings.scan_roots:
         try:
-            path.relative_to(root)
+            path.relative_to(root.resolve())
             break
         except ValueError:
             continue
@@ -3179,6 +3179,36 @@ def workspace_media(ticket: str) -> FileResponse:
 def list_libraries(principal: Auth) -> list[dict[str, Any]]:
     rows = state.database.list_libraries()
     return [row for row in rows if _allowed_library(principal, int(row["id"]))]
+
+
+@app.get("/api/libraries/folders")
+def library_folders(principal: Auth, path: str = "", offset: int = 0) -> dict[str, Any]:
+    """Browse only mounted library roots; members cannot inspect host directories."""
+    _require_admin(principal)
+    if offset < 0 or offset > 100000:
+        raise HTTPException(status_code=400, detail="分页位置无效")
+    roots = [root.resolve() for root in settings.scan_roots if root.is_dir()]
+    if not path:
+        return {"path": "", "label": "可用资料文件夹", "parent": None, "next_offset": None,
+                "folders": [{"name": "资料文件夹" + (f" {i + 1}" if len(roots) > 1 else ""),
+                             "path": str(root)} for i, root in enumerate(roots)]}
+    current = _safe_library_path(path)
+    root = next(root for root in roots if current == root or root in current.parents)
+    try:
+        children = []
+        for child in current.iterdir():
+            if child.name.startswith('.') or child.is_symlink() or not child.is_dir():
+                continue
+            resolved = child.resolve()
+            if root == resolved or root in resolved.parents:
+                children.append({"name": child.name, "path": str(resolved)})
+        children.sort(key=lambda item: item['name'].casefold())
+    except OSError:
+        raise HTTPException(status_code=403, detail="无法读取这个文件夹，请检查NAS目录权限")
+    return {"path": str(current), "label": "资料文件夹" if current == root else str(current.relative_to(root)),
+            "parent": "" if current == root else str(current.parent),
+            "folders": children[offset:offset + 100],
+            "next_offset": offset + 100 if len(children) > offset + 100 else None}
 
 
 @app.post("/api/libraries", status_code=201)

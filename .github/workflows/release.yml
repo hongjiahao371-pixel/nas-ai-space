@@ -49,6 +49,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build and publish portable media runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/multimodal-runtime.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}-media:${{ steps.meta.outputs.version }}
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

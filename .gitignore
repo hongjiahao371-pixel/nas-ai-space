@@ -28,3 +28,11 @@ work/
 *.tgz
 *.tar
 *.tar.gz
+
+.nas-ai-releases/
+.nas-ai-restores/
+.nas-ai-release-files.json
+
+.nas-ai-operation.lock
+
+.nas-ai-docker/
