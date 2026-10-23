@@ -24,7 +24,7 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
 else
   release_files=$(find . -type f -print | sed 's#^\./##')
 fi
-if printf '%s\n' "$release_files" | grep -Eq '(^|/)\.env$|\.(db|sqlite|sqlite3)$|(^|/)(uploads|recycle|runtime)/'; then
+if printf '%s\n' "$release_files" | grep -Eq '(^|/)\.env$|\.(db|sqlite|sqlite3)$|(^|/)(uploads|recycle|runtime)/|^(data|library)/'; then
   printf 'Tracked runtime data or secret configuration detected.\n' >&2
   exit 1
 fi
