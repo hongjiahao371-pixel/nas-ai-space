@@ -1,10 +1,10 @@
-# Reproducible Python 3.11 Linux runtime lock for NAS AI Space v1.6.0.
+# Reproducible Python 3.11 Linux runtime lock for NAS AI Space v1.7.0.
 # Regenerate only after `requirements.txt` changes and the full test suite passes.
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
 attrs==26.1.0
-certifi==2026.7.22
+certifi==2026.10.19
 click==8.4.2
 fastapi==0.140.0
 fonttools==4.63.0
@@ -15,11 +15,11 @@ httpx==0.28.1
 idna==3.19
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
-pillow==12.3.0
+pillow==13.0.0
 psd-tools==1.17.4
 pydantic==2.10.4
 pydantic_core==2.27.2
-pypdf==6.19.0
+pypdf==6.21.2
 python-dotenv==1.2.3
 PyYAML==6.0.3
 rawpy==0.27.0
