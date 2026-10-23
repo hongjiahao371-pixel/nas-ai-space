@@ -174,17 +174,19 @@ compose() {
 env_value() {
   local key=$1
   [ -f "$ENV_FILE" ] || return 0
-  awk -F= -v key="$key" '
-    $1 == key {
-      value = substr($0, index($0, "=") + 1)
-      if ((substr(value,1,1) == "\"" && substr(value,length(value),1) == "\"") ||
-          (substr(value,1,1) == "\047" && substr(value,length(value),1) == "\047")) {
-        value = substr(value, 2, length(value) - 2)
-      }
-      print value
-      exit
-    }
-  ' "$ENV_FILE"
+  python3 - "$ENV_FILE" "$key" <<'PYENV'
+import sys
+from pathlib import Path
+for line in Path(sys.argv[1]).read_text().splitlines():
+    key, sep, value = line.partition('=')
+    if sep and key == sys.argv[2]:
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        elif value.startswith("'") and value.endswith("'"):
+            value = value[1:-1]
+        print(value.replace('$$', '$'))
+        break
+PYENV
 }
 
 env_quote() {

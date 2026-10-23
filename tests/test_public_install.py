@@ -101,6 +101,16 @@ detect_profile
             self.assertEqual(value['NAS_AI_API_TOKEN'], 'secret')
             self.assertEqual((self.root / '.env').stat().st_mode & 0o777, 0o600)
 
+    def test_shell_config_reader_preserves_special_characters(self):
+        (self.root / '.env').write_text('')
+        value = '/media/资料 $cash "name"'
+        with patch.object(manager, 'ROOT', self.root):
+            manager.set_config({'NAS_LIBRARY_PATH': value})
+        script = 'script=$1; set -- help; source "$script" >/dev/null; env_value NAS_LIBRARY_PATH'
+        result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')],
+                                         env={**__import__('os').environ, 'NAS_AI_PROJECT_DIR': str(self.root)}, text=True)
+        self.assertEqual(result.rstrip('\n'), value)
+
     def test_copy_refuses_destination_symlink(self):
         source = self.root / 'source'; destination = self.root / 'destination'; outside = self.root / 'outside'
         source.mkdir(); destination.mkdir(); outside.mkdir()
@@ -153,6 +163,28 @@ detect_profile
             self.assertEqual(ranges, ['bytes=137-'])
             self.assertEqual((self.root / 'model').read_bytes(), data)
             self.assertFalse(partial.exists())
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_short_eof_keeps_partial_and_retries_from_last_byte(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        data = b'model-data' * 100; ranges = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_GET(self):
+                offset = 137 if self.headers.get('Range') else 0
+                ranges.append(self.headers.get('Range'))
+                self.send_response(206 if offset else 200)
+                if offset: self.send_header('Content-Range', f'bytes {offset}-{len(data)-1}/{len(data)}')
+                self.end_headers(); self.wfile.write(data[offset:] if offset else data[:137])
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            with patch.object(runtime.time, 'sleep'):
+                runtime.download(f'http://127.0.0.1:{server.server_port}/model', self.root / 'model',
+                                 hashlib.sha256(data).hexdigest(), len(data))
+            self.assertEqual(ranges, [None, 'bytes=137-'])
+            self.assertEqual((self.root / 'model').read_bytes(), data)
         finally:
             server.shutdown(); server.server_close(); thread.join()
 

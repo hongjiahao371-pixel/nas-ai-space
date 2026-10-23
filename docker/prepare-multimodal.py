@@ -52,6 +52,8 @@ def download(url, path, sha256, size=None):
                         if time.monotonic() - last > 5:
                             print(f'正在下载 {path.name}：{offset // 1048576} MB' + (f' / {size // 1048576} MB' if size else ''), flush=True)
                             last = time.monotonic()
+            if size is not None and partial.stat().st_size < size:
+                raise ConnectionError('连接提前结束，尚未下载完整，保留分段继续续传')
             if (size is not None and partial.stat().st_size != size) or digest(partial) != sha256:
                 partial.unlink(missing_ok=True)
                 raise ValueError('文件校验失败，重新下载')
