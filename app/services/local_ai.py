@@ -299,6 +299,10 @@ class LocalAIClient:
         return headers
 
     def _post_json(self, url: str, payload: dict, timeout: float) -> httpx.Response:
+        # Public Ollama profiles use direct answers so a small output budget is
+        # not consumed entirely by reasoning before a caption is emitted.
+        if self.settings.disable_thinking and url.rstrip('/').endswith('/chat/completions'):
+            payload = {**payload, "reasoning_effort": "none"}
         last_error: Exception | None = None
         for attempt, delay in enumerate((0.0, 0.75, 2.0), 1):
             if delay:

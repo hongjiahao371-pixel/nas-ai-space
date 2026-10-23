@@ -532,6 +532,15 @@ compose_up_with_model_progress() {
   wait "$up_pid"
 }
 
+cached_images_available() {
+  local images image
+  images=$(compose config --format json | python3 -c 'import json,sys; c=json.load(sys.stdin); print("\n".join(c["services"][s]["image"] for s in sys.argv[1:]))' "$@") || return 1
+  [ -n "$images" ] || return 1
+  while IFS= read -r image; do
+    "${DOCKER_CMD[@]}" image inspect "$image" >/dev/null 2>&1 || return 1
+  done <<< "$images"
+}
+
 start_command() {
   doctor_command
   say "正在准备容器和模型。首次下载可能需要10–60分钟或更久；完整素材方案另需约0.9GB模型，中断后重试会续传。"
@@ -542,6 +551,9 @@ start_command() {
   [ "$(env_value NAS_AI_SEARCH_MODE)" != media ] || pull_services+=(multimodal)
   if [ "$build_local" != true ] && compose pull "${pull_services[@]}"; then
     say "✓ 已取得预构建应用镜像"
+    compose_up_with_model_progress up -d --no-build
+  elif [ "$build_local" != true ] && cached_images_available "${pull_services[@]}"; then
+    say "下载暂不可用，使用本机已有的同版本镜像继续启动；账号、资料与模型保留。"
     compose_up_with_model_progress up -d --no-build
   else
     warn "预构建镜像不可用或已要求本地构建，改为在当前设备构建应用"

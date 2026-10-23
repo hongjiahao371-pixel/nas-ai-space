@@ -111,6 +111,20 @@ detect_profile
                                          env={**__import__('os').environ, 'NAS_AI_PROJECT_DIR': str(self.root)}, text=True)
         self.assertEqual(result.rstrip('\n'), value)
 
+    def test_offline_start_requires_every_selected_cached_image(self):
+        script = r'''script=$1; set -- help; source "$script" >/dev/null
+compose() { printf '%s\n' '{"services":{"app":{"image":"app:v1"},"multimodal":{"image":"media:v1"}}}'; }
+fake_docker() { [[ "$3" != "media:v1" || "$available_media" == yes ]]; }
+DOCKER_CMD=(fake_docker)
+available_media=no
+cached_images_available app && printf 'text-ok\n'
+if cached_images_available app multimodal; then printf 'bad\n'; else printf 'missing-media\n'; fi
+available_media=yes
+cached_images_available app multimodal && printf 'media-ok\n'
+'''
+        result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], text=True)
+        self.assertEqual(result.splitlines(), ['text-ok', 'missing-media', 'media-ok'])
+
     def test_copy_refuses_destination_symlink(self):
         source = self.root / 'source'; destination = self.root / 'destination'; outside = self.root / 'outside'
         source.mkdir(); destination.mkdir(); outside.mkdir()

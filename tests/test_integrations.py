@@ -24,6 +24,23 @@ class VisionIntegrationTests(unittest.TestCase):
                 self.assertEqual(prepared.size, (1280,640)); self.assertFalse(prepared.getexif())
         self.assertEqual(list(self.cfg.cache_dir.iterdir()), [])
 
+    def test_public_profile_disables_reasoning_only_for_chat(self):
+        captured = []
+        def handler(request):
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={'choices':[{'message':{'content':'蓝色方形'}}]})
+        transport = httpx.Client(transport=httpx.MockTransport(handler))
+        for enabled, route in [(True, 'chat/completions'), (False, 'chat/completions'), (True, 'embeddings')]:
+            ai = LocalAIClient(replace(self.cfg, disable_thinking=enabled))
+            original = {'model':'qwen3-vl:2b','messages':[]}
+            with patch.object(ai, '_http', return_value=transport):
+                ai._post_json('http://ollama:11434/v1/'+route, original, 10)
+            self.assertNotIn('reasoning_effort', original)
+        self.assertEqual(captured[0]['reasoning_effort'], 'none')
+        self.assertNotIn('reasoning_effort', captured[1])
+        self.assertNotIn('reasoning_effort', captured[2])
+        transport.close()
+
     def test_invalid_images_never_call_model(self):
         ai=LocalAIClient(replace(self.cfg, vision_model='vision'))
         gif=io.BytesIO(); Image.new('RGB',(10,10)).save(gif,'GIF')
