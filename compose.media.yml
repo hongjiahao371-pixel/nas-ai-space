@@ -11,7 +11,7 @@ services:
     build:
       context: .
       dockerfile: docker/multimodal-runtime.Dockerfile
-    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space-media:1.7.0}
+    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0-media}
     restart: unless-stopped
     environment:
       HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}

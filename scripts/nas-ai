@@ -560,7 +560,7 @@ start_command() {
     compose_up_with_model_progress up -d --build
   fi
   if wait_for_health 300; then
-    say "首次打开页面后，请在初始化向导中创建管理员账号。"
+    say "首次安装请创建管理员账号；已有安装可使用原账号登录。"
     return 0
   fi
   compose ps

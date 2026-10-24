@@ -56,7 +56,7 @@ jobs:
           file: docker/multimodal-runtime.Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository }}-media:${{ steps.meta.outputs.version }}
+          tags: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}-media
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
