@@ -82,6 +82,7 @@ class Settings:
     local_ai_base_url: str
     local_ai_api_key: str
     disable_thinking: bool
+    vision_background_timeout_seconds: int
     embedding_base_url: str
     vision_base_url: str
     chat_base_url: str
@@ -199,6 +200,7 @@ class Settings:
             local_ai_base_url=local_ai_base_url,
             local_ai_api_key=os.getenv("NAS_AI_LOCAL_AI_KEY", "").strip(),
             disable_thinking=_bool_env("NAS_AI_DISABLE_THINKING", False),
+            vision_background_timeout_seconds=_int_env("NAS_AI_VISION_BACKGROUND_TIMEOUT_SECONDS", 600, 60, 1800),
             embedding_base_url=os.getenv("NAS_AI_EMBEDDING_URL", local_ai_base_url).strip().rstrip("/"),
             vision_base_url=os.getenv("NAS_AI_VISION_URL", local_ai_base_url).strip().rstrip("/"),
             chat_base_url=os.getenv("NAS_AI_CHAT_URL", local_ai_base_url).strip().rstrip("/"),

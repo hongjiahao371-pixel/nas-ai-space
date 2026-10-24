@@ -478,7 +478,7 @@ class LocalAIClient:
             response = self._post_json(
                 self._api_url(endpoint, "chat/completions"),
                 payload,
-                180,
+                self.settings.vision_background_timeout_seconds,
             )
             content = response.json()["choices"][0]["message"]["content"].strip()
         content = re.sub(r"\s+", " ", content).strip()
