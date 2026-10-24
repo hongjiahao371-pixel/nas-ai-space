@@ -180,6 +180,11 @@ def checked_start(expected=None):
         raise RuntimeError('升级后就绪检查失败')
 
 
+def vision_default_migration(config):
+    return {key: 'qwen3-vl:2b-instruct-q4_K_M' for key in ('NAS_AI_VISION_MODEL', 'NAS_AI_CHAT_MODEL')
+            if config.get(key) == 'qwen3-vl:2b'}
+
+
 def update(args):
     if not (ROOT / '.nas-ai-profile').is_file():
         raise ValueError('这是手工部署目录，请使用原部署流程；通用更新不会猜测或替换现有服务组合')
@@ -221,7 +226,10 @@ def update(args):
         snapshot = ROOT / '.nas-ai-releases' / (time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
         snapshot.mkdir(parents=True, mode=0o700)
         copy_code(ROOT, snapshot / 'source', previous_names)
-        manifest = {'old_version': old, 'new_version': version[1:], 'old_files': previous_names, 'new_files': names}
+        config = configuration()
+        migration = vision_default_migration(config)
+        manifest = {'old_version': old, 'new_version': version[1:], 'old_files': previous_names, 'new_files': names,
+                    'model_defaults_before': {key: config[key] for key in migration}}
         (snapshot / 'state.json').write_text(json.dumps(manifest))
         print('正在保存升级前的数据与索引备份', flush=True)
         request('/api/operations/backups', 'POST')
@@ -235,6 +243,9 @@ def update(args):
                 for name in json.loads(tracked.read_text()):
                     if name not in names and safe_member(name):
                         (ROOT / name).unlink(missing_ok=True)
+            if migration:
+                set_config(migration)
+                print('正在更新旧版默认看图模型为直接回答版本；自定义模型配置保持原值', flush=True)
             checked_start(version[1:])
         except Exception:
             print('升级未通过，正在回退程序；数据备份与诊断材料均已保留', flush=True)
@@ -250,6 +261,8 @@ def restore_code(snapshot):
         if safe_member(name):
             (ROOT / name).unlink(missing_ok=True)
     copy_code(snapshot / 'source', ROOT, state['old_files'])
+    if state.get('model_defaults_before'):
+        set_config(state['model_defaults_before'])
     checked_start(state['old_version'])
     (ROOT / '.nas-ai-release-files.json').write_text(json.dumps({name: sha(ROOT / name) for name in state['old_files']}))
 

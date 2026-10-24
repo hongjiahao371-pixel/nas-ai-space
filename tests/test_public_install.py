@@ -125,6 +125,12 @@ cached_images_available app multimodal && printf 'media-ok\n'
         result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], text=True)
         self.assertEqual(result.splitlines(), ['text-ok', 'missing-media', 'media-ok'])
 
+    def test_only_legacy_default_vision_models_are_migrated(self):
+        old = {'NAS_AI_VISION_MODEL':'qwen3-vl:2b','NAS_AI_CHAT_MODEL':'custom-private-model'}
+        self.assertEqual(manager.vision_default_migration(old), {'NAS_AI_VISION_MODEL':'qwen3-vl:2b-instruct-q4_K_M'})
+        self.assertEqual(old['NAS_AI_VISION_MODEL'], 'qwen3-vl:2b')
+        self.assertEqual(manager.vision_default_migration({'NAS_AI_VISION_MODEL':'other'}), {})
+
     def test_copy_refuses_destination_symlink(self):
         source = self.root / 'source'; destination = self.root / 'destination'; outside = self.root / 'outside'
         source.mkdir(); destination.mkdir(); outside.mkdir()

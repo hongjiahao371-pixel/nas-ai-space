@@ -49,8 +49,8 @@ services:
       NAS_AI_VISION_URL: ${NAS_AI_VISION_URL:-http://ollama:11434}
       NAS_AI_CHAT_URL: ${NAS_AI_CHAT_URL:-http://ollama:11434}
       NAS_AI_EMBEDDING_MODEL: ${NAS_AI_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
-      NAS_AI_VISION_MODEL: ${NAS_AI_VISION_MODEL:-qwen3-vl:2b}
-      NAS_AI_CHAT_MODEL: ${NAS_AI_CHAT_MODEL:-qwen3-vl:2b}
+      NAS_AI_VISION_MODEL: ${NAS_AI_VISION_MODEL:-qwen3-vl:2b-instruct-q4_K_M}
+      NAS_AI_CHAT_MODEL: ${NAS_AI_CHAT_MODEL:-qwen3-vl:2b-instruct-q4_K_M}
       NAS_AI_TRANSCRIPTION_URL: ${NAS_AI_TRANSCRIPTION_URL:-http://speaches:8000}
       NAS_AI_TRANSCRIPTION_MODEL: ${NAS_AI_TRANSCRIPTION_MODEL:-Systran/faster-whisper-small}
       NAS_AI_QDRANT_URL: http://qdrant:6333
@@ -117,7 +117,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
       NAS_AI_EMBEDDING_MODEL: ${NAS_AI_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
-      NAS_AI_VISION_MODEL: ${NAS_AI_VISION_MODEL:-qwen3-vl:2b}
+      NAS_AI_VISION_MODEL: ${NAS_AI_VISION_MODEL:-qwen3-vl:2b-instruct-q4_K_M}
     volumes:
       - ./docker/pull-models.sh:/pull-models.sh:ro
     depends_on:

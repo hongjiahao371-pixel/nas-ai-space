@@ -265,7 +265,7 @@ llama.cpp/Qdrant 运行文件和自定义基础镜像的高级精简栈，不能
 |---|---|---:|
 | 中文/多语言向量 | `qwen3-embedding:0.6b` | 639 MB |
 | 搜索精准重排 | `qwen3:0.6b` Q8 | 639 MB |
-| 图片、视频帧、问答 | `qwen3-vl:2b` | 1.9 GB |
+| 图片、视频帧、问答 | `qwen3-vl:2b-instruct-q4_K_M` | 1.9 GB |
 | 语音转写 | `Systran/faster-whisper-small` | 约 500 MB |
 | 人脸检测 | OpenCV Zoo YuNet | 233 KB |
 | 人脸特征 | OpenCV Zoo SFace | 36.9 MB |
