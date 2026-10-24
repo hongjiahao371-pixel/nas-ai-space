@@ -1,3 +1,12 @@
+# 素材检索安装
+
+v1.7.0 普通用户请运行 `scripts/nas-ai wizard` 选择完整素材检索，或用
+`scripts/nas-ai setup --search media` 后启动。`compose.media.yml` 与公开基础栈
+配合，自动下载校验模型及运行文件。它不需要下面的旧NAS专用镜像和目录。
+下载失败会保留已完成部分，重试时续传；成功后仍需等待自己的资料建立索引。
+
+下文为既有手工NAS部署的维护参考，不是新用户安装步骤。
+
 # EmbeddingGemma 2 media search (v1.5.0)
 
 The new media collection is independent from the existing Qwen text collection.

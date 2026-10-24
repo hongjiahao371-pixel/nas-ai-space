@@ -3,6 +3,14 @@
 All notable user-facing changes are recorded here. This project follows
 Semantic Versioning.
 
+## [1.7.0] - 2026-10-23
+
+- 修正 Intel Corporation 被 ATI 子串误判为 AMD 的硬件识别；补充下载网络设置与明确的重试提示。
+
+- 浏览器安装与维护向导、完整素材检索自动准备、应用内点选资料目录。
+- 经校验的正式版升级与程序回退，统一 Git / 压缩包安装；双索引完整恢复保留旧数据。
+- 新用户从空环境安装与生命周期验收结果单独记录。
+
 ## [1.6.5] - 2026-10-11
 
 - 可选 `media_first=true` 优先使用直接素材向量，有有效候选时跳过串行Qwen；无候选、陈旧或服务失败时仍走原文本回退。默认完整融合保留。

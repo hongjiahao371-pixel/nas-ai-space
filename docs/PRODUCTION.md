@@ -39,6 +39,20 @@ NAS_AI_AUTOMATIC_BACKUP_RETENTION=7
 
 8 GB 内存的 NVIDIA NAS 建议保持 `NAS_AI_INDEX_WORKERS=1`，每批 50–200 个文件，并保留可用内存和 Swap 保护线。`NAS_AI_BACKGROUND_MEMORY_FLOOR_MB` 必须低于或等于正常内存保护线；它只允许旧图片描述运行小型探测批，不会放宽待索引文件和修复任务的正常保护条件。任务之间按需重启模型容器的外部编排器必须以 root 运行，但应用容器本身继续使用普通用户和只读根文件系统。
 
+## 普通安装器的升级与恢复
+
+v1.7.0 起，运行 `scripts/nas-ai wizard` 可打开临时浏览器维护界面，或运行
+`scripts/nas-ai update` 下载并校验官方正式版。压缩包安装同样支持升级。
+旧版本首次迁移见 README 的 `install-ai-space.sh --upgrade` 入口。
+
+升级前保存程序副本和数据备份，启动与就绪检查未通过时尝试回退程序。
+`rollback` 只回退程序，不把用户后续新增的资料或数据库一并回退。
+完整素材方案的 `restore recovery-....tar` 会在新数据目录和新向量卷恢复，
+成功后切换；失败返回原位置。旧目录与旧卷保留，完整NAS灾备仍需覆盖原媒体。
+
+上述命令只管理带 `.nas-ai-profile` 的通用安装，手工精简NAS组合不自动迁移。
+下面是手工部署维护流程。
+
 ## 升级
 
 1. 记录当前镜像、Compose 组合、容器状态和 `/api/operations/status`。

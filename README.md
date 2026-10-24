@@ -2,6 +2,8 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
+v1.7.0 将浏览器安装、双模型自动准备、点选目录和统一升级恢复接入公开安装流程。
+
 v1.6.5 增加可选素材优先检索，照片、视频、音频有有效素材候选时无需先等旧文本模型；无候选或不可用时保留原文本回退。原有完整融合检索仍可用。v1.6.4 新增可按媒体库授权、到期和撤销的应用只读密钥，适用于 Jarvis 等服务端调用。此前 v1.6.3 将待处理、停止重试和部分覆盖分开显示，支持管理员单个素材重试，并按实际解码长度记录音轨时间。收尾验收与功能边界见 [验收记录](docs/ACCEPTANCE-v1.6.5.md)。
 
 v1.6.2 新增按需细查视频首尾和候选画面；新处理的视频补采首尾，音轨失败时保留已成功的画面并明确标注部分覆盖。现有索引无需全量重建。视频候选画面核对：在单条视频内搜索抽样画面、预览实际帧并点击跳转。它辅助人工核对，不保证按钮数量、文字或动作先后自动识别正确。普通全库搜索无需额外视觉推理。
@@ -17,49 +19,61 @@ NAS 或 Linux 主机**。建议至少 8 GB 内存；12–16 GB 的使用体验�
 ARM NAS 尚未完成发布验收，不建议直接放入正式资料库。默认只适合可信局域网，
 公网访问需要额外配置 HTTPS 反向代理或 VPN。
 
-## 五分钟完成配置
+## 普通用户安装
 
-下面四条命令通常可在五分钟内完成配置。首次启动还会联网下载固定版本的容器
-镜像和约 2.5 GB 模型，常见网络下可能再需要 10–60 分钟；请为 Docker 存储
-预留至少 15 GB 空间。下载中断时重新运行 `scripts/nas-ai start`，已有镜像
-分层和模型文件会继续复用或续传。
+第一次使用请看 [新手指南](docs/GETTING-STARTED.md)，包括安装、第一次搜索、成员使用与维护。
+
+需要 x86-64 NAS/Linux、Docker Engine、Docker Compose v2、Python 3 和网络连接。
+完整素材方案建议 12–16 GB 内存，8 GB 设备可选轻量文字方案；预留至少 15 GB 磁盘。
+首次下载容器和模型通常需要10–60分钟，网络慢时更久。
+
+下载正式版安装入口并运行一次（不要在正在使用的安装目录执行新安装）：
 
 ```bash
-git clone https://github.com/hongjiahao371-pixel/nas-ai-space.git
-cd nas-ai-space
-scripts/nas-ai setup
-scripts/nas-ai doctor
-scripts/nas-ai start
+curl -fL https://raw.githubusercontent.com/hongjiahao371-pixel/nas-ai-space/v1.7.0/install.sh -o install-ai-space.sh
+bash install-ai-space.sh
 ```
 
-安装向导会自动检测 CPU/GPU 和内存，询问媒体、上传、回收三个相互独立的
-目录，生成随机
-系统 Token，记录当前 NAS 账号的 UID/GID，并保存合适的 Compose 方案，
-因此应用无需 root 权限也能写入自己的数据目录。启动完成后访问
-`http://NAS-IP:8766`，按照页面向导设置首位管理员。
-如果 NAS 只允许管理员操作 Docker，脚本会自动切换到 `sudo docker` 并在
-需要时请求当前 NAS 账号的 sudo 密码。
+终端会显示一个临时浏览器链接。打开后选择NAS资料文件夹、检索方案和端口，
+点击“开始安装”。完整方案自动准备 Qwen 和 Google 素材模型并校验文件，下载
+中断可点击“继续启动 / 重试下载”。页面就绪后点击“打开 AI Space”，创建管理员账号，
+再按四步引导点选文件夹、扫描、准备AI索引和完成第一次搜索。
 
-没有 Git 的 NAS 可以下载 Release 页面中的版本化 `tar.gz` 和
-`SHA256SUMS`，校验后解压：
+安装向导仅用于可信局域网，链接相当于临时管理钥匙，请勿转发。
+终端保持打开，完成后按 Ctrl+C 关闭；空闲1小时自动退出。日常访问使用应用地址，
+不需要一直开着安装向导。若 Docker 要求管理员权限，首次在终端完成授权。
+
+也可下载 [正式发布包](https://github.com/hongjiahao371-pixel/nas-ai-space/releases)，解压后运行：
 
 ```bash
-VERSION=v1.6.5
-curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/nas-ai-space-${VERSION}.tar.gz"
-curl -fLO "https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/${VERSION}/SHA256SUMS"
-sha256sum -c SHA256SUMS
-tar -xzf "nas-ai-space-${VERSION}.tar.gz"
+VERSION=v1.7.0
 cd "nas-ai-space-${VERSION}"
-scripts/nas-ai setup
+scripts/nas-ai wizard
 ```
 
-遇到问题先执行 `scripts/nas-ai doctor`；它会检查 Docker、目录权限、端口、
-内存、Docker 存储空间、镜像/模型仓库、预构建镜像、硬件设备和最终 Compose
-配置。部分 NAS 的校验命令名是 `shasum -a 256`，可用
-`shasum -a 256 -c SHA256SUMS` 替代上面的 `sha256sum`。
+熟悉命令行的用户仍可使用 `scripts/nas-ai setup`、`doctor`、`start`。
+`setup --search media` 启用完整素材检索；`--search text` 使用轻量文字检索。
+完整方案默认在12GB以上设备推荐；两种方案都保留同一套账号与资料界面。
 
-> 当前默认部署面向可信局域网。远程访问请使用 NAS 反向代理或 VPN，并启用
-> HTTPS；不要把 8766 端口直接映射到公网。
+### 以后如何升级和恢复
+
+v1.6.x及更早的压缩包安装，先下载上面的新版安装入口，再运行：
+
+```bash
+bash install-ai-space.sh --upgrade --directory /path/to/existing-ai-space
+```
+
+这里填写已有AI Space安装目录，配置和资料会保留。完成首次升级后，
+在原安装目录运行 `scripts/nas-ai wizard`，可点击升级、备份、程序回退或恢复。
+也可使用 `scripts/nas-ai update`。Git克隆与压缩包安装采用相同的官方发布包校验流程，
+先备份后升级；失败会尝试恢复旧程序，升级前数据备份保留。自改源码必须先保存。
+升级不会擅自更换已有检索方案；在维护向导展开“更换检索方案”，可开启完整素材检索或切回轻量文字方案，已有索引和资料保留。
+
+完整素材方案恢复时选择 `recovery-*.tar`；系统先校验并备份当前状态，再把数据库与
+两个向量集合恢复到独立的新位置，旧数据和旧向量卷保留。备份不包含原始照片、
+视频、上传内容或模型，请同时使用NAS备份工具保护这些目录。
+
+远程访问请通过 VPN 或 HTTPS 反向代理，应用端口和临时安装向导不要直接暴露到公网。
 
 ## v1.4 开源首发
 
@@ -199,12 +213,13 @@ scripts/nas-ai status          # 容器与应用健康状态
 scripts/nas-ai logs app        # 查看应用日志
 scripts/nas-ai backup          # SQLite 在线备份
 scripts/nas-ai restore 文件名  # 恢复 SQLite 并修复向量一致性
-scripts/nas-ai update          # 先备份，再安全拉取和重建
+scripts/nas-ai update          # 校验正式发布包、备份并升级
+scripts/nas-ai rollback        # 恢复上次升级前程序
 scripts/nas-ai stop            # 停止服务但保留数据
 scripts/nas-ai uninstall       # 移除容器，保留全部数据与模型
 ```
 
-`restore` 只接受 `data/backups` 中由系统生成并通过完整性检查的 `.db` 文件。
+轻量方案 `restore` 接受系统生成并通过完整性检查的 `.db` 文件；完整素材方案使用 `recovery-*.tar` 恢复两个索引。
 恢复前会再次备份当前数据库，恢复后自动提交 Qdrant 一致性修复。`uninstall`
 不会使用 `docker compose down -v`，以后重新执行 `start` 即可恢复服务；彻底
 清除数据应先按 [生产运行手册](docs/PRODUCTION.md) 完成备份，再逐项删除。
@@ -250,7 +265,7 @@ llama.cpp/Qdrant 运行文件和自定义基础镜像的高级精简栈，不能
 |---|---|---:|
 | 中文/多语言向量 | `qwen3-embedding:0.6b` | 639 MB |
 | 搜索精准重排 | `qwen3:0.6b` Q8 | 639 MB |
-| 图片、视频帧、问答 | `qwen3-vl:2b` | 1.9 GB |
+| 图片、视频帧、问答 | `qwen3-vl:2b-instruct-q4_K_M` | 1.9 GB |
 | 语音转写 | `Systran/faster-whisper-small` | 约 500 MB |
 | 人脸检测 | OpenCV Zoo YuNet | 233 KB |
 | 人脸特征 | OpenCV Zoo SFace | 36.9 MB |

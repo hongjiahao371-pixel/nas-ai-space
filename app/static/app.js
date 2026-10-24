@@ -459,6 +459,41 @@ function statsCard(label, value, note, iconName) {
   return `<article class="stat-card"><span class="stat-icon">${icon(iconName)}</span><div class="stat-copy"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(note)}</span></div></article>`;
 }
 
+let libraryFolderState = { path: '', parent: null, label: '', next_offset: null };
+async function browseLibraryFolder(path = '', offset = 0) {
+  const list = $('#libraryFolderList');
+  if (!offset) list.textContent = '正在读取文件夹…';
+  try {
+    const data = await api(`/api/libraries/folders?path=${encodeURIComponent(path)}&offset=${offset}`);
+    libraryFolderState = data;
+    $('#libraryFolderLocation').textContent = data.label;
+    $('#libraryFolderUp').disabled = data.parent === null;
+    $('#libraryFolderChoose').disabled = !data.path;
+    $('#libraryFolderMore').hidden = data.next_offset === null;
+    if (!offset) list.replaceChildren();
+    data.folders.forEach(folder => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'secondary'; button.textContent = folder.name;
+      button.addEventListener('click', () => browseLibraryFolder(folder.path));
+      list.append(button);
+    });
+    if (!list.children.length) list.textContent = '没有子文件夹，可以直接选择当前文件夹。';
+  } catch (error) { list.textContent = error.message; }
+}
+function openLibraryPicker() {
+  openModal($('#libraryModal'));
+  browseLibraryFolder();
+}
+$('#libraryFolderRoots').addEventListener('click', () => browseLibraryFolder());
+$('#libraryFolderUp').addEventListener('click', () => browseLibraryFolder(libraryFolderState.parent || ''));
+$('#libraryFolderMore').addEventListener('click', () => browseLibraryFolder(libraryFolderState.path, libraryFolderState.next_offset));
+$('#libraryFolderChoose').addEventListener('click', () => {
+  if (!libraryFolderState.path) return;
+  $('#libraryForm').elements.path.value = libraryFolderState.path;
+  $('#librarySelectedFolder').value = libraryFolderState.label;
+  if (!$('#libraryForm').elements.name.value) $('#libraryForm').elements.name.value = libraryFolderState.label.split('/').pop();
+});
+
 function renderOnboarding() {
   const panel = $('#onboardingPanel');
   if (!panel) return;
@@ -471,9 +506,9 @@ function renderOnboarding() {
   const semanticReady = Number(state.dashboard?.files?.semantic_ready || 0);
   const searched = localStorage.getItem('nasAiFirstSearchDone') === '1';
   const steps = [
-    { key: 'library', done: sources.length > 0, title: '连接资料目录', note: '添加 NAS 上已经挂载到容器内的只读目录' },
+    { key: 'library', done: sources.length > 0, title: '连接资料目录', note: '从已授权的资料文件夹中点选，无需填写路径' },
     { key: 'scan', done: total > 0, title: '快速扫描', note: '先读取文件名、格式、时间和基础元数据' },
-    { key: 'index', done: semanticReady > 0, title: '建立 AI 索引', note: '在任务中心按设备资源分批生成描述和向量' },
+    { key: 'index', done: semanticReady > 0, title: '建立 AI 索引', note: '让AI逐步读懂资料；准备期间也能按文件名搜索' },
     { key: 'search', done: searched, title: '完成第一次搜索', note: '用自然语言确认本地资料可以被找回' },
   ];
   const complete = steps.every(step => step.done);
@@ -485,7 +520,7 @@ function renderOnboarding() {
     <div class="onboarding-copy">
       <span class="eyebrow">首次使用</span>
       <h2>四步建立你的本地 AI 空间</h2>
-      <p>原始资料保持只读；先扫描元数据，再按设备资源逐步建立 AI 索引。</p>
+      <p>先添加资料，再开始搜索。AI会逐步准备内容检索，资料较多时需要一些时间。</p>
     </div>
     <div class="onboarding-steps">${steps.map((step, index) => `
       <button class="onboarding-step ${step.done ? 'done' : ''} ${next === step.key ? 'next' : ''}" data-onboarding="${step.key}" ${step.done ? 'disabled' : ''}>
@@ -2879,7 +2914,7 @@ document.addEventListener('click', async event => {
       renderOnboarding();
       return;
     }
-    if (action === 'library') return openModal($('#libraryModal'));
+    if (action === 'library') return openLibraryPicker();
     if (action === 'scan') return $('#globalScan').click();
     if (action === 'index') return showView('tasks');
     if (action === 'search') return showView('search');
@@ -3224,7 +3259,7 @@ document.addEventListener('click', async event => {
     } catch (error) { toast(error.message, true); }
     return;
   }
-  if (event.target.closest('#addLibrary')) return openModal($('#libraryModal'));
+  if (event.target.closest('#addLibrary')) return openLibraryPicker();
   if (event.target.matches('[data-close]') || event.target.classList.contains('modal')) {
     const modal = event.target.closest('.modal');
     if (modal?.id === 'tokenModal' && state.bootstrapRequired) return;
@@ -4863,6 +4898,7 @@ async function boot() {
     $('.service-card').classList.add('ok');
     $('#serviceStatus').textContent = '本地服务在线';
     state.bootstrapRequired = Boolean(health.bootstrap_required);
+    $('#tokenAdvanced').hidden = state.bootstrapRequired;
     if (state.bootstrapRequired) {
       state.user = null;
       applyRole();

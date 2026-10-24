@@ -7,7 +7,8 @@ cd "$PROJECT_DIR"
 required=(
   LICENSE THIRD_PARTY_NOTICES.md SECURITY.md CONTRIBUTING.md CHANGELOG.md
   README.md .env.example requirements.txt requirements.lock.txt
-  scripts/nas-ai
+  scripts/nas-ai scripts/manage.py scripts/setup-web.py scripts/setup.html install.sh
+  compose.media.yml docker/multimodal-runtime.Dockerfile docker/prepare-multimodal.py
 )
 for path in "${required[@]}"; do
   [ -s "$path" ] || { printf 'Missing required release file: %s\n' "$path" >&2; exit 1; }
@@ -23,7 +24,7 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
 else
   release_files=$(find . -type f -print | sed 's#^\./##')
 fi
-if printf '%s\n' "$release_files" | grep -Eq '(^|/)\.env$|\.(db|sqlite|sqlite3)$|(^|/)(uploads|recycle|runtime)/'; then
+if printf '%s\n' "$release_files" | grep -Eq '(^|/)\.env$|\.(db|sqlite|sqlite3)$|(^|/)(uploads|recycle|runtime)/|^(data|library)/'; then
   printf 'Tracked runtime data or secret configuration detected.\n' >&2
   exit 1
 fi
