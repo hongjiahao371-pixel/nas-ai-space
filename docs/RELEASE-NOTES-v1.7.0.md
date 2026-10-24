@@ -8,4 +8,4 @@
 - 完整素材方案从协调恢复包恢复到新数据目录和新向量卷，保留恢复前数据。
 - 原始媒体仍由NAS备份保护。CPU与Intel x86-64为本轮验收目标；其他硬件不因配置存在而自动成为已验收平台。
 
-本轮现场结果见 ACCEPTANCE-v1.7.0.md；未完成的验证不得写作通过。
+详细现场结果与边界见 [验收记录](https://github.com/hongjiahao371-pixel/nas-ai-space/blob/main/docs/ACCEPTANCE-v1.7.0.md)。第一次安装请看 [新手指南](https://github.com/hongjiahao371-pixel/nas-ai-space/blob/main/docs/GETTING-STARTED.md)。
