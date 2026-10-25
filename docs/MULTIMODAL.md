@@ -66,3 +66,12 @@ Official references:
 - https://huggingface.co/google/embeddinggemma-2
 - https://huggingface.co/ggml-org/embeddinggemma-2-GGUF
 - https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+# v1.7.1 查询加速说明
+
+素材方案新增内部 `multimodal-query` 服务。它复用同一份 768 维模型和相同查询前缀，不加载图像、音轨投影器；约 280 MiB 权重锁在内存，进程内存和交换总上限均为 768 MiB。无需重新生成素材向量或改变备份优先级。容器没有宿主端口、额外能力或原始媒体写权限。
+
+`NAS_AI_MULTIMODAL_QUERY_URL` 未配置时仍使用原模型服务。配置后，常规文字检索走独立服务；超过保守字节预算的文字保留原通道。图片和音轨继续走原多模态服务。查询服务不可用时保留原检索回退。
+
+启动时为现有集合补齐 `kind`、`library_id`、`file_id` 筛选索引，新集合在第一次写入时创建；仅建立属性查找结构，不修改向量和素材。兼容索引直接复用，冲突类型不会被覆盖。机制见 [Qdrant 筛选索引说明](https://qdrant.tech/documentation/manage-data/indexing/)。
+
+回退程序前可清空 `NAS_AI_MULTIMODAL_QUERY_URL` 并停用独立查询服务；属性索引兼容旧程序，无需删除或重新索引。备份恢复仍使用原双索引恢复流程。

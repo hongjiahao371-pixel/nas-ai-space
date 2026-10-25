@@ -4,6 +4,9 @@ import math
 import logging
 import re
 import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.database import Database
@@ -11,6 +14,23 @@ from app.services.local_ai import LocalAIClient
 from app.services.vectors import VectorStore
 
 logger = logging.getLogger(__name__)
+
+# Bound outstanding work as well as threads: do not pile up background reads
+# when the NAS is busy. Saturation uses the existing sequential path.
+_MEDIA_READERS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="media-search")
+_MEDIA_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _prefetch_media(call):
+    if not _MEDIA_SLOTS.acquire(blocking=False):
+        return None
+    try:
+        future = _MEDIA_READERS.submit(call)
+    except BaseException:
+        _MEDIA_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _: _MEDIA_SLOTS.release())
+    return future
 
 
 SYNONYMS = {
@@ -346,6 +366,8 @@ class SearchService:
         filter_sql: tuple[str, list[Any]] | None = None,
         media_first: bool = False,
     ) -> dict[str, Any]:
+        started = time.monotonic()
+        timings: dict[str, float] = {}
         page_size = max(1, limit)
         offset = max(0, offset)
         candidate_limit = max(80, min(1000, (page_size + offset) * 5))
@@ -360,6 +382,33 @@ class SearchService:
         snippets: dict[int, str] = {}
         match_times: dict[int, float] = {}
         sources: dict[int, set[str]] = {}
+        semantic_requested = bool(semantic)
+        prefer_media = bool(media_first and semantic_requested and kind in {'image','video','audio'}
+                            and self.multimodal and self.multimodal.enabled)
+
+        def fetch_media():
+            begin = time.monotonic()
+            try:
+                media_filter = sorted(allowed_file_ids) if allowed_file_ids is not None else None
+                if media_filter is None and filter_sql is not None:
+                    clause, params = filter_sql
+                    media_filter = [int(row["id"]) for row in self.database.fetchall(
+                        f"SELECT f.id FROM files f WHERE {clause}", params)]
+                hits = []
+                if media_filter is None:
+                    hits = self.multimodal.search(query, candidate_limit, kind, library_ids)
+                else:
+                    for start in range(0, len(media_filter), 2000):
+                        hits.extend(self.multimodal.search(
+                            query, candidate_limit, kind, library_ids, media_filter[start:start + 2000]))
+                return hits, media_filter
+            finally:
+                timings['media_ms'] = round((time.monotonic() - begin) * 1000, 2)
+
+        # Only overlap independent text/vector reads in the existing media-first
+        # mode. Candidate merging and ranking retain their original order.
+        media_future = _prefetch_media(fetch_media) if prefer_media else None
+        lexical_started = time.monotonic()
         # 唯一的 LIKE 兜底挂在第一组上：词取原始查询 + 全部组的别名，
         # 后续各组（allow_like=False）不再各自触发全表模糊扫描。
         fallback_terms = [query, *(alias for group in groups for alias in group)]
@@ -393,11 +442,12 @@ class SearchService:
                         next((alias for group in groups for alias in group if alias in (row["ai_caption"] or text)), query),
                     )
 
+        timings['lexical_ms'] = round((time.monotonic() - lexical_started) * 1000, 2)
+
         semantic_used = False
         semantic_scores: dict[int, float] = {}
         multimodal_scores: dict[int, float] = {}
         multimodal_used = False
-        semantic_requested = bool(semantic)
         def add_qwen_candidates():
             nonlocal allowed_file_ids, semantic_used
             if semantic_requested and self.ai.settings.embedding_base_url and self.ai.settings.embedding_model:
@@ -459,25 +509,12 @@ class SearchService:
                 except Exception:
                     semantic_used = False
 
-        prefer_media = bool(media_first and semantic_requested and kind in {'image','video','audio'}
-                            and self.multimodal and self.multimodal.enabled)
         if not prefer_media:
             add_qwen_candidates()
 
         if semantic_requested and self.multimodal and self.multimodal.enabled:
             try:
-                media_filter = sorted(allowed_file_ids) if allowed_file_ids is not None else None
-                if media_filter is None and filter_sql is not None:
-                    clause, params = filter_sql
-                    media_filter = [int(row["id"]) for row in self.database.fetchall(
-                        f"SELECT f.id FROM files f WHERE {clause}", params)]
-                media_hits = []
-                if media_filter is None:
-                    media_hits = self.multimodal.search(query, candidate_limit, kind, library_ids)
-                else:
-                    for start in range(0, len(media_filter), 2000):
-                        media_hits.extend(self.multimodal.search(
-                            query, candidate_limit, kind, library_ids, media_filter[start:start + 2000]))
+                media_hits, media_filter = media_future.result() if media_future is not None else fetch_media()
                 prefetched = self._files_by_ids([int(hit["payload"]["file_id"]) for hit in media_hits])
                 media_allowed = set(media_filter) if media_filter is not None else None
                 best_media = {}
@@ -682,6 +719,7 @@ class SearchService:
             })
         return {
             "query": query,
+            "timings_ms": {**timings, "total_ms": round((time.monotonic() - started) * 1000, 2)},
             "semantic": semantic_used,
             "multimodal": multimodal_used,
             "retrieval_strategy": "media_first" if prefer_media and multimodal_used else "hybrid_fallback" if prefer_media else "hybrid",

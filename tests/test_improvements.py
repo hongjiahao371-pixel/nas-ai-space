@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json,sqlite3,tarfile,tempfile,unittest,subprocess,shutil,io,time
+import hashlib,json,sqlite3,tarfile,tempfile,unittest,subprocess,shutil,io,time,sys,threading
 from pathlib import Path
 from dataclasses import replace
 from unittest.mock import Mock,patch
@@ -49,6 +49,45 @@ class ImprovementsTests(unittest.TestCase):
    self.assertEqual(two.wait_reason(),'')
    with one._state() as db:db.execute("INSERT INTO interactive_requests VALUES ('expired',?)",(time.time()-1,))
    self.assertEqual(two.wait_reason(),'')
+ def test_query_does_not_wait_on_index_database_writer(self):
+  service=self.service()
+  with service._state():pass
+  writer=sqlite3.connect(service.state_path,timeout=.1)
+  writer.execute('BEGIN IMMEDIATE')
+  try:
+   service.embed=Mock(return_value=[1.0]+[0.0]*(DIMENSION-1))
+   with patch.object(service,'_state',side_effect=AssertionError('interactive query must not write the state DB')):
+    vector=service.query_embedding('a new uncached query')
+   self.assertEqual(len(vector),DIMENSION)
+   service.embed.assert_called_once()
+  finally:writer.rollback();writer.close()
+ def test_cached_query_is_not_blocked_by_unrelated_model_request(self):
+  service=self.service();vector=[1.0]+[0.0]*(DIMENSION-1)
+  service._cache['cached']=(time.monotonic(),vector)
+  returned=threading.Event();results=[]
+  def query():results.append(service.query_embedding('cached'));returned.set()
+  service._gate.acquire();worker=threading.Thread(target=query)
+  try:
+   worker.start();self.assertTrue(returned.wait(1),'cache lookup waited for the inference lock')
+  finally:service._gate.release();worker.join(timeout=2)
+  self.assertEqual(results,[vector]);self.assertIsNot(results[0],vector)
+ def test_shared_interactive_lock_survives_nested_readers_and_releases_on_failure(self):
+  one,two=self.service(),self.service()
+  with one.interactive_request():
+   with two.interactive_request():self.assertTrue(one._interactive_active())
+   self.assertTrue(two._interactive_active())
+  self.assertFalse(two._interactive_active())
+  with self.assertRaises(RuntimeError):
+   with one.interactive_request():raise RuntimeError('failed model')
+  self.assertFalse(two._interactive_active())
+ def test_interactive_process_crash_releases_lock_without_expiry_wait(self):
+  code="from app.config import settings; from dataclasses import replace; from pathlib import Path; from app.services.multimodal import MultimodalService; import sys,time; s=MultimodalService(replace(settings,data_dir=Path(sys.argv[1]))); c=s.interactive_request(); c.__enter__(); print('locked',flush=True); time.sleep(20)"
+  child=subprocess.Popen([sys.executable,'-c',code,str(self.data)],stdout=subprocess.PIPE,text=True)
+  try:
+   self.assertEqual(child.stdout.readline().strip(),'locked')
+   self.assertTrue(self.service()._interactive_active())
+  finally:child.terminate();child.wait(timeout=5);child.stdout.close()
+  self.assertFalse(self.service()._interactive_active())
  def test_pause_persists_across_service_instances(self):
   self.service().set_policy({'paused':True,'order':'oldest'})
   self.assertEqual(self.service().run_batch()['waiting'],'paused')
@@ -105,6 +144,31 @@ class ImprovementsTests(unittest.TestCase):
     if m.name=='vectors-0.snapshot':data=b'corrupt';m.size=len(data)
     archive.addfile(m,io.BytesIO(data))
   with self.assertRaises(ValueError):recovery.verify(name)
+ def test_recovery_verifies_without_default_tmpfs_or_extracted_snapshots(self):
+  recovery=self.make_recovery();name=recovery.create()['name']
+  from app.services.recovery import verify_sqlite
+  checked=[]
+  def check(path):
+   self.assertFalse(list(Path(path).parent.glob('*.snapshot')))
+   verify_sqlite(path);checked.append(Path(path).name)
+  with patch('tempfile.tempdir',str(self.root/'unavailable-tmpfs')),patch('app.services.recovery.verify_sqlite',side_effect=check):
+   self.assertTrue(recovery.verify(name)['verified'])
+  self.assertEqual(set(checked),{'main.db','multimodal.db'})
+  self.assertFalse(list(recovery.directory.glob('.verify-*')))
+ def test_snapshot_copy_fallback_for_cross_filesystem_backups(self):
+  recovery=self.make_recovery()
+  with patch('app.services.recovery.os.link',side_effect=OSError('cross-device link')):
+   name=recovery.create()['name']
+  self.assertTrue(recovery.verify(name)['verified'])
+ def test_streaming_verification_checks_snapshot_bytes_not_only_size(self):
+  recovery=self.make_recovery();name=recovery.create()['name'];path=recovery._bundle(name)
+  with tarfile.open(path) as archive:entries=[(m,archive.extractfile(m).read()) for m in archive.getmembers()]
+  with tarfile.open(path,'w') as archive:
+   for m,data in entries:
+    if m.name=='vectors-0.snapshot':data=bytes([data[0]^1])+data[1:]
+    archive.addfile(m,io.BytesIO(data))
+  with self.assertRaises(ValueError):recovery.verify(name)
+  self.assertFalse(list(recovery.directory.glob('.verify-*')))
  def test_recovery_refuses_live_destination(self):
   recovery=self.make_recovery();name=recovery.create()['name']
   with self.assertRaises(ValueError):recovery.restore_to(name,self.data,self.cfg.qdrant_url)

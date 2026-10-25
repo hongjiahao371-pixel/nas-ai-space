@@ -2,7 +2,7 @@
 # Qwen/vision/speech/Qdrant services and their runtime mounts are preserved.
 services:
   app:
-    image: nas-ai-space:1.6.5
+    image: nas-ai-space:1.7.1
     build:
       context: .
       dockerfile: Dockerfile.multimodal-app
@@ -12,6 +12,7 @@ services:
       NAS_AI_NOTIFICATION_WEBHOOK_URL: ${NAS_AI_NOTIFICATION_WEBHOOK_URL:-}
       NAS_AI_MULTIMODAL_ENABLED: "true"
       NAS_AI_MULTIMODAL_URL: http://multimodal:8080
+      NAS_AI_MULTIMODAL_QUERY_URL: http://multimodal-query:8080
       NAS_AI_MULTIMODAL_COLLECTION: nas_ai_media_gemma2_q8_v1
       NAS_AI_MULTIMODAL_MIN_SCORE: ${NAS_AI_MULTIMODAL_MIN_SCORE:-0.12}
 
@@ -69,8 +70,37 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
+  multimodal-query:
+    image: ${NAS_AI_MULTIMODAL_RUNTIME_IMAGE:-nas-ai-llamacpp:local}
+    restart: unless-stopped
+    entrypoint: ["/opt/gemma-runtime/llama-server"]
+    command: ["--model", "/models/embeddinggemma-2-Q8_0.gguf", "--alias", "embeddinggemma2", "--host", "0.0.0.0", "--port", "8080", "--embedding", "--pooling", "mean", "--parallel", "1", "--ctx-size", "2048", "--batch-size", "2048", "--ubatch-size", "2048", "--threads", "2", "--threads-batch", "2", "--n-gpu-layers", "0", "--load-mode", "mmap+mlock"]
+    environment:
+      LD_LIBRARY_PATH: /opt/gemma-runtime
+    volumes:
+      - ./runtime/embeddinggemma2/llama-b11480:/opt/gemma-runtime:ro
+      - ./runtime/embeddinggemma2:/models:ro
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 2.0
+    ulimits:
+      memlock: {soft: 536870912, hard: 536870912}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
   multimodal-indexer:
-    image: nas-ai-space:1.6.5
+    image: nas-ai-space:1.7.1
     restart: unless-stopped
     entrypoint: []
     command: ["python", "-m", "app.services.multimodal_worker"]

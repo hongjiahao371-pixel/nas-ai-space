@@ -102,10 +102,28 @@ def unpack_runtime(archive, target):
             source.replace(target / source.name)
 
 
+def query_command(root):
+    return [str(root / 'runtime/llama-server'), '--model', str(root / 'embeddinggemma-2-Q8_0.gguf'),
+        '--alias', 'embeddinggemma2', '--host', '0.0.0.0', '--port', '8080', '--embedding', '--pooling', 'mean',
+        '--parallel', '1', '--ctx-size', '2048', '--batch-size', '2048', '--ubatch-size', '2048',
+        '--threads', '2', '--threads-batch', '2', '--n-gpu-layers', '0', '--load-mode', 'mmap+mlock']
+
+
 def main():
     root = Path('/models')
     root.mkdir(parents=True, exist_ok=True)
     manifest = json.loads(Path('/opt/manifest.json').read_text())
+    if os.getenv('NAS_AI_MEDIA_MODE') == 'query':
+        # Compose starts us after the full runtime has verified its shared assets.
+        # Read only: never download or unpack into another running server's volume.
+        name = 'embeddinggemma-2-Q8_0.gguf'
+        spec = manifest['files'][name]
+        model = root / name
+        if model.stat().st_size != spec['size'] or digest(model) != spec['sha256']:
+            raise ValueError('查询模型校验失败，请检查素材模型服务')
+        command = query_command(root)
+        os.execv(command[0], command)
+        return
     for name, spec in manifest['files'].items():
         url = f"https://huggingface.co/{manifest['model_repo']}/resolve/{manifest['model_revision']}/{name}"
         download(url, root / name, spec['sha256'], spec['size'])

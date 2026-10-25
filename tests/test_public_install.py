@@ -53,6 +53,14 @@ class ReleaseInstallTests(unittest.TestCase):
         checks.write_text(manager.sha(archive) + '  nas-ai-space-v1.7.0.tar.gz\n')
         return archive, checks
 
+    def test_query_runtime_reuses_same_model_without_media_projector(self):
+        command = runtime.query_command(Path('/models'))
+        self.assertIn('/models/embeddinggemma-2-Q8_0.gguf', command)
+        self.assertNotIn('--mmproj', command)
+        self.assertEqual(command[command.index('--load-mode') + 1], 'mmap+mlock')
+        self.assertEqual(command[command.index('--parallel') + 1], '1')
+        self.assertEqual(command[command.index('--pooling') + 1], 'mean')
+
     def test_valid_archive_preserves_executable(self):
         archive, checks = self.bundle()
         names = manager.unpack_release(archive, self.root / 'stage', 'v1.7.0', checks)

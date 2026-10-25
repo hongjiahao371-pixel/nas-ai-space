@@ -77,7 +77,11 @@ class RecoveryService:
                         response.raise_for_status();info=response.json()['result']
                         snapshot=store.create_snapshot(self.settings.automatic_backup_retention)
                         file_name=f'vectors-{index}.snapshot'
-                        shutil.copyfile(store.settings.vector_backup_dir/snapshot['name'],staging/file_name)
+                        source_snapshot=store.settings.vector_backup_dir/snapshot['name']
+                        # Snapshots are immutable. A same-filesystem hard link
+                        # avoids copying the whole index before archiving it.
+                        try:os.link(source_snapshot,staging/file_name)
+                        except OSError:shutil.copyfile(source_snapshot,staging/file_name)
                         manifest['collections'][collection]={'file':file_name,'points':info['points_count'],
                             'vectors':info['config']['params']['vectors']}
                     for p in staging.iterdir():
@@ -105,17 +109,26 @@ class RecoveryService:
         if not p.is_file():raise FileNotFoundError('恢复包不存在')
         return p
 
+    @staticmethod
+    def _manifest(archive):
+        members=archive.getmembers()
+        if (len(members)>10 or len({m.name for m in members})!=len(members)
+                or any(not m.isfile() or Path(m.name).name!=m.name or m.size>4*1024**3 for m in members)):
+            raise ValueError('恢复包包含不安全条目')
+        raw=archive.extractfile('manifest.json')
+        if raw is None:raise ValueError('缺少恢复清单')
+        manifest=json.loads(raw.read(1024*1024))
+        if manifest.get('schema')!=1 or set(m.name for m in members)!={'manifest.json',*manifest['files']}:
+            raise ValueError('恢复清单与文件不一致')
+        if 'main.db' not in manifest['files']:raise ValueError('恢复包缺少主数据库')
+        for spec in manifest['collections'].values():
+            if not spec.get('absent') and spec.get('file') not in manifest['files']:
+                raise ValueError('恢复清单缺少向量文件')
+        return manifest,members
+
     def unpack_verified(self,name,directory):
         with tarfile.open(self._bundle(name),'r') as archive:
-            members=archive.getmembers()
-            if len(members)>10 or any(not m.isfile() or Path(m.name).name!=m.name or m.size>4*1024**3 for m in members):
-                raise ValueError('恢复包包含不安全条目')
-            raw=archive.extractfile('manifest.json')
-            if raw is None:raise ValueError('缺少恢复清单')
-            manifest=json.loads(raw.read(1024*1024))
-            if manifest.get('schema')!=1 or set(m.name for m in members)!={'manifest.json',*manifest['files']}:
-                raise ValueError('恢复清单与文件不一致')
-            if 'main.db' not in manifest['files']:raise ValueError('恢复包缺少主数据库')
+            manifest,members=self._manifest(archive)
             for m in members:
                 if m.name=='manifest.json':continue
                 with archive.extractfile(m) as source,(directory/m.name).open('wb') as dest:
@@ -130,8 +143,25 @@ class RecoveryService:
             return manifest
 
     def verify(self,name):
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest=self.unpack_verified(name,Path(tmp))
+        # The container's /tmp can be a 256 MiB tmpfs, smaller than a recovery
+        # bundle. Stream snapshot hashes; only SQLite files require disk copies.
+        self.directory.mkdir(parents=True,exist_ok=True)
+        with tarfile.open(self._bundle(name),'r') as archive, tempfile.TemporaryDirectory(
+                dir=self.directory,prefix='.verify-') as tmp:
+            manifest,members=self._manifest(archive)
+            for member in members:
+                if member.name=='manifest.json':continue
+                spec=manifest['files'][member.name]
+                if member.size!=spec['bytes']:raise ValueError('恢复包校验不匹配')
+                database=Path(tmp)/member.name if member.name.endswith('.db') else None
+                with archive.extractfile(member) as source, (database.open('wb') if database else nullcontext()) as dest:
+                    h=hashlib.sha256();size=0
+                    for block in iter(lambda:source.read(1024*1024),b''):
+                        h.update(block);size+=len(block)
+                        if dest is not None:dest.write(block)
+                if size!=spec['bytes'] or h.hexdigest()!=spec['sha256']:raise ValueError('恢复包校验不匹配')
+                if database:
+                    database.chmod(0o600);verify_sqlite(database);database.unlink()
         return {'name':name,'verified':True,'collections':manifest['collections'],'created_at':manifest['created_at']}
 
     def restore_to(self,name,target:Path,qdrant_url:str,prefix:str=''):

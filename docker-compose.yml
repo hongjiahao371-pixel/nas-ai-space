@@ -6,7 +6,7 @@ services:
       context: .
       args:
         HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
-    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0}
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1}
     restart: unless-stopped
     ports:
       - "${NAS_AI_PORT:-8766}:8000"

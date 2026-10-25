@@ -36,6 +36,26 @@ class VectorStore:
         except Exception as exc:
             return {"reachable": False, "error": str(exc)}
 
+    def ensure_filter_indexes(self) -> dict[str, str]:
+        """Prepare exact filter lookups without altering any points or vectors."""
+        client = self._http()
+        url = f"{self.settings.qdrant_url}/collections/{self.settings.qdrant_collection}"
+        response = client.get(url, timeout=10)
+        if response.status_code == 404:
+            return {}
+        response.raise_for_status()
+        schema = response.json()['result'].get('payload_schema', {})
+        fields = {'kind': 'keyword', 'library_id': 'integer', 'file_id': 'integer'}
+        for field, data_type in fields.items():
+            if field in schema:
+                if schema[field].get('data_type') != data_type:
+                    raise RuntimeError(f'筛选字段 {field} 的索引类型不匹配，已保留原索引')
+                continue
+            result = client.put(url + '/index', params={'wait': 'true'},
+                                json={'field_name': field, 'field_schema': data_type}, timeout=120)
+            result.raise_for_status()
+        return fields
+
     def _ensure_collection(self, dimension: int) -> None:
         if self._dimension == dimension:
             return
@@ -69,6 +89,8 @@ class VectorStore:
                     raise RuntimeError(
                         f"向量维度由 {size} 变为 {dimension}，请更换 NAS_AI_QDRANT_COLLECTION 后重新索引"
                     )
+            if response.status_code == 404:
+                self.ensure_filter_indexes()
             self._dimension = dimension
 
     def replace_file(self, file: dict[str, Any], chunks: list[dict[str, Any]]) -> None:

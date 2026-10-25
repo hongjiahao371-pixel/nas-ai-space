@@ -8,6 +8,7 @@ import unittest
 import wave
 import shutil
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -97,6 +98,46 @@ class MultimodalTests(unittest.TestCase):
         self.assertEqual(result['retrieval_strategy'],'media_first')
         self.assertEqual([r['id'] for r in result['results']],[self.file['id']])
         search.ai.embeddings.assert_not_called()
+
+    def test_media_first_overlaps_independent_reads_without_changing_ranking(self):
+        search = self.search([self.hit()])
+        expected = search.search('红色雨伞', kind='image', media_first=True)
+        media_started, lexical_started = threading.Event(), threading.Event()
+        original = search._lexical
+        def media(*args, **kwargs):
+            media_started.set()
+            self.assertTrue(lexical_started.wait(2), 'lexical read did not overlap')
+            return [self.hit()]
+        def lexical(*args, **kwargs):
+            lexical_started.set()
+            self.assertTrue(media_started.wait(2), 'media read did not overlap')
+            return original(*args, **kwargs)
+        search.multimodal.search = media
+        search._lexical = lexical
+        actual = search.search('红色雨伞', kind='image', media_first=True)
+        expected.pop('timings_ms'); actual.pop('timings_ms')
+        self.assertEqual(actual, expected)
+
+    def test_media_prefetch_saturation_keeps_sequential_fallback(self):
+        from app.services.search import _MEDIA_SLOTS
+        search = self.search([self.hit()])
+        for _ in range(4): self.assertTrue(_MEDIA_SLOTS.acquire(timeout=2))
+        try:
+            result = search.search('红色雨伞', kind='image', media_first=True)
+            self.assertEqual([r['id'] for r in result['results']], [self.file['id']])
+        finally:
+            for _ in range(4): _MEDIA_SLOTS.release()
+
+    def test_media_prefetch_failure_preserves_qwen_and_lexical_fallback(self):
+        search = self.search([])
+        search.multimodal.search = Mock(side_effect=RuntimeError('offline'))
+        search.ai.settings = replace(self.cfg, embedding_base_url='http://qwen', embedding_model='qwen')
+        search.ai.embeddings = Mock(return_value=[[0.1]])
+        with self.assertLogs('app.services.search', level='WARNING'):
+            result = search.search('IMG_001', kind='image', media_first=True)
+        self.assertEqual(result['results'][0]['id'], self.file['id'])
+        self.assertEqual(result['retrieval_strategy'], 'hybrid_fallback')
+        search.ai.embeddings.assert_called_once()
 
     def test_media_first_falls_back_to_qwen_on_empty_or_stale_media(self):
         for hits in [[],[self.hit(mtime_ns=1)]]:
@@ -209,6 +250,60 @@ class MultimodalTests(unittest.TestCase):
         self.assertEqual(len(vector), DIMENSION)
         service.query_embedding("红伞")
         self.assertEqual(service._http.post.call_count, 1)
+
+    def test_query_runtime_isolated_from_media_gate_and_media_endpoint(self):
+        service = MultimodalService(replace(self.cfg, multimodal_query_url='http://127.0.0.1:8081'))
+        service._http = Mock()
+        service._http.post.return_value.json.return_value = {'data': [{'embedding': [1.] * DIMENSION}]}
+        with service._gate:
+            worker = threading.Thread(target=service.query_embedding, args=('红伞',), daemon=True)
+            worker.start(); worker.join(2)
+            self.assertFalse(worker.is_alive(), 'query must not wait for media inference')
+        self.assertEqual(service._http.post.call_args.args[0], 'http://127.0.0.1:8081/v1/embeddings')
+        service.embed({'image_url': 'data:image/png;base64,...'})
+        self.assertEqual(service._http.post.call_args.args[0], 'http://127.0.0.1:8080/v1/embeddings')
+
+    def test_long_queries_keep_original_context(self):
+        service = MultimodalService(replace(self.cfg, multimodal_query_url='http://127.0.0.1:8081'))
+        service._http = Mock()
+        service._http.post.return_value.json.return_value = {'data': [{'embedding': [1.] * DIMENSION}]}
+        service.query_embedding('场景' * 400)
+        self.assertEqual(service._http.post.call_args.args[0], 'http://127.0.0.1:8080/v1/embeddings')
+
+    def test_query_runtime_keeps_endpoint_and_vector_validation(self):
+        service = MultimodalService(replace(self.cfg, multimodal_query_url='https://8.8.8.8', allow_cloud_endpoints=False))
+        service._http = Mock()
+        with self.assertRaises(RuntimeError): service.query_embedding('private query')
+        service._http.post.assert_not_called()
+        service = MultimodalService(replace(self.cfg, multimodal_query_url='http://127.0.0.1:8081'))
+        service._http = Mock()
+        service._http.post.return_value.json.return_value = {'data': [{'embedding': [1.] * 1024}]}
+        with self.assertRaises(ValueError): service.query_embedding('red')
+        self.assertFalse(service._cache)
+
+    def test_filter_indexes_only_add_missing_fields_and_never_touch_points(self):
+        from app.services.vectors import VectorStore
+        store = VectorStore(self.cfg); client = Mock(); store._http = Mock(return_value=client)
+        client.get.return_value.status_code = 200
+        client.get.return_value.json.return_value = {'result': {'payload_schema': {'kind': {'data_type': 'keyword'}}}}
+        fields = store.ensure_filter_indexes()
+        self.assertEqual(set(fields), {'kind', 'library_id', 'file_id'})
+        self.assertEqual([c.kwargs['json']['field_name'] for c in client.put.call_args_list], ['library_id', 'file_id'])
+        self.assertTrue(all(c.args[0].endswith('/index') and c.kwargs['params']['wait'] == 'true' for c in client.put.call_args_list))
+        client.post.assert_not_called(); client.delete.assert_not_called()
+        client.put.reset_mock()
+        client.get.return_value.json.return_value = {'result': {'payload_schema': {k: {'data_type': v} for k, v in fields.items()}}}
+        store.ensure_filter_indexes(); client.put.assert_not_called()
+
+    def test_filter_index_preparation_preserves_absent_and_incompatible_collections(self):
+        from app.services.vectors import VectorStore
+        store = VectorStore(self.cfg); client = Mock(); store._http = Mock(return_value=client)
+        client.get.return_value.status_code = 404
+        self.assertEqual(store.ensure_filter_indexes(), {}); client.put.assert_not_called()
+        client.get.return_value.status_code = 200
+        client.get.return_value.json.return_value = {'result': {'payload_schema': {'kind': {'data_type': 'integer'}}}}
+        with self.assertRaises(RuntimeError): store.ensure_filter_indexes()
+        client.put.assert_not_called(); client.delete.assert_not_called()
 
     def test_empty_and_truncated_pcm_are_rejected_before_embedding(self):
         from app.services.media_sampling import validated_audio

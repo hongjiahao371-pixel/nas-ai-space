@@ -104,6 +104,7 @@ class Settings:
     face_match_threshold: float
     multimodal_enabled: bool = False
     multimodal_base_url: str = ""
+    multimodal_query_url: str = ""
     multimodal_collection: str = "nas_ai_media_gemma2_q8_v1"
     multimodal_video_frames: int = 6
     multimodal_audio_segments: int = 12
@@ -226,6 +227,7 @@ class Settings:
             notification_webhook_url=os.getenv("NAS_AI_NOTIFICATION_WEBHOOK_URL", "").strip(),
             multimodal_enabled=_bool_env("NAS_AI_MULTIMODAL_ENABLED", False),
             multimodal_base_url=os.getenv("NAS_AI_MULTIMODAL_URL", "").strip().rstrip("/"),
+            multimodal_query_url=os.getenv("NAS_AI_MULTIMODAL_QUERY_URL", "").strip().rstrip("/"),
             multimodal_collection=os.getenv("NAS_AI_MULTIMODAL_COLLECTION", "nas_ai_media_gemma2_q8_v1").strip(),
             multimodal_video_frames=_int_env("NAS_AI_MULTIMODAL_VIDEO_FRAMES", 6, 1, 12),
             multimodal_audio_segments=_int_env("NAS_AI_MULTIMODAL_AUDIO_SEGMENTS", 12, 1, 60),

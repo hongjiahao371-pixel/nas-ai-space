@@ -4,6 +4,7 @@ services:
     environment:
       NAS_AI_MULTIMODAL_ENABLED: "true"
       NAS_AI_MULTIMODAL_URL: http://multimodal:8080
+      NAS_AI_MULTIMODAL_QUERY_URL: http://multimodal-query:8080
     depends_on:
       multimodal:
         condition: service_started
@@ -11,7 +12,7 @@ services:
     build:
       context: .
       dockerfile: docker/multimodal-runtime.Dockerfile
-    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0-media}
+    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1-media}
     restart: unless-stopped
     environment:
       HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
@@ -32,8 +33,36 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
+  multimodal-query:
+    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1-media}
+    restart: unless-stopped
+    environment:
+      NAS_AI_MEDIA_MODE: query
+    volumes:
+      - media-models:/models:ro
+    depends_on:
+      multimodal:
+        condition: service_healthy
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 2.0
+    ulimits:
+      memlock: {soft: 536870912, hard: 536870912}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
   multimodal-indexer:
-    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.0}
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1}
     restart: unless-stopped
     command: ["python", "-m", "app.services.multimodal_worker"]
     environment:

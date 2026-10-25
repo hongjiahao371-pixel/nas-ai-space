@@ -53,13 +53,16 @@ class MultimodalService:
             vector_backup_dir=settings.vector_backup_dir / "multimodal"))
         self._http = httpx.Client(timeout=httpx.Timeout(180, connect=5))
         self._gate = threading.Lock()
+        self._query_gate = threading.Lock()
+        self._cache_lock = threading.Lock()
         self._cache: dict[str, tuple[float, list[float]]] = {}
         self.state_path = settings.data_dir / "multimodal-index.db"
         self.stopping=lambda:False
 
-    def embed(self, content: Any, timeout: float = 180) -> list[float]:
-        endpoint = LocalAIClient(self.settings)._validate_endpoint(self.settings.multimodal_base_url)
-        with self._gate:
+    def embed(self, content: Any, timeout: float = 180, *, query_only: bool = False) -> list[float]:
+        query_url = self.settings.multimodal_query_url if query_only else ""
+        endpoint = LocalAIClient(self.settings)._validate_endpoint(query_url or self.settings.multimodal_base_url)
+        with self._query_gate if query_url else self._gate:
             response = self._http.post(
                 endpoint + "/v1/embeddings",
                 json={"model": "embeddinggemma2", "input": [content], "encoding_format": "float"},
@@ -72,13 +75,19 @@ class MultimodalService:
             return validate_embedding(data[0]["embedding"])
 
     def query_embedding(self, query: str) -> list[float]:
-        with self._gate:
+        with self._cache_lock:
             cached = self._cache.get(query)
             if cached and time.monotonic() - cached[0] < 600:
                 return list(cached[1])
         with self.interactive_request():
-            vector = self.embed("task: search result | query: " + query, timeout=60)
-        with self._gate:
+            content = "task: search result | query: " + query
+            # Byte length bounds token count without a second tokenizer. Keep very
+            # long inputs on the original, larger context for compatibility.
+            if self.settings.multimodal_query_url and len(content.encode("utf-8")) <= 2000:
+                vector = self.embed(content, timeout=60, query_only=True)
+            else:
+                vector = self.embed("task: search result | query: " + query, timeout=60)
+        with self._cache_lock:
             if len(self._cache) >= 128:
                 self._cache.pop(next(iter(self._cache)))
             self._cache[query] = (time.monotonic(), vector)
@@ -147,18 +156,33 @@ class MultimodalService:
 
     @contextmanager
     def interactive_request(self):
-        request_id = uuid.uuid4().hex
-        # Separate worker processes see these leases before starting another media inference.
-        with self._state() as db:
-            db.execute('INSERT INTO interactive_requests VALUES (?,?)', (request_id, time.time()+180))
-        try:
-            yield
-        finally:
-            with self._state() as db:
-                db.execute('DELETE FROM interactive_requests WHERE id=?', (request_id,))
+        # This is transient coordination, not durable application data. Inserting
+        # and deleting SQLite leases forced two WAL commits into every uncached
+        # query, making it wait on unrelated backup I/O or a busy index writer.
+        # A shared advisory lock works across app/worker containers, supports
+        # concurrent readers, and is released by the OS if a reader crashes.
+        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        with (self.settings.data_dir / 'multimodal-interactive.lock').open('a+b') as handle:
+            fcntl.flock(handle, fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _interactive_active(self) -> bool:
+        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        with (self.settings.data_dir / 'multimodal-interactive.lock').open('a+b') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                return False
 
     def wait_reason(self) -> str:
         if self.stopping():return 'stopping'
+        if self._interactive_active():return 'interactive'
         policy = self.policy()
         if policy['paused']:
             return 'paused'
@@ -187,14 +211,15 @@ class MultimodalService:
                 db.execute('DELETE FROM retry_state WHERE file_id=?',(file_id,))
         return len(ids)
 
-    def health(self) -> dict:
+    def health(self, *, query_only: bool = False) -> dict:
         if not self.enabled:
             return {'enabled':False,'reachable':False}
         try:
-            endpoint = LocalAIClient(self.settings)._validate_endpoint(self.settings.multimodal_base_url)
+            base_url = self.settings.multimodal_query_url if query_only else self.settings.multimodal_base_url
+            endpoint = LocalAIClient(self.settings)._validate_endpoint(base_url or self.settings.multimodal_base_url)
             response = self._http.get(endpoint+'/health', timeout=5)
             return {'enabled':True,'reachable':response.is_success, 'status':response.json().get('status','unknown')}
-        except (httpx.HTTPError,ValueError,KeyError) as exc:
+        except (httpx.HTTPError,ValueError,KeyError,RuntimeError) as exc:
             return {'enabled':True,'reachable':False,'error':type(exc).__name__}
 
     def image_search(self, content: dict, limit: int, kind='', library_ids=None, file_ids=None) -> list[dict]:

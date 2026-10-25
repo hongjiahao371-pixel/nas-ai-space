@@ -427,6 +427,14 @@ async def lifespan(_: FastAPI):
     state.vectors = VectorStore(settings)
     state.search = SearchService(state.database, state.ai, state.vectors)
     state.search.multimodal = MultimodalService(settings)
+    # Existing collections get filter indexes during startup, outside queries.
+    # Failure preserves the original search path and never replaces a collection.
+    stores = [state.vectors] + ([state.search.multimodal.vectors] if state.search.multimodal.enabled else [])
+    for store in stores:
+        try:
+            await asyncio.to_thread(store.ensure_filter_indexes)
+        except Exception:
+            logger.warning("素材筛选索引准备失败，保留现有检索", exc_info=True)
     state.video_moments = VideoMoments(state.search.multimodal)
     state.tasks = TaskManager(state.database, settings, state.ai, state.vectors)
     state.productivity = state.tasks.productivity
@@ -444,7 +452,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.7.0",
+    version="1.7.1",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -1250,6 +1258,9 @@ def _production_readiness() -> dict[str, Any]:
         mm=state.search.multimodal.status()
         mm_health=state.search.multimodal.health()
         add('multimodal_model','ok' if mm_health['reachable'] else 'warning','素材语义模型在线' if mm_health['reachable'] else '素材模型离线，已回退原检索')
+        if settings.multimodal_query_url:
+            query_health=state.search.multimodal.health(query_only=True)
+            add('multimodal_query','ok' if query_health['reachable'] else 'warning','素材查询模型在线' if query_health['reachable'] else '素材查询模型离线，已回退原检索')
         add('multimodal_worker','ok' if mm.get('worker_alive') else 'warning',f"已索引 {mm['indexed_files']}/{mm['total_media']} · {mm.get('worker_status','等待服务')}")
         add('multimodal_errors','warning' if mm.get('errors') else 'ok',f"{mm.get('errors',0)} 个素材失败，{mm.get('terminal_errors',0)} 个需要人工检查")
         bundles=state.tasks.recovery.list()
