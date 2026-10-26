@@ -87,6 +87,10 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE INDEX IF NOT EXISTS idx_files_library ON files(library_id);
 CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
+-- The short-query fallback filters by kind and takes the newest matches.
+-- Keep that order in the index so LIMIT can stop without scanning and sorting
+-- every file of a kind while a backup is reading the same disk.
+CREATE INDEX IF NOT EXISTS idx_files_kind_mtime ON files(kind, mtime_ns DESC);
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime_ns DESC);
 
