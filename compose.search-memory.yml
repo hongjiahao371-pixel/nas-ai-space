@@ -1,6 +1,7 @@
 # Opt-in for small libraries on hosts with sufficient RAM. Run the verified
 # vector-memory.py migration for existing collections; changing env alone only
-# affects newly created collections. Does not change backup CPU or IO priority.
+# affects newly created collections. The optional helper pins allocated search
+# pages read-only; it does not change backup CPU or IO priority.
 services:
   app:
     environment:
@@ -10,3 +11,30 @@ services:
       QDRANT__STORAGE__ON_DISK_PAYLOAD: "false"
     mem_limit: ${NAS_AI_QUERY_MEMORY_LIMIT:-1g}
     memswap_limit: ${NAS_AI_QUERY_MEMORY_LIMIT:-1g}
+
+  qdrant-memory:
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}
+    restart: unless-stopped
+    entrypoint: ["python", "/usr/local/bin/nas-ai-pin-search-pages.py"]
+    command: ["--budget-mb", "384"]
+    user: "0:0"
+    volumes: ["qdrant-data:/qdrant/storage:ro"]
+    read_only: true
+    tmpfs: ["/tmp:size=8m"]
+    network_mode: none
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 0.25
+    ulimits:
+      memlock: {soft: 402653184, hard: 402653184}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/tmp/residency.json')); assert s['ready'] and time.time()-s['checked_at']<60"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}

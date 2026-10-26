@@ -24,7 +24,40 @@ class SearchQueryPlanTests(unittest.TestCase):
         self.search = SearchService(self.db, None, None)
 
     def tearDown(self):
+        self.db.close()
         self.temp.cleanup()
+
+    def test_weighted_fts_uses_native_rank_and_preserves_filtered_top_results(self):
+        # Different columns have different weights. Exercise non-tied results
+        # and check actual query plans, not just the spelling of the SQL.
+        with self.db.transaction() as db:
+            for i in range(1, 201):
+                db.execute('UPDATE files SET name=?, relative_path=?, ai_caption=?, extracted_text=? WHERE id=?',
+                           ('red flower' if i % 7 else 'garden', 'garden/red' if i % 3 else 'path',
+                            'red flower grows ' * (i % 4 + 1), 'red ' * (i % 6 + 1), i))
+            db.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+        original = self.db.fetchall
+        statements = []
+        def record(sql, params=()):
+            if 'files_fts MATCH' in sql:
+                statements.append((sql, params))
+            return original(sql, params)
+        self.db.fetchall = record
+        cases = [dict(), dict(library_ids=[self.libs[0]]),
+                 dict(file_ids=list(range(1, 70))),
+                 dict(filter_sql=('f.library_id = ? AND f.id < ?', [self.libs[1], 80]))]
+        for kind in ['', 'image', 'video']:
+            for case in cases:
+                actual = self.search._lexical('red OR flower', kind, 13, allow_like=False, **case)
+                sql, params = statements[-1]
+                legacy = sql.replace('files_fts.rank AS rank', 'bm25(files_fts, 7.0, 3.0, 1.0, 3.5) AS rank').replace(
+                    "AND files_fts.rank MATCH 'bm25(7.0,3.0,1.0,3.5)'", '').replace('ORDER BY files_fts.rank', 'ORDER BY rank')
+                self.assertEqual(actual, original(legacy, params))
+                with self.db.connect() as db:
+                    plan = ' '.join(r[3] for r in db.execute('EXPLAIN QUERY PLAN '+sql, params))
+                self.assertNotIn('TEMP B-TREE', plan)
+        self.assertEqual(self.search._lexical('red', 'image', 13, library_ids=[]), [])
+        self.assertEqual(self.search._lexical('red', 'image', 13, file_ids=[]), [])
 
     def test_kind_fallback_uses_ordered_index_without_sorting_all_matches(self):
         statements = []

@@ -448,6 +448,7 @@ async def lifespan(_: FastAPI):
     yield
     await state.watcher.stop()
     await state.tasks.stop()
+    state.database.close()
 
 
 app = FastAPI(
