@@ -61,6 +61,14 @@ class ReleaseInstallTests(unittest.TestCase):
         self.assertEqual(command[command.index('--parallel') + 1], '1')
         self.assertEqual(command[command.index('--pooling') + 1], 'mean')
 
+    def test_opted_in_memory_profile_survives_compose_command_selection(self):
+        script = '''script=$1; set -- help; source "$script" >/dev/null
+env_value() { case "$1" in NAS_AI_SEARCH_MODE) echo media;; NAS_AI_SEARCH_MEMORY_PROFILE) echo true;; esac; }
+profile_files intel
+'''
+        result = subprocess.check_output(['bash','-c',script,'test',str(REPO/'scripts/nas-ai')], text=True)
+        self.assertEqual(result.splitlines(), ['docker-compose.yml','compose.intel.yml','compose.media.yml','compose.search-memory.yml'])
+
     def test_valid_archive_preserves_executable(self):
         archive, checks = self.bundle()
         names = manager.unpack_release(archive, self.root / 'stage', 'v1.7.0', checks)

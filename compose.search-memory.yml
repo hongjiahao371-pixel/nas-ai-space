@@ -1,0 +1,12 @@
+# Opt-in for small libraries on hosts with sufficient RAM. Run the verified
+# vector-memory.py migration for existing collections; changing env alone only
+# affects newly created collections. Does not change backup CPU or IO priority.
+services:
+  app:
+    environment:
+      NAS_AI_VECTORS_ON_DISK: "false"
+  qdrant:
+    environment:
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "false"
+    mem_limit: ${NAS_AI_QUERY_MEMORY_LIMIT:-1g}
+    memswap_limit: ${NAS_AI_QUERY_MEMORY_LIMIT:-1g}
