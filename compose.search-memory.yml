@@ -38,3 +38,30 @@ services:
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
+
+  database-memory:
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}
+    restart: unless-stopped
+    entrypoint: ["python", "/usr/local/bin/nas-ai-pin-search-pages.py"]
+    command: ["--sqlite-only", "--sqlite", "/data/nas-ai-space.db", "--budget-mb", "128"]
+    user: "${NAS_UID:-1000}:${NAS_GID:-1000}"
+    volumes: ["${NAS_AI_DATA_PATH:-./data}:/data:ro"]
+    read_only: true
+    tmpfs: ["/tmp:size=8m"]
+    network_mode: none
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.1
+    ulimits:
+      memlock: {soft: 134217728, hard: 134217728}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/tmp/residency.json')); assert s['ready'] and time.time()-s['checked_at']<60"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}

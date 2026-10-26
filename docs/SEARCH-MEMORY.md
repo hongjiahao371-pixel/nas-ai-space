@@ -29,6 +29,8 @@ Qdrant 的 `on_disk: false` 仍使用可被系统回收的文件映射缓存，�
 
 辅助服务每十秒发现文件替换、增长和删除，释放旧页并重新检查。实际数据超过预算、系统不允许锁页或检索文件尚不存在时显示未就绪，检索服务仍使用原数据工作；此时不能宣称性能保护已经生效。不要为了通过验收无限增加内存预算。
 
-自建镜像必须包含 `/usr/local/bin/nas-ai-pin-search-pages.py`，并通过 `NAS_AI_APP_IMAGE` 让此辅助服务使用同一个新镜像。升级后核对 `qdrant-memory` 健康状态以及其日志中的 `locked_bytes`、`required_bytes` 和 `errors`，再做真实备份并行测试。移除内存配置时先停止并移除此辅助服务，原检索数据卷保留。
+该配置另提供 `database-memory`，只读驻留明确指定的 SQLite 主库及当前 WAL；预算 128 MiB、容器上限 192 MiB，原数据库路径和 FULL 持久化方式不变。它以 `NAS_UID`/`NAS_GID` 运行，须与数据目录所有者一致；权限不足应修正服务账号，不扩大数据库权限。每十秒检查变化，WAL 截断后在同一 inode 重新增长也会重新锁页；这不是任意时刻全部新页已驻留的保证。主库缺失、指向符号链接、超过预算或锁页失败时显示未就绪。
+
+自建镜像必须包含 `/usr/local/bin/nas-ai-pin-search-pages.py`，并通过 `NAS_AI_APP_IMAGE` 让两个辅助服务使用新镜像。升级后核对 `qdrant-memory`、`database-memory` 的健康状态以及日志中的 `locked_bytes`、`required_bytes` 和 `errors`，再做真实备份并行测试。两个辅助容器上限合计 704 MiB，不含 Qdrant 自身 1 GiB 或应用内存。移除内存配置时先停止并移除两个辅助服务，原检索及数据库卷保留。
 
 内存语义依据：[Qdrant 内存层级及旧参数映射](https://qdrant.tech/documentation/ops-configuration/memory-tiers/)。
