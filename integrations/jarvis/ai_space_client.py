@@ -9,7 +9,10 @@ import httpx
 
 
 class AISpaceError(RuntimeError):
-    pass
+    def __init__(self, message, *, status_code=None, transient=False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.transient = transient
 
 
 def _text(value, maximum):
@@ -60,10 +63,11 @@ class AISpaceClient:
         try:
             response = await self.http.request(method, path, **kwargs)
         except httpx.HTTPError:
-            raise AISpaceError("AI Space连接失败或等待超时，不能据此判断素材不存在") from None
+            raise AISpaceError("AI Space连接失败或等待超时，不能据此判断素材不存在", transient=True) from None
         if not 200 <= response.status_code < 300:
             messages = {401: "AI Space凭据无效或已过期", 403: "无权访问这项AI Space资料", 404: "文件不可见、已离线或当前版本尚无该接口", 413: "图片超过允许大小", 503: "模型繁忙或暂时不可用，请稍后重试"}
-            raise AISpaceError(messages.get(response.status_code, f"AI Space请求失败（{response.status_code}）"))
+            raise AISpaceError(messages.get(response.status_code, f"AI Space请求失败（{response.status_code}）"),
+                               status_code=response.status_code, transient=response.status_code in (429, 502, 503, 504))
         return response
 
     async def _json(self, method, path, **kwargs):
@@ -81,6 +85,7 @@ class AISpaceClient:
         rows = [_source(row) for row in data.get("results", [])[:limit]]
         return {"query": query, "results": rows, "returned": len(rows),
                 "applied_filters": data.get("applied_filters", {}), "retrieval_strategy": data.get("retrieval_strategy", "hybrid"),
+                "timings_ms": {k:float(v) for k,v in data.get('timings_ms',{}).items() if k in {'media_ms','lexical_ms','total_ms'} and type(v) in (int,float) and 0<=v<=3600000},
                 "notice": "检索候选不是已核实事实；视频时间点来自采样；未找到不代表素材不存在。"}
 
     async def ask(self, question, file_ids=None, kind=""):

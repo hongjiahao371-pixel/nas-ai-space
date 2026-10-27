@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
 import threading
 import time
+from queue import Empty, Full, LifoQueue
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -87,6 +89,10 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE INDEX IF NOT EXISTS idx_files_library ON files(library_id);
 CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
+-- The short-query fallback filters by kind and takes the newest matches.
+-- Keep that order in the index so LIMIT can stop without scanning and sorting
+-- every file of a kind while a backup is reading the same disk.
+CREATE INDEX IF NOT EXISTS idx_files_kind_mtime ON files(kind, mtime_ns DESC);
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime_ns DESC);
 
@@ -711,6 +717,63 @@ class Database:
         self._write_lock = threading.RLock()
         # resolve_session 刷新 last_seen_at 的进程内节流表（session_id -> 上次写入的 monotonic 时间）
         self._session_seen_at: dict[int, float] = {}
+        # Reuse idle read-only connections, not query results. Drained statements
+        # release their WAL snapshot so external commits and permission changes
+        # remain visible. The idle page-cache budget is at most 4 * 8 MiB.
+        self._readers: LifoQueue[tuple[tuple[int, int, int], sqlite3.Connection]] = LifoQueue(4)
+        self._reader_identity: tuple[int, int] | None = None
+        self._reader_identity_lock = threading.Lock()
+
+    @contextmanager
+    def read_connection(self) -> Iterator[sqlite3.Connection]:
+        stat = self.path.stat()
+        identity = (os.getpid(), stat.st_dev, stat.st_ino)
+        with self._reader_identity_lock:
+            if self._reader_identity is None:
+                self._reader_identity = identity[1:]
+            elif self._reader_identity != identity[1:]:
+                # A live file replacement can leave WAL files from the old DB.
+                # Never reopen it silently or return cached old authorization.
+                # Restore remains an offline operation with a fresh Database.
+                raise sqlite3.DatabaseError('Database file replaced; restart after offline restore')
+        connection = None
+        while connection is None:
+            try:
+                previous, candidate = self._readers.get_nowait()
+            except Empty:
+                connection = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro',
+                    uri=True, timeout=30, check_same_thread=False, isolation_level=None)
+                connection.row_factory = sqlite3.Row
+                connection.execute('PRAGMA cache_size = -8192').close()
+                connection.execute('PRAGMA foreign_keys = ON').close()
+            else:
+                if previous == identity:
+                    connection = candidate
+                else:
+                    candidate.close()
+        try:
+            yield connection
+        except BaseException:
+            connection.close()
+            raise
+        else:
+            # A connection with an explicit open transaction cannot be reused:
+            # it would retain an old snapshot and obstruct checkpoints.
+            if connection.in_transaction:
+                connection.close()
+            else:
+                try:
+                    self._readers.put_nowait((identity, connection))
+                except Full:
+                    connection.close()
+
+    def close(self) -> None:
+        while True:
+            try:
+                _, connection = self._readers.get_nowait()
+            except Empty:
+                break
+            connection.close()
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -952,13 +1015,34 @@ class Database:
             )
 
     def fetchone(self, query: str, params: Iterable[Any] = ()) -> dict[str, Any] | None:
-        with self.connect() as connection:
-            row = connection.execute(query, tuple(params)).fetchone()
-            return dict(row) if row else None
+        return self._read(query, params, one=True)
 
     def fetchall(self, query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            return [dict(row) for row in connection.execute(query, tuple(params)).fetchall()]
+        return self._read(query, params, one=False)
+
+    def _read(self, query: str, params: Iterable[Any], *, one: bool):
+        started = time.monotonic()
+        with self.read_connection() as connection:
+            opened = time.monotonic()
+            cursor = connection.execute(query, tuple(params))
+            executed = time.monotonic()
+            try:
+                if one:
+                    row = cursor.fetchone()
+                    result = dict(row) if row else None
+                else:
+                    result = [dict(row) for row in cursor.fetchall()]
+            finally:
+                cursor.close()
+            fetched = time.monotonic()
+        finished = time.monotonic()
+        if finished - started >= 1:
+            category = 'fts' if 'files_fts' in query else 'like' if ' LIKE ' in query else 'other'
+            # No SQL, parameters, credentials or media content in diagnostics.
+            logging.getLogger(__name__).warning(
+                'DB_READ_SECONDS category=%s open=%.3f execute=%.3f fetch=%.3f release=%.3f',
+                category, opened-started, executed-opened, fetched-executed, finished-fetched)
+        return result
 
     def execute(self, query: str, params: Iterable[Any] = ()) -> int:
         with self.transaction() as connection:

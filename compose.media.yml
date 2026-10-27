@@ -12,7 +12,7 @@ services:
     build:
       context: .
       dockerfile: docker/multimodal-runtime.Dockerfile
-    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1-media}
+    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2-media}
     restart: unless-stopped
     environment:
       HTTPS_PROXY: ${NAS_AI_DOWNLOAD_PROXY:-}
@@ -34,7 +34,7 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
   multimodal-query:
-    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1-media}
+    image: ${NAS_AI_MEDIA_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2-media}
     restart: unless-stopped
     environment:
       NAS_AI_MEDIA_MODE: query
@@ -62,7 +62,7 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
   multimodal-indexer:
-    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1}
+    image: ${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}
     restart: unless-stopped
     command: ["python", "-m", "app.services.multimodal_worker"]
     environment:

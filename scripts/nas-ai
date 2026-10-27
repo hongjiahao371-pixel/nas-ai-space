@@ -148,6 +148,10 @@ profile_files() {
     *) die "未知硬件方案：$profile" ;;
   esac
   if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ]; then printf '%s\n' compose.media.yml; fi
+  if [ "$(env_value NAS_AI_SEARCH_MEMORY_PROFILE)" = true ]; then
+    printf '%s\n' compose.search-memory.yml
+    if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ]; then printf '%s\n' compose.search-media-memory.yml; fi
+  fi
 }
 
 read_profile() {
@@ -476,7 +480,7 @@ doctor_command() {
       warn "Compose 配置校验失败"; failures=$((failures + 1))
     fi
     image=$(env_value NAS_AI_APP_IMAGE)
-    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.1}
+    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}
     if "${DOCKER_CMD[@]}" manifest inspect "$image" >/dev/null 2>&1; then
       say "✓ 预构建应用镜像可读取：$image"
     else

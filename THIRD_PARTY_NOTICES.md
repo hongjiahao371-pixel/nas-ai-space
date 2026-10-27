@@ -36,3 +36,7 @@ Native exports install python-docx 1.2.0 (MIT), python-pptx 1.0.2 (MIT), ReportL
 ## Compressed 3D and EPS previews
 
 The vendored Three.js r180 DRACOLoader (MIT) uses the Google Draco WASM decoder (Apache-2.0), served locally. Its license and upstream decoder notes are retained under `app/static/vendor/three/draco/`. No external decoder CDN is contacted. The OS Ghostscript package (AGPL-3.0-or-later) is used as a separate executable for EPS previews; its package copyright/source notices remain available in the installed Debian distribution.
+
+### SQLite 3.51.3
+
+应用镜像包含 SQLite 3.51.3（公有领域）。源码来自 [SQLite 官方固定版本](https://sqlite.org/2026/sqlite-amalgamation-3510300.zip)，构建脚本同时验证下载归档 SHA256 与官方公布的 sqlite3.c SHA3-256；校验失败即停止构建。该版本包含 [WAL-reset 修复](https://sqlite.org/releaselog/3_51_3.html)。构建工具不进入最终镜像。

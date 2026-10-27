@@ -448,11 +448,12 @@ async def lifespan(_: FastAPI):
     yield
     await state.watcher.stop()
     await state.tasks.stop()
+    state.database.close()
 
 
 app = FastAPI(
     title="NAS AI Space",
-    version="1.7.1",
+    version="1.7.2",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,

@@ -302,9 +302,11 @@ class SearchService:
             params.extend(clause_params)
         params.append(limit)
         fts_sql = (
-            f"""SELECT {FILE_COLUMNS_F}, bm25(files_fts, 7.0, 3.0, 1.0, 3.5) AS rank
-                    FROM files_fts JOIN files f ON f.id = files_fts.rowid
-                    WHERE files_fts MATCH ? {filters} ORDER BY rank LIMIT ?"""
+            f"""SELECT {FILE_COLUMNS_F}, files_fts.rank AS rank
+                    FROM files_fts CROSS JOIN files f ON f.id = files_fts.rowid
+                    WHERE files_fts MATCH ?
+                      AND files_fts.rank MATCH 'bm25(7.0,3.0,1.0,3.5)'
+                      {filters} ORDER BY files_fts.rank LIMIT ?"""
         )
         try:
             rows = self.database.fetchall(fts_sql, params)

@@ -2,7 +2,7 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
-v1.7.1 为文字查询提供独立常驻模型、为素材筛选建立索引，并减少备份期间的磁盘等待。完整素材方案增加一个内部查询服务（内存上限 768 MiB）；保留浏览器安装、双模型自动准备、点选目录和统一升级恢复流程。
+v1.7.2 增加小型素材库的可选检索内存配置，以及配套 Jarvis 能力探测容错。保留现有数据和双模型检索，详见 [版本说明](docs/RELEASE-NOTES-v1.7.2.md)。
 
 v1.6.5 增加可选素材优先检索，照片、视频、音频有有效素材候选时无需先等旧文本模型；无候选或不可用时保留原文本回退。原有完整融合检索仍可用。v1.6.4 新增可按媒体库授权、到期和撤销的应用只读密钥，适用于 Jarvis 等服务端调用。此前 v1.6.3 将待处理、停止重试和部分覆盖分开显示，支持管理员单个素材重试，并按实际解码长度记录音轨时间。收尾验收与功能边界见 [验收记录](docs/ACCEPTANCE-v1.6.5.md)。
 
@@ -30,7 +30,7 @@ ARM NAS 尚未完成发布验收，不建议直接放入正式资料库。默认
 下载正式版安装入口并运行一次（不要在正在使用的安装目录执行新安装）：
 
 ```bash
-curl -fL https://raw.githubusercontent.com/hongjiahao371-pixel/nas-ai-space/v1.7.1/install.sh -o install-ai-space.sh
+curl -fL https://raw.githubusercontent.com/hongjiahao371-pixel/nas-ai-space/v1.7.2/install.sh -o install-ai-space.sh
 bash install-ai-space.sh
 ```
 
@@ -46,7 +46,7 @@ bash install-ai-space.sh
 也可下载 [正式发布包](https://github.com/hongjiahao371-pixel/nas-ai-space/releases)，解压后运行：
 
 ```bash
-VERSION=v1.7.1
+VERSION=v1.7.2
 cd "nas-ai-space-${VERSION}"
 scripts/nas-ai wizard
 ```
