@@ -20,6 +20,7 @@ COPY requirements.txt requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
 COPY scripts/pin-search-pages.py /usr/local/bin/nas-ai-pin-search-pages.py
+COPY scripts/pin-runtime-code.py /usr/local/bin/nas-ai-pin-runtime-code.py
 COPY app ./app
 COPY models ./models
 COPY scripts/restore-recovery.py ./scripts/restore-recovery.py

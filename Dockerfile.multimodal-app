@@ -13,6 +13,7 @@ COPY requirements.txt requirements.lock.txt ./
 # Apply the audited PDF parser fix while preserving appliance-specific dependencies.
 RUN python -m pip install --no-cache-dir pypdf==6.19.0 python-docx==1.2.0 python-pptx==1.0.2 reportlab==5.0.1 && python -m pip check
 COPY scripts/pin-search-pages.py /usr/local/bin/nas-ai-pin-search-pages.py
+COPY scripts/pin-runtime-code.py /usr/local/bin/nas-ai-pin-runtime-code.py
 COPY app ./app
 
 COPY scripts/restore-recovery.py ./scripts/restore-recovery.py

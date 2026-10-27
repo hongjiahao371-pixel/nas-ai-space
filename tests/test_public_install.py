@@ -67,7 +67,15 @@ env_value() { case "$1" in NAS_AI_SEARCH_MODE) echo media;; NAS_AI_SEARCH_MEMORY
 profile_files intel
 '''
         result = subprocess.check_output(['bash','-c',script,'test',str(REPO/'scripts/nas-ai')], text=True)
-        self.assertEqual(result.splitlines(), ['docker-compose.yml','compose.intel.yml','compose.media.yml','compose.search-memory.yml'])
+        self.assertEqual(result.splitlines(), ['docker-compose.yml','compose.intel.yml','compose.media.yml','compose.search-memory.yml','compose.search-media-memory.yml'])
+
+    def test_text_memory_profile_does_not_require_a_media_service(self):
+        script = '''script=$1; set -- help; source "$script" >/dev/null
+env_value() { case "$1" in NAS_AI_SEARCH_MODE) echo text;; NAS_AI_SEARCH_MEMORY_PROFILE) echo true;; esac; }
+profile_files cpu
+'''
+        result = subprocess.check_output(['bash','-c',script,'test',str(REPO/'scripts/nas-ai')], text=True)
+        self.assertEqual(result.splitlines(), ['docker-compose.yml','compose.search-memory.yml'])
 
     def test_valid_archive_preserves_executable(self):
         archive, checks = self.bundle()

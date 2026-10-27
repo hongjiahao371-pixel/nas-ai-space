@@ -148,7 +148,10 @@ profile_files() {
     *) die "未知硬件方案：$profile" ;;
   esac
   if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ]; then printf '%s\n' compose.media.yml; fi
-  if [ "$(env_value NAS_AI_SEARCH_MEMORY_PROFILE)" = true ]; then printf '%s\n' compose.search-memory.yml; fi
+  if [ "$(env_value NAS_AI_SEARCH_MEMORY_PROFILE)" = true ]; then
+    printf '%s\n' compose.search-memory.yml
+    if [ "$(env_value NAS_AI_SEARCH_MODE)" = media ]; then printf '%s\n' compose.search-media-memory.yml; fi
+  fi
 }
 
 read_profile() {

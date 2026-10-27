@@ -4,6 +4,8 @@
 # pages read-only; it does not change backup CPU or IO priority.
 services:
   app:
+    # Keep API workers and pooled read pages out of disk-backed swap.
+    memswap_limit: ${NAS_AI_APP_MEM_LIMIT:-1536m}
     environment:
       NAS_AI_VECTORS_ON_DISK: "false"
   qdrant:
@@ -58,6 +60,38 @@ services:
       memlock: {soft: 134217728, hard: 134217728}
     healthcheck:
       test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/tmp/residency.json')); assert s['ready'] and time.time()-s['checked_at']<60"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
+  qdrant-code-memory:
+    image: ${NAS_AI_CODE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}}
+    restart: unless-stopped
+    entrypoint: ["python", "/usr/local/bin/nas-ai-pin-runtime-code.py"]
+    command: ["--budget-mb", "96"]
+    pid: "service:qdrant"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+        restart: true
+    user: "0:0"
+    read_only: true
+    tmpfs: ["/tmp:size=8m"]
+    network_mode: none
+    cap_drop: ["ALL"]
+    cap_add: ["SYS_PTRACE", "CHECKPOINT_RESTORE"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 160m
+    memswap_limit: 160m
+    cpus: 0.1
+    ulimits:
+      memlock: {soft: 100663296, hard: 100663296}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/tmp/runtime-residency.json')); assert s['ready'] and time.time()-s['checked_at']<60"]
       interval: 20s
       timeout: 5s
       start_period: 120s
