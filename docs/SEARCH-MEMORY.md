@@ -46,3 +46,11 @@ Qdrant 的 `on_disk: false` 仍使用可被系统回收的文件映射缓存，�
 四个辅助容器上限共 992 MiB，此外仍须计入应用、检索及模型服务。检查两项新增服务的 `/tmp/runtime-residency.json` 中 `ready`、`locked_bytes` 和 `errors`；权限或预算不足时不把保护视为生效。关闭辅助容器会释放锁页，不改变任何原文件，也不替代真实负载验收。
 
 NAS 的手工启动命令应同时保留原来的主配置与多模态配置，再依次追加 `-f compose.search-memory.yml -f compose.search-media-memory.yml`。纯文字部署只追加第一个文件，不依赖不存在的多模态服务。移除配置时先移除对应辅助容器，再恢复原服务配置，数据卷保持。
+
+## 同机写回节奏
+
+原盘测试还提供可选主机配置 `deploy/sysctl/70-ai-space-writeback.conf`：后台脏页达到 16 MiB 开始写回，达到 64 MiB 时写入进程参与写回；每秒检查一次，脏页满 5 秒即可后台写出。它用于减少集中写回，不改变 SQLite FULL 或设备刷盘要求。此配置作用于 NAS 上所有写入，可能降低突发写入吞吐；Compose 和安装脚本不会自动加载它，也不会修改备份任务的配置、优先级或限速。
+
+启用前记录 `vm.dirty_background_bytes`、`vm.dirty_bytes`、`vm.dirty_background_ratio`、`vm.dirty_ratio`、`vm.dirty_writeback_centisecs` 和 `vm.dirty_expire_centisecs` 的原值。管理员可将该文件复制到 `/etc/sysctl.d/`，用 `sysctl -p` 加载这一文件；回退时移除该文件并恢复原值。字节阈值与对应百分比互斥，恢复时先恢复字节值，再恢复原先启用的非零百分比。不同硬件和并行工作负载需要重新验收，不能直接套用本机性能结果。
+
+既有设备可分别设置 `NAS_AI_SEARCH_MEMORY_IMAGE`、`NAS_AI_DATABASE_MEMORY_IMAGE` 和 `NAS_AI_CODE_MEMORY_IMAGE`，固定各辅助服务已经验证的镜像摘要，避免应用镜像标签的历史值影响下一次启动。未设置时沿用 `NAS_AI_APP_IMAGE`，该值也未设置时才使用本版本默认镜像。
