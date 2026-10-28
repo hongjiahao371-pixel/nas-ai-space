@@ -20,6 +20,14 @@
 
 首次 ARM 构建发现系统 SQLite 动态库优先级不同，已用明确的库搜索路径固定到经校验编译的版本；修复后重新执行并通过全部原生检查。保留原模型、资料格式及持久化语义。
 
+## 正式发布复核
+
+[v1.7.3 发布流程](https://github.com/hongjiahao371-pixel/nas-ai-space/actions/runs/40656687954)已成功，最终标签源码在原生 amd64 与 arm64 上各自完整 **343 项**测试通过，并重新完成上表的实际运行检查。应用、素材共四个公开平台镜像的配置摘要均与对应原生测试镜像一致；已匿名读取公开镜像清单及配置。
+
+[正式版本下载](https://github.com/hongjiahao371-pixel/nas-ai-space/releases/tag/v1.7.3)的源码包已匿名完整下载，SHA256 与随包校验文件、不可变标签的本地导出同时一致：`3a009754d65ba19f5200436f026dc73d0f5b854afccf5c1f748af68ce8518dbb`。
+
+ARM CPU 看图不能按快速交互承诺：本轮限制为 2 核的原生 ARM 测试，单张合成图的 Qwen-VL 推理约需 5 分钟；这只是模型直接调用，不是应用交互看图响应时间或各款 NAS 的性能验收。
+
 ## 支持与验证边界
 
 - 支持范围为 64 位 Linux CPU：amd64 和 arm64。ARM64 安装默认选择 CPU；32 位 ARM、ARM NPU/GPU 与 Jetson CUDA 不在此版范围。
