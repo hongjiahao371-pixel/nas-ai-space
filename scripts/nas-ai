@@ -13,6 +13,31 @@ warn() { printf '警告：%s\n' "$*" >&2; }
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
+host_architecture() {
+  local architecture bits=""
+  architecture=$(uname -m)
+  if has getconf; then
+    bits=$(getconf LONG_BIT 2>/dev/null || true)
+  fi
+  if [ -z "$bits" ]; then
+    bits=$(python3 -c 'import struct; print(struct.calcsize("P") * 8)') || return 1
+  fi
+  [ "$bits" != 32 ] || die "当前使用32位系统。ARM64 / x86-64 安装需要64位系统和64位 Python 3。"
+  case "$architecture" in
+    x86_64|amd64) printf 'amd64\n' ;;
+    aarch64|arm64) printf 'arm64\n' ;;
+    *) die "不支持此处理器架构：${architecture}。需要64位 x86-64 或 ARM64 系统；32位 ARM 请先安装64位系统。" ;;
+  esac
+}
+
+validate_profile_architecture() {
+  local architecture
+  architecture=$(host_architecture) || return 1
+  if [ "$architecture" = arm64 ] && [ "$1" != cpu ]; then
+    die "ARM64 当前使用 CPU 方案，不支持 $1 加速方案。新安装请使用 --profile cpu；已有安装请先将 .nas-ai-profile 改为 cpu，保留原配置和数据。"
+  fi
+}
+
 ensure_docker_access() {
   [ "$DOCKER_ACCESS_READY" = 1 ] && return 0
   has docker || return 1
@@ -97,6 +122,12 @@ total_memory_mb() {
 }
 
 detect_profile() {
+  local architecture
+  architecture=$(host_architecture) || return 1
+  if [ "$architecture" = arm64 ]; then
+    printf 'cpu\n'
+    return
+  fi
   if has nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
     printf 'nvidia\n'
     return
@@ -163,9 +194,10 @@ read_profile() {
 }
 
 compose() {
-  ensure_docker_access || die "Docker 服务未运行，或当前用户没有 Docker/sudo 权限"
   local profile
   profile=$(read_profile)
+  validate_profile_architecture "$profile" || return 1
+  ensure_docker_access || die "Docker 服务未运行，或当前用户没有 Docker/sudo 权限"
   local args=(compose)
   [ -f "$ENV_FILE" ] && args+=(--env-file "$ENV_FILE")
   local file
@@ -248,6 +280,7 @@ validate_choice() {
 }
 
 setup_command() {
+  host_architecture >/dev/null || return 1
   local profile="" preset="" library="" uploads="" recycle="" port="8766" force=0 search="" download_proxy=""
   NON_INTERACTIVE=0
   while [ "$#" -gt 0 ]; do
@@ -272,6 +305,7 @@ setup_command() {
   profile=$(prompt_value "硬件方案（cpu/intel/amd-vulkan/amd-rocm/nvidia/intel-openvino）" "$profile")
   preset=$(prompt_value "资源预设（lite/standard/full）" "$preset")
   validate_choice "$profile" "cpu intel amd-vulkan amd-rocm nvidia intel-openvino" "硬件方案"
+  validate_profile_architecture "$profile" || return 1
   validate_choice "$preset" "lite standard full" "资源预设"
 
   if [ -z "$search" ]; then
@@ -351,11 +385,13 @@ setup_command() {
 doctor_command() {
   local failures=0 warnings=0 profile memory port path token architecture docker_root free_kb free_gib status image
   say "NAS AI Space 环境检查"
-  architecture=$(uname -m)
+  architecture=$(host_architecture) || return 1
   case "$architecture" in
-    x86_64|amd64) say "✓ 处理器架构：$architecture" ;;
-    *) warn "处理器架构 $architecture 尚未完成公开版验收，建议先使用测试资料"; warnings=$((warnings + 1)) ;;
+    amd64) say "✓ 处理器架构：x86-64" ;;
+    arm64) say "✓ 处理器架构：ARM64，使用 CPU 运行 AI；建议先用少量资料确认速度" ;;
   esac
+  profile=$(read_profile)
+  validate_profile_architecture "$profile" || return 1
   if ! has docker; then
     warn "未找到 Docker"; failures=$((failures + 1))
   elif ! ensure_docker_access; then
@@ -480,7 +516,7 @@ doctor_command() {
       warn "Compose 配置校验失败"; failures=$((failures + 1))
     fi
     image=$(env_value NAS_AI_APP_IMAGE)
-    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}
+    image=${image:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.3}
     if "${DOCKER_CMD[@]}" manifest inspect "$image" >/dev/null 2>&1; then
       say "✓ 预构建应用镜像可读取：$image"
     else
@@ -537,11 +573,13 @@ compose_up_with_model_progress() {
 }
 
 cached_images_available() {
-  local images image
+  local images image platform expected
+  expected="linux/$(host_architecture)" || return 1
   images=$(compose config --format json | python3 -c 'import json,sys; c=json.load(sys.stdin); print("\n".join(c["services"][s]["image"] for s in sys.argv[1:]))' "$@") || return 1
   [ -n "$images" ] || return 1
   while IFS= read -r image; do
-    "${DOCKER_CMD[@]}" image inspect "$image" >/dev/null 2>&1 || return 1
+    platform=$("${DOCKER_CMD[@]}" image inspect "$image" --format '{{.Os}}/{{.Architecture}}' 2>/dev/null) || return 1
+    [ "$platform" = "$expected" ] || return 1
   done <<< "$images"
 }
 
@@ -554,6 +592,7 @@ start_command() {
   local pull_services=(app)
   [ "$(env_value NAS_AI_SEARCH_MODE)" != media ] || pull_services+=(multimodal)
   if [ "$build_local" != true ] && compose pull "${pull_services[@]}"; then
+    cached_images_available "${pull_services[@]}" || die "下载的应用镜像与本机处理器不匹配。请使用包含 $(host_architecture) 镜像的正式版；若设置了自定义镜像，请更新该镜像配置后重试。"
     say "✓ 已取得预构建应用镜像"
     compose_up_with_model_progress up -d --no-build
   elif [ "$build_local" != true ] && cached_images_available "${pull_services[@]}"; then

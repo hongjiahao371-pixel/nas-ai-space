@@ -15,7 +15,7 @@ services:
     memswap_limit: ${NAS_AI_QUERY_MEMORY_LIMIT:-1g}
 
   qdrant-memory:
-    image: ${NAS_AI_SEARCH_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}}
+    image: ${NAS_AI_SEARCH_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.3}}
     restart: unless-stopped
     entrypoint: ["python", "/usr/local/bin/nas-ai-pin-search-pages.py"]
     command: ["--budget-mb", "384"]
@@ -42,7 +42,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   database-memory:
-    image: ${NAS_AI_DATABASE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}}
+    image: ${NAS_AI_DATABASE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.3}}
     restart: unless-stopped
     entrypoint: ["python", "/usr/local/bin/nas-ai-pin-search-pages.py"]
     command: ["--sqlite-only", "--sqlite", "/data/nas-ai-space.db", "--budget-mb", "128"]
@@ -69,7 +69,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   qdrant-code-memory:
-    image: ${NAS_AI_CODE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}}
+    image: ${NAS_AI_CODE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.3}}
     restart: unless-stopped
     entrypoint: ["python", "/usr/local/bin/nas-ai-pin-runtime-code.py"]
     command: ["--budget-mb", "96"]

@@ -2,7 +2,7 @@
 
 部署在 NAS 上的本地多模态 AI 生产力平台。它把文档、图片、音视频和项目资料变成可检索知识、可执行任务与可交付成果；前端、后端、任务调度、索引、向量库和模型服务均在 NAS 内运行，默认不把文件发送到公网。
 
-v1.7.2 增加小型素材库的可选检索内存配置，以及配套 Jarvis 能力探测容错。保留现有数据和双模型检索，详见 [版本说明](docs/RELEASE-NOTES-v1.7.2.md)。
+v1.7.3 增加 ARM64 Linux CPU 安装支持，应用与素材运行程序按架构自动选择，保留现有数据格式和双模型检索。详见 [版本说明](docs/RELEASE-NOTES-v1.7.3.md)。
 
 v1.6.5 增加可选素材优先检索，照片、视频、音频有有效素材候选时无需先等旧文本模型；无候选或不可用时保留原文本回退。原有完整融合检索仍可用。v1.6.4 新增可按媒体库授权、到期和撤销的应用只读密钥，适用于 Jarvis 等服务端调用。此前 v1.6.3 将待处理、停止重试和部分覆盖分开显示，支持管理员单个素材重试，并按实际解码长度记录音轨时间。收尾验收与功能边界见 [验收记录](docs/ACCEPTANCE-v1.6.5.md)。
 
@@ -14,23 +14,23 @@ v1.5.0 增加可选的 **EmbeddingGemma 2 素材语义检索**：直接索引图
 
 ## 适用范围
 
-公开安装版当前面向安装了 Docker Engine 与 Docker Compose v2 的 **x86-64
-NAS 或 Linux 主机**。建议至少 8 GB 内存；12–16 GB 的使用体验更完整。
-ARM NAS 尚未完成发布验收，不建议直接放入正式资料库。默认只适合可信局域网，
+公开安装版当前面向安装了 Docker Engine 与 Docker Compose v2 的 **x86-64 或 ARM64
+NAS / Linux 主机**。建议至少 8 GB 内存；12–16 GB 的使用体验更完整。
+ARM64 使用 CPU 方案；32 位 ARM 不支持。具体 ARM NAS 的驱动、内存和性能仍需按设备验证。默认只适合可信局域网，
 公网访问需要额外配置 HTTPS 反向代理或 VPN。
 
 ## 普通用户安装
 
 第一次使用请看 [新手指南](docs/GETTING-STARTED.md)，包括安装、第一次搜索、成员使用与维护。
 
-需要 x86-64 NAS/Linux、Docker Engine、Docker Compose v2、Python 3 和网络连接。
+需要 x86-64 或 ARM64 NAS/Linux、Docker Engine、Docker Compose v2、Python 3 和网络连接。
 完整素材方案建议 12–16 GB 内存，8 GB 设备可选轻量文字方案；预留至少 15 GB 磁盘。
 首次下载容器和模型通常需要10–60分钟，网络慢时更久。
 
 下载正式版安装入口并运行一次（不要在正在使用的安装目录执行新安装）：
 
 ```bash
-curl -fL https://raw.githubusercontent.com/hongjiahao371-pixel/nas-ai-space/v1.7.2/install.sh -o install-ai-space.sh
+curl -fL https://raw.githubusercontent.com/hongjiahao371-pixel/nas-ai-space/v1.7.3/install.sh -o install-ai-space.sh
 bash install-ai-space.sh
 ```
 
@@ -46,7 +46,7 @@ bash install-ai-space.sh
 也可下载 [正式发布包](https://github.com/hongjiahao371-pixel/nas-ai-space/releases)，解压后运行：
 
 ```bash
-VERSION=v1.7.2
+VERSION=v1.7.3
 cd "nas-ai-space-${VERSION}"
 scripts/nas-ai wizard
 ```
@@ -192,6 +192,7 @@ bash install-ai-space.sh --upgrade --directory /path/to/existing-ai-space
 | 设备 | 推荐方案 | 说明 |
 |---|---|---|
 | 无可用 GPU | `cpu` | 兼容性最高，AI 索引较慢 |
+| ARM64 Linux | `cpu` | 自动选择 CPU；建议 12–16 GB 内存，32 位 ARM 不支持 |
 | Intel 核显 | `intel` | 默认推荐，Ollama Vulkan + QSV/VA-API |
 | Intel 16 GB 以上 | `intel-openvino` | 性能优先，需要下载更大的 OpenVINO 模型 |
 | AMD 核显或独显 | `amd-vulkan` | 自动检测的安全默认值，兼容性取决于宿主驱动 |
@@ -204,7 +205,7 @@ bash install-ai-space.sh --upgrade --directory /path/to/existing-ai-space
 
 发布验收状态：x86-64 CPU/Ollama 公共栈与 Intel NAS 栈已经在真实设备上跑通；
 Intel OpenVINO、AMD ROCm/Vulkan 和 NVIDIA 方案已通过 Compose 配置校验，
-但仍需使用者在对应真实 GPU 上验证驱动与加速。ARM 尚未进入正式支持范围。
+但仍需使用者在对应真实 GPU 上验证驱动与加速。ARM64 Linux CPU 由原生 ARM 容器测试覆盖；这不等于每款 ARM NAS 的整机性能验收，也不包含 ARM NPU、GPU 或 Jetson 加速。
 
 ### 常用命令
 

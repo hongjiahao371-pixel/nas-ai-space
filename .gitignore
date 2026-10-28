@@ -36,3 +36,5 @@ work/
 .nas-ai-operation.lock
 
 .nas-ai-docker/
+
+runtime-evidence/

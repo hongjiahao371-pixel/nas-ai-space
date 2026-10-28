@@ -1,7 +1,7 @@
 # Add after the media and search-memory profiles. Original volumes are unchanged.
 services:
   multimodal-code-memory:
-    image: ${NAS_AI_CODE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.2}}
+    image: ${NAS_AI_CODE_MEMORY_IMAGE:-${NAS_AI_APP_IMAGE:-ghcr.io/hongjiahao371-pixel/nas-ai-space:1.7.3}}
     restart: unless-stopped
     entrypoint: ["python", "/usr/local/bin/nas-ai-pin-runtime-code.py"]
     command: ["--budget-mb", "64"]

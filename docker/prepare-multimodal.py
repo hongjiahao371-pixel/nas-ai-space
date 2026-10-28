@@ -3,7 +3,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
+import re
 import shutil
+import struct
 import tarfile
 import tempfile
 import time
@@ -102,17 +105,68 @@ def unpack_runtime(archive, target):
             source.replace(target / source.name)
 
 
-def query_command(root):
-    return [str(root / 'runtime/llama-server'), '--model', str(root / 'embeddinggemma-2-Q8_0.gguf'),
+def runtime_architecture():
+    machine = platform.machine().lower()
+    aliases = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}
+    if struct.calcsize('P') != 8 or machine not in aliases:
+        raise ValueError(f'不支持处理器架构 {machine}，素材模型仅支持 64 位 x86-64 和 ARM64')
+    return aliases[machine]
+
+
+def select_runtime(manifest):
+    architecture = runtime_architecture()
+    runtime = manifest['runtimes'].get(architecture)
+    if runtime is None:
+        raise ValueError(f'没有适用于 {architecture} 的已校验运行文件')
+    return architecture, runtime
+
+
+def runtime_paths(root, architecture, runtime):
+    # Include both architecture and the complete archive digest. Old x86 caches
+    # and libraries remain untouched when a model volume moves to an ARM host.
+    checksum = runtime['sha256']
+    if architecture not in {'amd64', 'arm64'} or not re.fullmatch(r'[0-9a-f]{64}', checksum):
+        raise ValueError('运行文件架构或校验值无效')
+    name = f'runtime-{architecture}-{checksum}'
+    return root / (name + '.tar.gz'), root / name
+
+
+def verify_runtime(target, architecture):
+    with (target / 'llama-server').open('rb') as binary:
+        header = binary.read(20)
+    expected_machine = {'amd64': 62, 'arm64': 183}[architecture]
+    if (len(header) != 20 or header[:6] != b'\x7fELF\x02\x01'
+            or int.from_bytes(header[18:20], 'little') != expected_machine):
+        raise ValueError(f'运行文件不是 {architecture} 的 64 位 Linux 程序')
+
+
+def prepare_runtime(root, architecture, runtime):
+    archive, target = runtime_paths(root, architecture, runtime)
+    download(runtime['url'], archive, runtime['sha256'], runtime.get('size'))
+    unpack_runtime(archive, target)
+    verify_runtime(target, architecture)
+    return target
+
+
+def query_command(root, runtime_dir=None):
+    runtime_dir = runtime_dir if runtime_dir is not None else root / 'runtime'
+    return [str(runtime_dir / 'llama-server'), '--model', str(root / 'embeddinggemma-2-Q8_0.gguf'),
         '--alias', 'embeddinggemma2', '--host', '0.0.0.0', '--port', '8080', '--embedding', '--pooling', 'mean',
         '--parallel', '1', '--ctx-size', '2048', '--batch-size', '2048', '--ubatch-size', '2048',
         '--threads', '2', '--threads-batch', '2', '--n-gpu-layers', '0', '--load-mode', 'mmap+mlock']
 
 
-def main():
-    root = Path('/models')
-    root.mkdir(parents=True, exist_ok=True)
-    manifest = json.loads(Path('/opt/manifest.json').read_text())
+def execute(command, runtime_dir):
+    # Replace the image's legacy /models/runtime path rather than appending it:
+    # every dlopen() and linked library must use the selected architecture.
+    environment = dict(os.environ, LD_LIBRARY_PATH=str(runtime_dir))
+    os.execve(command[0], command, environment)
+
+
+def main(root=Path('/models'), manifest_path=Path('/opt/manifest.json')):
+    manifest = json.loads(manifest_path.read_text())
+    architecture, runtime = select_runtime(manifest)
+    _, runtime_dir = runtime_paths(root, architecture, runtime)
     if os.getenv('NAS_AI_MEDIA_MODE') == 'query':
         # Compose starts us after the full runtime has verified its shared assets.
         # Read only: never download or unpack into another running server's volume.
@@ -121,22 +175,21 @@ def main():
         model = root / name
         if model.stat().st_size != spec['size'] or digest(model) != spec['sha256']:
             raise ValueError('查询模型校验失败，请检查素材模型服务')
-        command = query_command(root)
-        os.execv(command[0], command)
+        verify_runtime(runtime_dir, architecture)
+        command = query_command(root, runtime_dir)
+        execute(command, runtime_dir)
         return
+    root.mkdir(parents=True, exist_ok=True)
     for name, spec in manifest['files'].items():
         url = f"https://huggingface.co/{manifest['model_repo']}/resolve/{manifest['model_revision']}/{name}"
         download(url, root / name, spec['sha256'], spec['size'])
-    runtime = manifest['runtime']
-    archive = root / 'runtime.tar.gz'
-    download(runtime['url'], archive, runtime['sha256'])
-    unpack_runtime(archive, root / 'runtime')
+    runtime_dir = prepare_runtime(root, architecture, runtime)
     print('模型和运行文件均已校验，正在启动素材检索', flush=True)
-    os.execv(str(root / 'runtime/llama-server'), [str(root / 'runtime/llama-server'),
+    execute([str(runtime_dir / 'llama-server'),
         '--model', str(root / 'embeddinggemma-2-Q8_0.gguf'), '--mmproj', str(root / 'mmproj-embeddinggemma-2-Q8_0.gguf'),
         '--alias', 'embeddinggemma2', '--host', '0.0.0.0', '--port', '8080', '--embedding', '--pooling', 'mean',
         '--parallel', '2', '--ctx-size', '8192', '--batch-size', '2048', '--ubatch-size', '2048',
-        '--threads', '2', '--threads-batch', '2', '--n-gpu-layers', '0', '--no-mmproj-offload'])
+        '--threads', '2', '--threads-batch', '2', '--n-gpu-layers', '0', '--no-mmproj-offload'], runtime_dir)
 
 
 if __name__ == '__main__':
