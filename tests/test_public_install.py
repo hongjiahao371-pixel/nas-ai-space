@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import threading
 import subprocess
+import sys
 import unittest
 import urllib.error
 import urllib.request
@@ -34,6 +35,10 @@ class ReleaseInstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Old-release fixtures exercise upgrade mechanics on their supported architecture.
+        architecture = patch.object(manager.platform, 'machine', return_value='x86_64')
+        architecture.start()
+        self.addCleanup(architecture.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -85,6 +90,7 @@ profile_files cpu
 
     def test_intel_corporation_is_not_mistaken_for_ati(self):
         script = '''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'x86_64\\n'; }
 has() { [[ "$1" == lspci ]]; }
 function [ () { if [[ "$1" == '-d' && "$2" == '/dev/dri' ]]; then return 0; fi; builtin [ "$@"; }
 lspci() { printf '%s\\n' '00:02.0 VGA compatible controller: Intel Corporation Raptor Lake-P [UHD Graphics]'; }
@@ -137,8 +143,9 @@ detect_profile
 
     def test_offline_start_requires_every_selected_cached_image(self):
         script = r'''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'x86_64\n'; }
 compose() { printf '%s\n' '{"services":{"app":{"image":"app:v1"},"multimodal":{"image":"media:v1"}}}'; }
-fake_docker() { [[ "$3" != "media:v1" || "$available_media" == yes ]]; }
+fake_docker() { [[ "$3" != "media:v1" || "$available_media" == yes ]] || return 1; printf 'linux/amd64\n'; }
 DOCKER_CMD=(fake_docker)
 available_media=no
 cached_images_available app && printf 'text-ok\n'
@@ -148,6 +155,174 @@ cached_images_available app multimodal && printf 'media-ok\n'
 '''
         result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], text=True)
         self.assertEqual(result.splitlines(), ['text-ok', 'missing-media', 'media-ok'])
+
+    def test_arm64_selects_cpu_even_when_gpu_tools_are_present(self):
+        script = r'''script=$1; fake_architecture=$2; set -- help; source "$script" >/dev/null
+uname() { printf '%s\n' "$fake_architecture"; }
+has() { return 0; }
+nvidia-smi() { printf 'GPU 0\n'; }
+detect_profile
+'''
+        for architecture in ('aarch64', 'arm64'):
+            with self.subTest(architecture=architecture):
+                result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai'), architecture], text=True)
+                self.assertEqual(result.strip(), 'cpu')
+
+    def test_arm64_setup_uses_cpu_and_rejects_acceleration_before_writing(self):
+        script = r'''script=$1; requested=$2; set -- help; source "$script" >/dev/null
+uname() { printf 'aarch64\n'; }
+total_memory_mb() { printf '8192\n'; }
+setup_command --non-interactive --profile "$requested"
+'''
+        for profile in ('intel', 'amd-vulkan', 'amd-rocm', 'nvidia', 'intel-openvino', 'cpu'):
+            root = self.root / profile; root.mkdir()
+            result = subprocess.run(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai'), profile],
+                                    env={**__import__('os').environ, 'NAS_AI_PROJECT_DIR': str(root)},
+                                    capture_output=True, text=True)
+            with self.subTest(profile=profile):
+                if profile == 'cpu':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual((root / '.nas-ai-profile').read_text().strip(), 'cpu')
+                    self.assertIn('NAS_AI_SEARCH_MODE=text', (root / '.env').read_text())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('ARM64 当前使用 CPU', result.stderr)
+                    self.assertEqual(list(root.iterdir()), [])
+
+    def test_32bit_arm_setup_is_rejected_before_creating_files(self):
+        script = r'''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'armv7l\n'; }
+setup_command --non-interactive --profile cpu
+'''
+        result = subprocess.run(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')],
+                                env={**__import__('os').environ, 'NAS_AI_PROJECT_DIR': str(self.root)},
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('32位 ARM', result.stderr)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_arm64_kernel_with_32bit_userspace_is_rejected(self):
+        script = r'''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'aarch64\n'; }
+getconf() { printf '32\n'; }
+setup_command --non-interactive --profile cpu
+'''
+        result = subprocess.run(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')],
+                                env={**__import__('os').environ, 'NAS_AI_PROJECT_DIR': str(self.root)},
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('32位系统', result.stderr)
+        self.assertEqual(list(self.root.iterdir()), [])
+        source = (REPO / 'install.sh').read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        with patch.object(manager.platform, 'machine', return_value='aarch64'), \
+                patch.object(manager.struct, 'calcsize', return_value=4), \
+                patch.object(sys, 'argv', ['install', '--version', 'v1.7.3']), \
+                patch.object(manager.urllib.request, 'urlopen') as download:
+            with self.assertRaisesRegex(ValueError, '32位系统'):
+                manager.require_supported_architecture('v1.7.3')
+            with self.assertRaisesRegex(SystemExit, '32位系统'):
+                exec(compile(source, 'install.sh', 'exec'), {})
+            download.assert_not_called()
+
+    def test_arm64_compose_rejects_saved_accelerated_profile_before_docker(self):
+        script = r'''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'arm64\n'; }
+read_profile() { printf 'intel\n'; }
+ensure_docker_access() { printf 'unexpected-docker-call\n'; }
+compose up -d
+'''
+        result = subprocess.run(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ARM64 当前使用 CPU', result.stderr)
+        self.assertNotIn('unexpected-docker-call', result.stdout)
+
+    def test_arm64_offline_start_rejects_cached_amd64_images(self):
+        script = r'''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'aarch64\n'; }
+compose() { printf '%s\n' '{"services":{"app":{"image":"app:v1"}}}'; }
+fake_docker() { printf 'linux/%s\n' "$cached_architecture"; }
+DOCKER_CMD=(fake_docker)
+cached_architecture=amd64
+if cached_images_available app; then printf 'bad\n'; else printf 'wrong-architecture\n'; fi
+cached_architecture=arm64
+cached_images_available app && printf 'arm64-ok\n'
+'''
+        result = subprocess.check_output(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], text=True)
+        self.assertEqual(result.splitlines(), ['wrong-architecture', 'arm64-ok'])
+
+    def test_start_does_not_launch_successfully_pulled_wrong_architecture(self):
+        script = r'''script=$1; set -- help; source "$script" >/dev/null
+uname() { printf 'aarch64\n'; }
+doctor_command() { :; }
+env_value() { printf '\n'; }
+compose() {
+  case "$1" in
+    pull) return 0;;
+    config) printf '%s\n' '{"services":{"app":{"image":"old-amd64:v1"}}}';;
+    *) printf 'unexpected-compose-start\n';;
+  esac
+}
+fake_docker() { printf 'linux/amd64\n'; }
+DOCKER_CMD=(fake_docker)
+start_command
+'''
+        result = subprocess.run(['bash', '-c', script, 'test', str(REPO / 'scripts/nas-ai')], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('镜像与本机处理器不匹配', result.stderr)
+        self.assertNotIn('unexpected-compose-start', result.stdout)
+
+    def test_install_entry_rejects_32bit_arm_and_old_arm64_releases_before_download(self):
+        source = (REPO / 'install.sh').read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        target = self.root / 'new-install'
+        for architecture, version, message in [('armv7l', 'v1.7.3', '32位 ARM'), ('arm64', 'v1.7.2', 'v1.7.3'), ('aarch64', 'v1.6.5', 'v1.7.3')]:
+            with self.subTest(architecture=architecture, version=version), \
+                    patch.object(manager.platform, 'machine', return_value=architecture), \
+                    patch.object(sys, 'argv', ['install', '--version', version, '--directory', str(target)]), \
+                    patch.object(manager.urllib.request, 'urlopen') as download:
+                with self.assertRaisesRegex(SystemExit, message):
+                    exec(compile(source, 'install.sh', 'exec'), {})
+                download.assert_not_called()
+                self.assertFalse(target.exists())
+
+    def test_arm64_release_guard_allows_new_versions_and_rejects_old(self):
+        for architecture in ('aarch64', 'arm64'):
+            with patch.object(manager.platform, 'machine', return_value=architecture):
+                for version in ('v1.7.3', '1.7.3', 'v1.7.10', 'v2.0.0'):
+                    self.assertEqual(manager.require_supported_architecture(version), 'arm64')
+                for version in ('v1.7.2', '1.7.0', 'v1.6.5'):
+                    with self.assertRaisesRegex(ValueError, 'v1.7.3'):
+                        manager.require_supported_architecture(version)
+        with patch.object(manager.platform, 'machine', return_value='armv7l'):
+            with self.assertRaisesRegex(ValueError, '32位 ARM'):
+                manager.require_supported_architecture()
+
+    def test_arm64_old_release_update_and_rollback_do_not_change_installation(self):
+        (self.root / 'app.py').write_text('unchanged')
+        snapshot = self.root / 'snapshot'; snapshot.mkdir()
+        (snapshot / 'state.json').write_text(json.dumps({'old_version': '1.7.2'}))
+        with patch.object(manager.platform, 'machine', return_value='aarch64'), \
+                patch.object(manager, 'ROOT', self.root), patch.object(manager, 'run') as run, \
+                patch.object(manager, 'request') as request:
+            with self.assertRaisesRegex(ValueError, 'v1.7.3'):
+                manager.update(argparse.Namespace(version='v1.7.2', archive=None, checksums=None))
+            with self.assertRaisesRegex(ValueError, 'v1.7.3'):
+                manager.restore_code(snapshot)
+            run.assert_not_called()
+            request.assert_not_called()
+        self.assertEqual((self.root / 'app.py').read_text(), 'unchanged')
+
+    def test_arm64_upgrade_requires_a_compatible_rollback_version(self):
+        (self.root / '.nas-ai-profile').write_text('cpu\n')
+        with patch.object(manager.platform, 'machine', return_value='aarch64'), \
+                patch.object(manager, 'ROOT', self.root), patch.object(manager, 'run') as run, \
+                patch.object(manager, 'public_json') as release, \
+                patch.object(manager, 'request', return_value={'version': '1.7.2'}) as request:
+            with self.assertRaisesRegex(ValueError, '新目录安装'):
+                manager.update(argparse.Namespace(version='v1.7.3', archive=None, checksums=None))
+            run.assert_not_called()
+            release.assert_not_called()
+            request.assert_called_once_with('/api/health')
+        self.assertFalse((self.root / '.nas-ai-releases').exists())
 
     def test_only_legacy_default_vision_models_are_migrated(self):
         old = {'NAS_AI_VISION_MODEL':'qwen3-vl:2b','NAS_AI_CHAT_MODEL':'custom-private-model'}

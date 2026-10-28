@@ -18,7 +18,36 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
+  source-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate release metadata and dependencies
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r requirements.lock.txt --progress-spinner off
+          node --check app/static/app.js
+          bash -n install.sh scripts/nas-ai scripts/nas-ai-multimodal scripts/*.sh
+          scripts/release-check.sh
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml -f compose.media.yml config --quiet
+  build-test:
+    needs: source-checks
+    uses: ./.github/workflows/container-runtime.yml
+    with:
+      publish: true
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   image-and-release:
+    needs: build-test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +60,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download both native image digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: digests
+          merge-multiple: true
       - name: Generate image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -39,24 +74,25 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
-      - name: Build and publish x86-64 image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build and publish portable media runtime
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/multimodal-runtime.Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}-media
+      - name: Publish verified amd64 and arm64 manifests
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          APP_TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          app_refs=(); media_refs=(); tags=()
+          for digest in digests/app/*; do app_refs+=("$IMAGE@sha256:${digest##*/}"); done
+          for digest in digests/media/*; do media_refs+=("$IMAGE@sha256:${digest##*/}"); done
+          test "${#app_refs[@]}" = 2
+          test "${#media_refs[@]}" = 2
+          while IFS= read -r tag; do tags+=(--tag "$tag"); done <<< "$APP_TAGS"
+          docker buildx imagetools create "${tags[@]}" "${app_refs[@]}"
+          docker buildx imagetools create --tag "$IMAGE:$VERSION-media" "${media_refs[@]}"
+          for tag in "$VERSION" "$VERSION-media"; do
+            docker buildx imagetools inspect --raw "$IMAGE:$tag" > manifest.json
+            python3 -c 'import json; p={(x["platform"]["os"],x["platform"]["architecture"]) for x in json.load(open("manifest.json"))["manifests"]}; assert {("linux","amd64"),("linux","arm64")} <= p, p'
+          done
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

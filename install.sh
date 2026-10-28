@@ -2,7 +2,7 @@
 set -euo pipefail
 command -v python3 >/dev/null || { printf '请先在NAS中安装 Python 3 和 Docker。\n' >&2; exit 1; }
 python3 - "$@" <<'PY'
-import argparse, fcntl, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, tarfile, tempfile, urllib.request
+import argparse, fcntl, hashlib, importlib.util, json, os, pathlib, platform, re, shutil, struct, subprocess, tarfile, tempfile, urllib.request
 os.umask(0o077)
 p=argparse.ArgumentParser(description='下载校验后的正式版并打开安装向导')
 p.add_argument('--directory',default='nas-ai-space')
@@ -10,6 +10,11 @@ p.add_argument('--version',default='')
 p.add_argument('--port',type=int,default=18765)
 p.add_argument('--upgrade',action='store_true',help='升级已有旧版安装，保留其配置与数据')
 a=p.parse_args()
+architecture=platform.machine().lower()
+if architecture not in {'x86_64','amd64','aarch64','arm64'}:
+    raise SystemExit('不支持此处理器架构：'+architecture+'。需要64位 x86-64 或 ARM64 系统；32位 ARM 请先安装64位系统。')
+if struct.calcsize('P') != 8:
+    raise SystemExit('当前使用32位系统或 Python。ARM64 / x86-64 安装需要64位系统和64位 Python 3。')
 target=pathlib.Path(a.directory).expanduser().resolve()
 if target.exists() and not a.upgrade:
     raise SystemExit('目标目录已存在。已有安装请运行 scripts/nas-ai wizard；新安装请指定另一个 --directory。')
@@ -18,6 +23,8 @@ if not version:
     req=urllib.request.Request('https://api.github.com/repos/hongjiahao371-pixel/nas-ai-space/releases/latest',headers={'User-Agent':'NAS-AI-Space'})
     with urllib.request.urlopen(req,timeout=30) as r:version=json.load(r)['tag_name']
 if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise SystemExit('版本号无效')
+if architecture in {'aarch64','arm64'} and tuple(map(int,version[1:].split('.'))) < (1,7,3):
+    raise SystemExit('ARM64 安装需要 v1.7.3 或更新正式版；'+version+' 仅提供 x86-64 镜像。请等待 ARM64 正式版发布或选择更新版本。')
 name='nas-ai-space-'+version+'.tar.gz'
 base='https://github.com/hongjiahao371-pixel/nas-ai-space/releases/download/'+version+'/'
 target.parent.mkdir(parents=True,exist_ok=True)

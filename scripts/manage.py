@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -22,6 +24,20 @@ RUNNER = Path(__file__).resolve().parent / 'nas-ai'
 API = 'https://api.github.com/repos/hongjiahao371-pixel/nas-ai-space'
 PROTECTED = {'.git', '.env', '.nas-ai-profile', '.nas-ai-releases', '.nas-ai-restores',
              '.nas-ai-release-files.json', '.venv', 'data', 'library', 'uploads', 'recycle', 'runtime', 'work', 'backups'}
+
+
+def require_supported_architecture(version=None):
+    architecture = platform.machine().lower()
+    if architecture not in {'x86_64', 'amd64', 'aarch64', 'arm64'}:
+        raise ValueError('不支持此处理器架构：' + architecture + '。需要64位 x86-64 或 ARM64 系统；32位 ARM 请先安装64位系统。')
+    if struct.calcsize('P') != 8:
+        raise ValueError('当前使用32位系统或 Python。ARM64 / x86-64 安装需要64位系统和64位 Python 3。')
+    if architecture in {'aarch64', 'arm64'} and version:
+        if not re.fullmatch(r'v?\d+\.\d+\.\d+', version):
+            raise ValueError('版本号无效')
+        if tuple(map(int, version.lstrip('v').split('.'))) < (1, 7, 3):
+            raise ValueError('ARM64 需要 v1.7.3 或更新版本，不能安装或回退到仅支持 x86-64 的 ' + version)
+    return 'arm64' if architecture in {'aarch64', 'arm64'} else 'amd64'
 
 
 def configuration():
@@ -186,6 +202,7 @@ def vision_default_migration(config):
 
 
 def update(args):
+    require_supported_architecture(args.version)
     if not (ROOT / '.nas-ai-profile').is_file():
         raise ValueError('这是手工部署目录，请使用原部署流程；通用更新不会猜测或替换现有服务组合')
     tracked = ROOT / '.nas-ai-release-files.json'
@@ -199,6 +216,10 @@ def update(args):
         if status.strip():
             raise ValueError('源码有本地改动，请先保存或提交；程序未改动')
     old = request('/api/health')['version']
+    try:
+        require_supported_architecture(old)
+    except ValueError as error:
+        raise ValueError('现有版本不能作为 ARM64 升级的回退版本，请保留原目录，在新目录安装 v1.7.3 或更新版本。') from error
     with tempfile.TemporaryDirectory(prefix='.nas-ai-download-', dir=ROOT.parent) as temporary:
         stage = Path(temporary)
         if args.archive:
@@ -206,6 +227,7 @@ def update(args):
         else:
             release = public_json(API + ('/releases/tags/' + args.version if args.version else '/releases/latest'))
             version = release['tag_name']
+            require_supported_architecture(version)
             if release.get('draft') or release.get('prerelease'):
                 raise ValueError('请选择已正式发布的版本')
             if version == 'v' + old:
@@ -257,6 +279,7 @@ def update(args):
 
 def restore_code(snapshot):
     state = json.loads((snapshot / 'state.json').read_text())
+    require_supported_architecture(state['old_version'])
     for name in set(state['new_files']) - set(state['old_files']):
         if safe_member(name):
             (ROOT / name).unlink(missing_ok=True)
@@ -361,6 +384,7 @@ def main():
     network = commands.add_parser('download-proxy')
     network.add_argument('url')
     args = parser.parse_args()
+    require_supported_architecture()
     if args.command == 'update':
         if args.archive and not (args.version and args.checksums):
             parser.error('本地升级包需要 --version 和 --checksums')

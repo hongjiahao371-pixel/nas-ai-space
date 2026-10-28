@@ -12,9 +12,17 @@
       "sha256": "c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f"
     }
   },
-  "runtime": {
-    "tag": "b11480",
-    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11480/llama-b11480-bin-ubuntu-x64.tar.gz",
-    "sha256": "ae6c025591931df1600d1670a4f6f5e96909a1f710f34abc85b4b59a8bd7e507"
+  "runtimes": {
+    "amd64": {
+      "tag": "b11480",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11480/llama-b11480-bin-ubuntu-x64.tar.gz",
+      "sha256": "ae6c025591931df1600d1670a4f6f5e96909a1f710f34abc85b4b59a8bd7e507"
+    },
+    "arm64": {
+      "tag": "b11480",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11480/llama-b11480-bin-ubuntu-arm64.tar.gz",
+      "size": 13746380,
+      "sha256": "71ec06d21fc72bca65b04f80a6d9d9554685a53c2705fd50b33250eb11092656"
+    }
   }
 }
