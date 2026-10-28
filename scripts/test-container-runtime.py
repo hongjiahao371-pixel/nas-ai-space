@@ -371,9 +371,6 @@ print(json.dumps(result))
         self.check_container("indexer")
         point = self.wait("production media worker to index the synthetic image",
                           lambda: self.indexed_point(image["file"]["id"]), self.args.inference_timeout)
-        completed = self.wait("worker to finish SQLite state and old-point cleanup",
-                              self.worker_complete, self.args.inference_timeout)
-        self.record("media_worker_complete", completed)
         self.record("qdrant_media_vector", {"file_id": image["file"]["id"], "point_id": point["id"],
                                           **vector_summary(point["vector"]), "payload": point["payload"]})
         completed = self.wait("media worker SQLite ready record and clean completion",
@@ -422,15 +419,6 @@ print(json.dumps(result))
         if status.get("errors", 0) or status.get("partial_files", 0):
             raise ValueError("Media worker reported errors or partial indexing; inspect media_worker_last_status")
         return status if media_worker_complete(status) else None
-
-    def worker_complete(self):
-        status = self.request(self.app_url, "/api/system/multimodal")
-        if (status.get("fully_indexed") is True and status.get("indexed_files") == 1
-                and status.get("indexed_points") == 1 and status.get("errors") == 0
-                and status.get("partial_files") == 0 and status.get("worker_alive") is True):
-            return {k: status[k] for k in ("fully_indexed", "indexed_files", "indexed_points",
-                                          "errors", "partial_files", "worker_alive")}
-        return None
 
     def cleanup(self):
         errors = []

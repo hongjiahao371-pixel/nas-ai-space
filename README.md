@@ -205,7 +205,7 @@ bash install-ai-space.sh --upgrade --directory /path/to/existing-ai-space
 
 发布验收状态：x86-64 CPU/Ollama 公共栈与 Intel NAS 栈已经在真实设备上跑通；
 Intel OpenVINO、AMD ROCm/Vulkan 和 NVIDIA 方案已通过 Compose 配置校验，
-但仍需使用者在对应真实 GPU 上验证驱动与加速。ARM64 Linux CPU 由原生 ARM 容器测试覆盖；这不等于每款 ARM NAS 的整机性能验收，也不包含 ARM NPU、GPU 或 Jetson 加速。
+但仍需使用者在对应真实 GPU 上验证驱动与加速。ARM64 Linux CPU 的原生测试覆盖应用接口、图片索引与检索以及默认 Qwen 模型运行；不是每款 ARM NAS 的整机性能验收。ARM NPU、GPU、Jetson 加速，以及 ARM 上的语音转录和完整安装/恢复生命周期不属于本轮实机验证范围，详见 [验证记录](docs/ACCEPTANCE-v1.7.3.md)。
 
 ### 常用命令
 

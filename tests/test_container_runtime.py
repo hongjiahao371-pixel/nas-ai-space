@@ -43,6 +43,23 @@ class RuntimeAcceptanceGates(unittest.TestCase):
             with self.subTest(response=response), self.assertRaises(ValueError):
                 runtime.require_media_hit(response, 17, media_first=True)
 
+    def test_worker_gate_rejects_point_written_before_sqlite_ready_or_unhealthy_worker(self):
+        complete = {"enabled": True, "fully_indexed": True, "worker_alive": True, "dimension": 768,
+                    "total_media": 1, "indexed_files": 1, "indexed_points": 1,
+                    "pending_files": 0, "errors": 0, "partial_files": 0}
+        self.assertTrue(runtime.media_worker_complete(complete))
+        invalid = [{}, dict(complete, fully_indexed=False, indexed_files=0, indexed_points=0, pending_files=1),
+                   dict(complete, errors=1), dict(complete, partial_files=1), dict(complete, worker_alive=False),
+                   dict(complete, total_media=2), dict(complete, indexed_points=2), dict(complete, indexed_files=True)]
+        for status in invalid:
+            with self.subTest(status=status):
+                self.assertFalse(runtime.media_worker_complete(status))
+
+    def test_token_filter_redacts_repeated_tokens_and_preserves_logs_before_bootstrap(self):
+        self.assertEqual(runtime.redact_token("Bearer synthetic-token; token=synthetic-token", "synthetic-token"),
+                         "Bearer [REDACTED_RUNTIME_TOKEN]; token=[REDACTED_RUNTIME_TOKEN]")
+        self.assertEqual(runtime.redact_token("startup failed before bootstrap", ""), "startup failed before bootstrap")
+
 
 if __name__ == "__main__":
     unittest.main()
