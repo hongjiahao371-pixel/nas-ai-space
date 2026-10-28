@@ -38,3 +38,4 @@ work/
 .nas-ai-docker/
 
 runtime-evidence/
+ollama-runtime-evidence/

@@ -5,6 +5,9 @@ RUN python /tmp/build-sqlite.py /sqlite
 
 FROM python:3.12-slim-bookworm
 COPY --from=sqlite-build /sqlite/libsqlite3.so.0 /usr/local/lib/libsqlite3.so.0
+# ARM multiarch system directories can precede /usr/local/lib in ldconfig.
+# Explicitly resolve the pinned WAL-fix library on both supported architectures.
+ENV LD_LIBRARY_PATH=/usr/local/lib
 RUN ldconfig && python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3)"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

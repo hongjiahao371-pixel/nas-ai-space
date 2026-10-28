@@ -14,7 +14,7 @@ jobs:
   native:
     name: Native ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -53,12 +53,16 @@ jobs:
         run: docker run --rm --entrypoint python -v "$PWD:/src:ro" -w /src nas-ai-space:test -m unittest discover -s tests -v
       - name: Exercise real CPU model and application
         run: python3 scripts/test-container-runtime.py
+      - name: Exercise default Qwen models on CPU
+        run: python3 scripts/test-ollama-runtime.py
       - name: Upload runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-runtime-${{ matrix.arch }}
-          path: runtime-evidence/
+          path: |
+            runtime-evidence/
+            ollama-runtime-evidence/
           if-no-files-found: warn
       - name: Log in to GitHub Container Registry
         if: inputs.publish

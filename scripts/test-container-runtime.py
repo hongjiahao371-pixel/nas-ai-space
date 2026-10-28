@@ -83,6 +83,20 @@ def require_media_hit(response: dict, file_id: int, *, media_first: bool = False
     raise ValueError("Synthetic image was not returned by the media search")
 
 
+def media_worker_complete(status: dict) -> bool:
+    # A Qdrant point can exist before old-point cleanup and the SQLite ready
+    # record succeed. Require the public status API to confirm the entire batch.
+    return (all(status.get(key) is True for key in ("enabled", "fully_indexed", "worker_alive"))
+            and all(type(status.get(key)) is int and status[key] == value for key, value in {
+                "dimension": 768, "total_media": 1, "indexed_files": 1, "indexed_points": 1,
+                "pending_files": 0, "errors": 0, "partial_files": 0,
+            }.items()))
+
+
+def redact_token(text: str, token: str) -> str:
+    return text.replace(token, "[REDACTED_RUNTIME_TOKEN]") if token else text
+
+
 def synthetic_png() -> bytes:
     """Produce a new simple RGB fixture without any private media or dependencies."""
     side = 256
@@ -125,7 +139,10 @@ class Acceptance:
         print(f"PASS {name}", flush=True)
 
     def save(self):
-        (self.evidence / "runtime.json").write_text(json.dumps(self.report, ensure_ascii=False, indent=2) + "\n")
+        (self.evidence / "runtime.json").write_text(self.redact(json.dumps(self.report, ensure_ascii=False, indent=2)) + "\n")
+
+    def redact(self, text: str) -> str:
+        return redact_token(text, self.token)
 
     @staticmethod
     def command(*args: str, timeout: int = 120) -> str:
@@ -354,8 +371,14 @@ print(json.dumps(result))
         self.check_container("indexer")
         point = self.wait("production media worker to index the synthetic image",
                           lambda: self.indexed_point(image["file"]["id"]), self.args.inference_timeout)
+        completed = self.wait("worker to finish SQLite state and old-point cleanup",
+                              self.worker_complete, self.args.inference_timeout)
+        self.record("media_worker_complete", completed)
         self.record("qdrant_media_vector", {"file_id": image["file"]["id"], "point_id": point["id"],
                                           **vector_summary(point["vector"]), "payload": point["payload"]})
+        completed = self.wait("media worker SQLite ready record and clean completion",
+                              self.worker_completion, self.args.inference_timeout)
+        self.record("media_worker_completed", completed)
         params = urllib.parse.urlencode({"q": QUERY, "kind": "image", "media_first": "true", "precise": "false", "limit": 5})
         response = self.request(self.app_url, "/api/search?" + params, timeout=self.args.inference_timeout)
         self.record("app_media_first_search", {**require_media_hit(response, image["file"]["id"], media_first=True),
@@ -363,6 +386,8 @@ print(json.dumps(result))
         response = self.request(self.app_url, "/api/search/image?kind=image&limit=5", method="POST", raw=png,
                                 headers={"Content-Type": "image/png"}, timeout=self.args.inference_timeout)
         self.record("app_image_search", require_media_hit(response, image["file"]["id"]))
+        if not self.worker_completion():
+            raise ValueError("Media worker lost its completed/healthy state during the search checks")
         self.running()
         self.report["status"] = "passed"
 
@@ -390,15 +415,32 @@ print(json.dumps(result))
         points = response["result"]["points"]
         return points[0] if points else None
 
+    def worker_completion(self):
+        status = self.request(self.app_url, "/api/system/multimodal")
+        self.report["checks"]["media_worker_last_status"] = status
+        self.save()
+        if status.get("errors", 0) or status.get("partial_files", 0):
+            raise ValueError("Media worker reported errors or partial indexing; inspect media_worker_last_status")
+        return status if media_worker_complete(status) else None
+
+    def worker_complete(self):
+        status = self.request(self.app_url, "/api/system/multimodal")
+        if (status.get("fully_indexed") is True and status.get("indexed_files") == 1
+                and status.get("indexed_points") == 1 and status.get("errors") == 0
+                and status.get("partial_files") == 0 and status.get("worker_alive") is True):
+            return {k: status[k] for k in ("fully_indexed", "indexed_files", "indexed_points",
+                                          "errors", "partial_files", "worker_alive")}
+        return None
+
     def cleanup(self):
         errors = []
         for service, name in reversed(list(self.containers.items())):
             try:
                 # docker logs sends the container's stderr to the CLI's stderr.
                 result = subprocess.run(["docker", "logs", "--timestamps", name], capture_output=True, text=True, timeout=20)
-                (self.evidence / (service + ".log")).write_text(result.stdout + result.stderr)
+                (self.evidence / (service + ".log")).write_text(self.redact(result.stdout + result.stderr))
                 state = json.loads(self.docker("inspect", "--format", "{{json .State}}", name, timeout=15))
-                (self.evidence / (service + "-state.json")).write_text(json.dumps(state, indent=2) + "\n")
+                (self.evidence / (service + "-state.json")).write_text(self.redact(json.dumps(state, indent=2)) + "\n")
             except Exception as exc:
                 errors.append(f"collect {service}: {exc}")
             try:
@@ -448,8 +490,8 @@ def main():
     except BaseException as exc:
         acceptance.report["status"] = "failed"
         acceptance.report["error"] = f"{type(exc).__name__}: {exc}"
-        (acceptance.evidence / "failure.log").write_text(traceback.format_exc())
-        print(acceptance.report["error"], flush=True)
+        (acceptance.evidence / "failure.log").write_text(acceptance.redact(traceback.format_exc()))
+        print(acceptance.redact(acceptance.report["error"]), flush=True)
     finally:
         acceptance.cleanup()
     print(f"Native runtime acceptance {acceptance.report['status']}; evidence: {acceptance.evidence}", flush=True)
