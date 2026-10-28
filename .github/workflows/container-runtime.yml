@@ -93,13 +93,23 @@ jobs:
       - name: Confirm published images are exactly the tested builds
         if: inputs.publish
         env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          PLATFORM: linux/${{ matrix.arch }}
           TESTED_APP: ${{ steps.tested-app.outputs.imageid }}
-          PUBLISHED_APP: ${{ steps.app.outputs.imageid }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
           TESTED_MEDIA: ${{ steps.tested-media.outputs.imageid }}
-          PUBLISHED_MEDIA: ${{ steps.media.outputs.imageid }}
+          MEDIA_DIGEST: ${{ steps.media.outputs.digest }}
         run: |
-          test -n "$TESTED_APP" && test "$TESTED_APP" = "$PUBLISHED_APP"
-          test -n "$TESTED_MEDIA" && test "$TESTED_MEDIA" = "$PUBLISHED_MEDIA"
+          set -euo pipefail
+          # Registry exports include an OCI index with provenance. Compare the
+          # pulled platform image's config ID with the image actually tested,
+          # never the index digest with a local Docker image ID.
+          docker pull --platform "$PLATFORM" "$IMAGE@$APP_DIGEST"
+          docker pull --platform "$PLATFORM" "$IMAGE@$MEDIA_DIGEST"
+          published_app=$(docker image inspect --format '{{.Id}}' "$IMAGE@$APP_DIGEST")
+          published_media=$(docker image inspect --format '{{.Id}}' "$IMAGE@$MEDIA_DIGEST")
+          test -n "$TESTED_APP" && test "$TESTED_APP" = "$published_app"
+          test -n "$TESTED_MEDIA" && test "$TESTED_MEDIA" = "$published_media"
       - name: Save image digests
         if: inputs.publish
         env:
