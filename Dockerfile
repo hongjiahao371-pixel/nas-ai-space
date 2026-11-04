@@ -1,9 +1,9 @@
-FROM python:3.12-slim-bookworm AS sqlite-build
+FROM python:3.15-slim-bookworm AS sqlite-build
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 COPY scripts/build-sqlite.py /tmp/build-sqlite.py
 RUN python /tmp/build-sqlite.py /sqlite
 
-FROM python:3.12-slim-bookworm
+FROM python:3.15-slim-bookworm
 COPY --from=sqlite-build /sqlite/libsqlite3.so.0 /usr/local/lib/libsqlite3.so.0
 # ARM multiarch system directories can precede /usr/local/lib in ldconfig.
 # Explicitly resolve the pinned WAL-fix library on both supported architectures.
