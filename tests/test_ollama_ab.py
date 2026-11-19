@@ -61,6 +61,8 @@ class ComparisonTests(unittest.TestCase):
         from unittest.mock import patch
         trial=object.__new__(ab.LockedAcceptance)
         trial.report={'checks':{}}
+        trial.version='0.30.8'
+        trial.cpu_request=None
         trial.save=lambda:None
         cases=[([{'name':ab.MODELS[0],'size_vram':0}],True),
                ([{'name':ab.MODELS[0],'size_vram':522977280}],False),
@@ -78,3 +80,80 @@ class ComparisonTests(unittest.TestCase):
                 self.assertIs(request.return_value,response)
         self.assertEqual(len(trial.report['cpu_process_samples']),2)
         self.assertEqual(trial.report['cpu_process_samples'][1]['models'][0]['size_vram'],522977280)
+
+class CPUProofTests(unittest.TestCase):
+    def setUp(self):
+        self.info={'HostConfig':{'Privileged':False,'Runtime':'runc','PidMode':'','IpcMode':'private','UsernsMode':'','UTSMode':'','CgroupnsMode':'private','CapDrop':['ALL']},'Mounts':[{'Type':'volume'}]}
+        self.boundary=ab.proof.container_cpu_boundary(self.info,'/dev/null\n/dev/zero')
+        self.log='''msg="inference compute" id=cpu library=cpu
+msg="starting llama-server" cmd="llama-server -ngl 0 --model synthetic"
+load_tensors: AMX model buffer size = 498.75 MiB
+load_tensors: CPU model buffer size = 157.62 MiB
+llama_context: CPU compute buffer size = 12.0 MiB
+'''
+        self.response={'models':[{'name':ab.MODELS[0],'model':ab.MODELS[0],'digest':'a'*64,'size_vram':522977280}]}
+    def run_proof(self,**overrides):
+        args=dict(version='0.32.3',model=ab.MODELS[0],digest='a'*64,response=self.response,full_log=self.log,
+                  request_log=self.log,isolation=self.boundary,num_gpu=0)
+        args.update(overrides)
+        return ab.proof.amx_cpu_proof(**args)
+    def test_exact_amx_accounting_and_repeated_buffer_replacement(self):
+        self.assertEqual(self.run_proof()['amx_bytes'],522977280)
+        stamped=''.join('2026-11-19T12:00:00.123456789Z '+line+'\n' for line in self.log.splitlines())
+        self.assertEqual(self.run_proof(request_log=stamped)['amx_bytes'],522977280)
+        self.assertEqual(self.run_proof(request_log=self.log+self.log.splitlines()[2]+'\n')['amx_bytes'],522977280)
+        log=self.log+'clip_model_load: AMX model buffer size = 1.0 MiB\n'
+        response={'models':[dict(self.response['models'][0],size_vram=524025856)]}
+        self.assertEqual(self.run_proof(request_log=log,response=response)['amx_bytes'],524025856)
+    def test_identity_and_accounting_never_accept_arbitrary_vram(self):
+        for key,value in [('name','wrong'),('model','wrong'),('digest','b'*64),('size_vram',0),('size_vram',1),('size_vram',True)]:
+            with self.assertRaises(ValueError):self.run_proof(response={'models':[dict(self.response['models'][0],**{key:value})]})
+        for options in [dict(version='0.30.8'),dict(num_gpu=-1),dict(num_gpu=False),dict(isolation=None),dict(response={'models':[]}),dict(response={'models':self.response['models']*2})]:
+            with self.assertRaises(ValueError):self.run_proof(**options)
+    def test_missing_unknown_gpu_and_multiple_runner_logs_rejected(self):
+        logs=['',self.log.replace('-ngl 0','-ngl 1'),self.log+self.log,
+              self.log.replace('AMX model','CUDA0 model'),self.log.replace('498.75','498.76'),
+              self.log+'mystery: new buffer size = 5 MiB\n',self.log+'offloaded 1/28 layers to GPU\n',
+              self.log+'using device CUDA0 (GPU)\n']
+        for log in logs:
+            with self.assertRaises(ValueError):self.run_proof(request_log=log)
+        with self.assertRaises(ValueError):self.run_proof(full_log=self.log.replace('id=cpu library=cpu','id=0 library=cuda'))
+    def test_container_boundary_rejects_gpu_and_privilege_escape_paths(self):
+        for key,value in [('Privileged',True),('CapAdd',['SYS_ADMIN']),('IpcMode','host'),('UsernsMode','host'),('UTSMode','host'),('CgroupnsMode','host'),('Devices',''),('Runtime','nvidia'),('Devices',[{}]),('DeviceRequests',[{}]),
+                          ('DeviceCgroupRules',['c *:* rwm']),('Binds',['/dev:/dev']),('VolumesFrom',['other']),('CapDrop',[]),('PidMode','host')]:
+            info=dict(self.info,HostConfig=dict(self.info['HostConfig'],**{key:value}))
+            with self.assertRaises(ValueError):ab.proof.container_cpu_boundary(info,'/dev/null')
+        for nodes in ['', '/dev/null\n/dev/nvidia0','/dev/null\n/dev/dri/renderD128','/dev/null\n/dev/kfd']:
+            with self.assertRaises(ValueError):ab.proof.container_cpu_boundary(self.info,nodes)
+        with self.assertRaises(ValueError):ab.proof.container_cpu_boundary(dict(self.info,Mounts=[{'Type':'bind'}]),'/dev/null')
+
+    def test_wrapper_proves_same_ps_sample_and_does_not_erase_nonzero_vram(self):
+        from unittest.mock import patch
+        trial=object.__new__(ab.LockedAcceptance)
+        trial.version='0.32.3'; trial.model_ids={ab.MODELS[0]:'a'*64}
+        trial.cpu_request={'model':ab.MODELS[0],'num_gpu':0}
+        trial.cpu_isolation=self.boundary;trial.request_log_prefix=('','')
+        trial.report={'checks':{}};trial.save=lambda:None
+        trial.runner_logs=lambda:(self.log,'')
+        trial.inspect_cpu_boundary=lambda:self.boundary
+        with patch.object(ab.original.OllamaAcceptance,'request',return_value=self.response) as request:
+            trial.check_cpu('http://127.0.0.1',ab.MODELS[0])
+            request.assert_called_once_with('http://127.0.0.1','/api/ps')
+        self.assertEqual(self.response['models'][0]['size_vram'],522977280)
+        self.assertEqual(trial.report['checks']['cpu_qwen3-embedding']['method'],'amx_accounting_cpu_proof')
+        trial.runner_logs=lambda:(self.log.replace('-ngl 0','-ngl 1'),'')
+        with patch.object(ab.original.OllamaAcceptance,'request',return_value=self.response):
+            with self.assertRaises(ValueError):trial.check_cpu('http://127.0.0.1',ab.MODELS[0])
+
+    def test_both_versions_requests_explicit_cpu_and_preserve_vision_options(self):
+        from unittest.mock import patch
+        for version in ab.VERSIONS:
+            trial=object.__new__(ab.LockedAcceptance)
+            trial.version=version;trial.model_ids={ab.MODELS[0]:'a'*64}
+            trial.report={'checks':{}};trial.save=lambda:None
+            trial.inspect_cpu_boundary=lambda:self.boundary;trial.runner_logs=lambda:('','')
+            payload={'model':ab.MODELS[0],'options':{'num_predict':32,'temperature':0}}
+            with patch.object(ab.original.OllamaAcceptance,'request',return_value={}) as request:
+                trial.request('http://127.0.0.1','/api/generate',payload=payload)
+                self.assertEqual(request.call_args.kwargs['payload']['options'],{'num_predict':32,'temperature':0,'num_gpu':0})
+                self.assertNotIn('num_gpu',payload['options'])

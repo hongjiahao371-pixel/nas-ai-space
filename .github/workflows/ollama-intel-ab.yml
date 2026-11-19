@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/ollama-intel-ab.yml'
       - 'scripts/test-ollama-ab.py'
+      - 'scripts/ollama_cpu_proof.py'
       - 'tests/test_ollama_ab.py'
 permissions:
   contents: read

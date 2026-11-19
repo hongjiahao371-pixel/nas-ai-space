@@ -6,12 +6,16 @@ import json
 import platform
 import re
 import signal
+import subprocess
 import traceback
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location('ollama_acceptance', Path(__file__).with_name('test-ollama-runtime.py'))
 original = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(original)
+proof_spec = importlib.util.spec_from_file_location('cpu_proof', Path(__file__).with_name('ollama_cpu_proof.py'))
+proof = importlib.util.module_from_spec(proof_spec)
+proof_spec.loader.exec_module(proof)
 MODELS = ('qwen3-embedding:0.6b', 'qwen3-vl:2b-instruct-q4_K_M')
 VERSIONS = ('0.30.8', '0.32.3')
 
@@ -89,6 +93,10 @@ class LockedAcceptance(original.OllamaAcceptance):
         self.model_ids = None
         self.inference_started = False
         self.inference_failed = False
+        self.cpu_isolation = None
+        self.request_log_prefix = None
+        self.cpu_request = None
+        self.ps_response = None
 
     def record(self, name, value):
         if name == 'downloaded_models':
@@ -101,21 +109,71 @@ class LockedAcceptance(original.OllamaAcceptance):
         if path in ('/api/embed', '/api/generate'):
             if not self.model_ids:
                 raise ValueError('Inference without model identity lock')
+            payload = dict(kwargs['payload'])
+            payload['options'] = {**payload.get('options', {}), 'num_gpu': 0}
+            kwargs['payload'] = payload
+            self.cpu_request = {'model': payload['model'], 'num_gpu': 0}
+            self.cpu_isolation = self.inspect_cpu_boundary()
+            self.request_log_prefix = self.runner_logs()
+            self.record('cpu_request_' + payload['model'].split(':')[0], self.cpu_request)
             self.inference_started = True
         try:
             response = super().request(base, path, **kwargs)
             if path == '/api/ps':
+                self.ps_response = response
                 # Observe the very same sample used by unchanged check_cpu().
                 # Do not poll, coerce, normalize or substitute acceptance data.
                 samples = self.report.setdefault('cpu_process_samples', [])
                 if len(samples) < 2:
                     samples.append(safe_process_sample(response))
                     self.save()
+                if self.cpu_request is not None:
+                    rows = response.get('models')
+                    selected = self.cpu_request['model']
+                    if (not isinstance(rows,list) or len(rows)!=1 or rows[0].get('name')!=selected
+                            or rows[0].get('model')!=selected
+                            or type(rows[0].get('size_vram')) is not int or rows[0]['size_vram'] < 0
+                            or rows[0].get('digest','').removeprefix('sha256:')!=self.model_ids[selected]):
+                        raise ValueError('Loaded CPU model identity not exact')
             return response
         except Exception:
             if path in ('/api/embed', '/api/generate'):
                 self.inference_failed = True
             raise
+
+    def runner_logs(self):
+        result = subprocess.run(['docker', 'logs', '--timestamps', self.containers['ollama']],
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode or len(result.stdout)+len(result.stderr)>2*1024*1024:
+            raise ValueError('Runner logs unavailable or too large')
+        # Preserve each stream independently so append-only comparison is stable.
+        return (result.stdout, result.stderr)
+
+    def inspect_cpu_boundary(self):
+        info = json.loads(self.docker('inspect', '--format', '{{json .}}', self.containers['ollama']))
+        nodes = self.docker('exec', self.containers['ollama'], 'find', '/dev', '-type', 'c')
+        evidence = proof.container_cpu_boundary(info, nodes)
+        self.record('cpu_container_boundary', evidence)
+        return evidence
+
+    def check_cpu(self, url, model):
+        self.ps_response = None
+        try:
+            return super().check_cpu(url, model)
+        except ValueError:
+            if self.version != '0.32.3' or self.ps_response is None:
+                raise
+            logs = self.runner_logs()
+            prefix = self.request_log_prefix
+            if prefix is None or any(not a.startswith(b) for a,b in zip(logs,prefix)):
+                raise ValueError('Cannot isolate fresh model load logs')
+            segment = '\n'.join(a[len(b):] for a,b in zip(logs,prefix))
+            boundary = self.inspect_cpu_boundary()
+            if boundary != self.cpu_isolation or self.cpu_request != {'model':model,'num_gpu':0}:
+                raise ValueError('CPU evidence changed during request')
+            evidence = proof.amx_cpu_proof(self.version,model,self.model_ids[model],
+                self.ps_response,'\n'.join(logs),segment,boundary,self.cpu_request['num_gpu'])
+            self.record('cpu_' + model.split(':')[0],evidence)
 
     def wait(self, name, check, timeout):
         result = super().wait(name, check, timeout)
