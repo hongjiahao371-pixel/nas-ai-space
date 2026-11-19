@@ -1971,3 +1971,12 @@ button.productivity-feed-row { width: 100%; cursor: pointer; }
 .folder-picker-list { display: flex; gap: 8px; flex-wrap: wrap; max-height: 210px; overflow: auto; margin: 12px 0; }
 .folder-picker-list button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 #libraryFolderLocation { overflow-wrap: anywhere; }
+
+/* Guest drawings use media-relative coordinates, preserving alignment on resize. */
+.guest-annotation-layer { position: absolute; pointer-events: none; z-index: 2; }
+.guest-annotation-layer.drawing { pointer-events: auto; touch-action: none; cursor: crosshair; }
+.guest-annotation-layer polyline { fill: none; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; pointer-events: none; }
+.guest-annotation-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; }
+.guest-annotation-tools button, [data-public-annotation] { min-height: 44px; padding: 8px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--inset); color: var(--text); cursor: pointer; }
+.guest-annotation-tools button:disabled { opacity: .45; cursor: default; }
+.guest-annotation-tools [role=status] { font-size: var(--fs-sm); color: var(--text-soft); }

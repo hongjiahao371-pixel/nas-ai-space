@@ -2466,8 +2466,10 @@ function updateReviewTimecode() {
 
 function renderAnnotations() {
   const layer = $('#annotationLayer');
+  if (!layer || !state.currentAsset) return;
   const strokes = [
     ...state.currentAsset.comments
+      .filter(item => !item.guest_name)
       .filter(item => item.version_id == null || Number(item.version_id) === Number(state.currentVersionId))
       .flatMap(item => item.drawing || []),
     ...state.annotationStrokes,
@@ -2477,6 +2479,31 @@ function renderAnnotations() {
     return points ? `<polyline points="${esc(points)}" fill="none" stroke="${esc(stroke.color || '#ffcc57')}" stroke-width="5" vector-effect="non-scaling-stroke"/>` : '';
   }).join('');
 }
+
+function renderGuestReviewAnnotation() {
+  const canvas = $('#reviewCanvas');
+  let layer = $('#guestReviewAnnotation');
+  const item = state.currentAsset?.comments?.find(c => Number(c.id) === Number(state.guestReviewCommentId));
+  const media = $('video, img', canvas);
+  if (!layer) {
+    layer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    layer.id = 'guestReviewAnnotation'; layer.classList.add('guest-annotation-layer');
+    layer.setAttribute('viewBox', '0 0 1000 1000'); layer.setAttribute('preserveAspectRatio', 'none'); canvas.append(layer);
+  }
+  layer.replaceChildren();
+  if (!item || !item.guest_name || Number(item.version_id) !== Number(state.currentVersionId) || !media) return;
+  if (media.tagName === 'VIDEO' && (!media.paused || Math.abs(media.currentTime - item.time_start) > .1)) return;
+  const box = media.getBoundingClientRect(), parent = canvas.getBoundingClientRect();
+  const w = media.videoWidth || media.naturalWidth || box.width, h = media.videoHeight || media.naturalHeight || box.height;
+  const scale = Math.min(box.width/w, box.height/h);
+  Object.assign(layer.style, {left: `${box.left-parent.left+(box.width-w*scale)/2}px`, top: `${box.top-parent.top+(box.height-h*scale)/2}px`, width: `${w*scale}px`, height: `${h*scale}px`});
+  for (const stroke of item.drawing || []) {
+    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    polyline.setAttribute('points', (stroke.points || []).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)).map(p => `${Math.max(0,Math.min(1,p.x))*1000},${Math.max(0,Math.min(1,p.y))*1000}`).join(' '));
+    polyline.setAttribute('stroke', /^#[0-9a-f]{6}$/i.test(stroke.color) ? stroke.color : '#ffcc57'); layer.append(polyline);
+  }
+}
+window.addEventListener('resize', () => { if (state.currentAsset) renderGuestReviewAnnotation(); });
 
 function commentAttachmentHtml(file) {
   if (!file?.url) return '';
@@ -2508,10 +2535,11 @@ function renderReviewComments() {
     ? comments.map(item => {
       const attachments = (item.attachments || []).map(commentAttachmentHtml).join('');
       const canDelete = canComment && (['owner', 'manager'].includes(state.currentAsset.access_role) || (state.user?.username && item.username === state.user.username));
-      return `<article class="review-comment ${item.resolved ? 'resolved' : ''}" data-comment-time="${item.time_start ?? ''}"><div class="review-comment-head"><b>${esc(item.display_name || item.guest_name || '成员')}</b><span>${item.time_start != null ? fmtDuration(item.time_start) : '整条素材'}</span></div><p>${esc(item.body)}</p>${attachments ? `<div class="comment-attachments">${attachments}</div>` : ''}<div class="review-comment-foot"><span>${esc(item.visibility === 'external' ? '外部可见' : '团队内部')} · ${esc(fmtTime(item.created_at))}</span><span>${canComment ? `<button data-resolve-comment="${item.id}" data-resolved="${item.resolved ? '1' : '0'}">${item.resolved ? '重新打开' : '标记解决'}</button>` : ''}${canDelete ? `<button data-delete-comment="${item.id}">删除</button>` : ''}</span></div></article>`;
+      return `<article class="review-comment ${item.resolved ? 'resolved' : ''}" data-comment-id="${item.id}" data-comment-time="${item.time_start ?? ''}"><div class="review-comment-head"><b>${esc(item.display_name || item.guest_name || '成员')}</b><span>${item.time_start != null ? fmtDuration(item.time_start) : '整条素材'}</span></div><p>${esc(item.body)}</p>${attachments ? `<div class="comment-attachments">${attachments}</div>` : ''}<div class="review-comment-foot"><span>${esc(item.visibility === 'external' ? '外部可见' : '团队内部')} · ${esc(fmtTime(item.created_at))}</span><span>${canComment ? `<button data-resolve-comment="${item.id}" data-resolved="${item.resolved ? '1' : '0'}">${item.resolved ? '重新打开' : '标记解决'}</button>` : ''}${canDelete ? `<button data-delete-comment="${item.id}">删除</button>` : ''}</span></div></article>`;
     }).join('')
     : '<div class="empty-state compact"><b>这个版本还没有审阅意见</b><p>播放视频或在画面上标注后发布第一条意见。</p></div>';
   renderAnnotations();
+  renderGuestReviewAnnotation();
 }
 
 function updateReviewActions(version) {
@@ -2609,6 +2637,7 @@ async function loadReviewVersion(versionId, seekTime = null) {
     const media = reviewMedia();
     if (media) {
       media.addEventListener('timeupdate', updateReviewTimecode);
+      ['timeupdate','seeked','play','pause','loadedmetadata'].forEach(name => media.addEventListener(name, renderGuestReviewAnnotation));
       if (seekTime != null && Number.isFinite(Number(seekTime))) {
         media.addEventListener('loadedmetadata', () => { media.currentTime = Number(seekTime); }, { once: true });
       }
@@ -2803,11 +2832,16 @@ function renderPublicShare(data, append = false) {
     const comments = asset.comments || [];
     return `<article class="public-asset" data-public-asset="${asset.id}">
       <div class="public-asset-stage">${publicStage(current, asset.id)}${data.share.watermark_text ? `<span class="review-watermark">${esc(data.share.watermark_text)}</span>` : ''}</div>
-      <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p>${(comment.attachments || []).length ? `<div class="comment-attachments">${comment.attachments.map(commentAttachmentHtml).join('')}</div>` : ''}</article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><label class="attachment-picker"><span class="attach-btn">添加附件</span><input name="attachments" type="file" accept="image/*,video/*" multiple><span class="attach-name">未选择文件</span></label><button class="primary">发布意见</button></form>` : ''}</div></div>
+      <div class="public-asset-info"><div><h2>${esc(asset.title)}</h2><p>${esc(asset.description || current?.caption || '')}</p><div class="public-version-row">${asset.versions.map(version => `<button data-public-version="${version.id}" data-public-asset-id="${asset.id}">V${version.version_number} · ${esc(version.label || version.file_name)}</button>`).join('')}${current?.download_url ? `<a href="${esc(current.download_url)}">下载原文件</a>` : ''}</div></div><div><div class="public-comment-list">${comments.length ? comments.map(comment => `<article class="public-comment"><b>${esc(comment.display_name || comment.guest_name || '访客')} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '整条素材'}</b><p>${esc(comment.body)}</p>${comment.drawing?.length ? `<button type="button" data-public-annotation="${comment.id}">查看圈改 · V${asset.versions.find(v => Number(v.id) === Number(comment.version_id))?.version_number || '?'} · ${comment.time_start != null ? fmtDuration(comment.time_start) : '图片'}</button>` : ''}${(comment.attachments || []).length ? `<div class="comment-attachments">${comment.attachments.map(commentAttachmentHtml).join('')}</div>` : ''}</article>`).join('') : '<div class="empty-state compact"><b>还没有外部审阅意见</b></div>'}</div>${data.share.can_comment ? `<form class="public-comment-form" data-public-comment-form="${asset.id}"><input name="guest_name" required maxlength="80" placeholder="你的名字"><textarea name="body" rows="3" required maxlength="4000" placeholder="输入审阅意见"></textarea><input name="time_start" type="number" min="0" step="0.01" placeholder="视频时间点（秒，可选）"><label class="attachment-picker"><span class="attach-btn">添加附件</span><input name="attachments" type="file" accept="image/*,video/*" multiple><span class="attach-name">未选择文件</span></label><button class="primary">发布意见</button></form>` : ''}</div></div>
     </article>`;
   }).join('');
   if (append) $('#publicAssets').insertAdjacentHTML('beforeend', markup);
-  else $('#publicAssets').innerHTML = markup;
+  else { GuestAnnotations.disposeAll($('#publicAssets')); $('#publicAssets').innerHTML = markup; }
+  for (const asset of data.assets) {
+    const card = $(`[data-public-asset="${asset.id}"]`);
+    const version = asset.versions.find(v => Number(v.id) === Number(state.publicVersionIds[asset.id]));
+    GuestAnnotations.mount(card, version, asset.comments || [], data.share.can_comment);
+  }
   const pagination = data.pagination || { total: data.assets.length, offset: 0, has_more: false };
   state.publicShareNextOffset = Number(pagination.offset || 0) + data.assets.length;
   state.publicShareHasMore = Boolean(pagination.has_more);
@@ -2832,6 +2866,7 @@ async function loadPublicShare(accessCode = '', offset = 0, append = false) {
   if (!response.ok) {
     let detail = '分享不存在或已过期';
     try { detail = (await response.json()).detail || detail; } catch {}
+    GuestAnnotations.disposeAll($('#publicAssets'));
     $('#publicAssets').innerHTML = `<div class="empty-state"><b>${esc(detail)}</b></div>`;
     return;
   }
@@ -3798,12 +3833,15 @@ document.addEventListener('click', async event => {
     return;
   }
   const commentTime = event.target.closest('[data-comment-time]');
-  if (commentTime && commentTime.dataset.commentTime !== '') {
+  if (commentTime && !event.target.closest('button, a, video')) {
+    const comment = state.currentAsset?.comments.find(item => Number(item.id) === Number(commentTime.dataset.commentId));
     const media = reviewMedia();
-    if (media) {
-      media.currentTime = Number(commentTime.dataset.commentTime);
-      media.play().catch(() => {});
+    state.guestReviewCommentId = comment?.guest_name && comment?.drawing?.length ? comment.id : null;
+    if (media && commentTime.dataset.commentTime !== '') {
+      media.pause(); media.currentTime = Number(commentTime.dataset.commentTime);
+      if (!comment?.drawing?.length) media.play().catch(() => {});
     }
+    renderGuestReviewAnnotation();
     return;
   }
   const resolve = event.target.closest('[data-resolve-comment]');
@@ -3922,8 +3960,11 @@ document.addEventListener('click', async event => {
     const version = assetData?.versions.find(item => Number(item.id) === Number(publicVersion.dataset.publicVersion));
     const card = publicVersion.closest('.public-asset');
     if (version && card) {
+      if (GuestAnnotations.get(card)?.hasDraft()) { toast('请先发布或取消当前圈改', true); return; }
+      GuestAnnotations.get(card)?.dispose();
       state.publicVersionIds[assetData.id] = Number(version.id);
       $('.public-asset-stage', card).innerHTML = `${publicStage(version, assetData.id)}${state.publicShareData.share.watermark_text ? `<span class="review-watermark">${esc(state.publicShareData.share.watermark_text)}</span>` : ''}`;
+      GuestAnnotations.mount(card, version, assetData.comments || [], state.publicShareData.share.can_comment);
       const download = $('.public-version-row a', card);
       if (download) {
         download.href = version.download_url || '#';
@@ -4739,8 +4780,15 @@ document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-public-comment-form]');
   if (!form) return;
   event.preventDefault();
+  if (form.dataset.submitting) return;
+  form.dataset.submitting = '1';
+  const drawingSession = GuestAnnotations.get(form.closest('.public-asset'));
+  drawingSession?.busy(true);
+  const submitButton = form.querySelector('button.primary');
+  submitButton.disabled = true;
   const token = decodeURIComponent(location.pathname.split('/').filter(Boolean)[1] || '');
   const values = Object.fromEntries(new FormData(form));
+  let commentSaved = false;
   try {
     const response = await fetch(`/api/public/shares/${encodeURIComponent(token)}/comments`, {
       method: 'POST',
@@ -4752,6 +4800,7 @@ document.addEventListener('submit', async event => {
         guest_name: values.guest_name,
         body: values.body,
         time_start: values.time_start === '' ? null : Number(values.time_start),
+        ...drawingSession?.payload(),
       }),
     });
     if (!response.ok) {
@@ -4759,7 +4808,11 @@ document.addEventListener('submit', async event => {
       throw new Error(payload.detail || '评论发布失败');
     }
     const comment = await response.json();
+    commentSaved = true;
+    // Commit is complete: attachment failures must not allow duplicate comment resubmission.
     const files = [...(form.elements.attachments?.files || [])];
+    form.reset();
+    drawingSession?.clear();
     for (const file of files) {
       await uploadCommentAttachment(
         `/api/public/shares/${encodeURIComponent(token)}/comments/${comment.id}/attachments`,
@@ -4770,7 +4823,14 @@ document.addEventListener('submit', async event => {
     form.reset();
     toast('审阅意见已发布');
     await loadPublicShare(state.publicAccessCode);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    if (commentSaved) {
+      toast(`意见已发布，部分附件未上传：${error.message}`, true);
+      await loadPublicShare(state.publicAccessCode).catch(() => {});
+    } else toast(error.message, true);
+  } finally {
+    delete form.dataset.submitting; submitButton.disabled = false; drawingSession?.busy(false);
+  }
 });
 
 $('#globalScan').addEventListener('click', async event => {

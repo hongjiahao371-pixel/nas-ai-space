@@ -19,7 +19,7 @@ pillow==13.0.0
 psd-tools==1.17.4
 pydantic==2.10.4
 pydantic_core==2.27.2
-pypdf==6.21.2
+pypdf==6.21.4
 python-dotenv==1.2.3
 PyYAML==6.0.3
 rawpy==0.27.0

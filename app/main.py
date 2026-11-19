@@ -9,6 +9,7 @@ import html
 import io
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -28,7 +29,8 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.database import Database, configure_database
@@ -306,8 +308,9 @@ class PublicReviewComment(BaseModel):
     version_id: Optional[int] = None
     guest_name: str = Field(min_length=1, max_length=80)
     body: str = Field(min_length=1, max_length=4000)
-    time_start: Optional[float] = Field(default=None, ge=0)
-    time_end: Optional[float] = Field(default=None, ge=0)
+    time_start: Optional[float] = None
+    time_end: Optional[float] = None
+    drawing: Any = Field(default_factory=list)
 
 
 class KnowledgeSpaceCreate(BaseModel):
@@ -948,16 +951,37 @@ def _share_context(token: str, access_code: str = "") -> dict[str, Any]:
     return share
 
 
+def _shared_asset_versions(asset: dict[str, Any], share: dict[str, Any]) -> list[dict[str, Any]]:
+    versions = asset["versions"]
+    if share["can_view_versions"] or not versions:
+        return versions
+    return [next(
+        (version for version in versions if int(version["id"]) == int(asset.get("cover_version_id") or 0)),
+        versions[0],
+    )]
+
+
+def _public_comment_payload(comment: dict[str, Any], token: str) -> dict[str, Any]:
+    return {
+        key: comment.get(key)
+        for key in (
+            "id", "version_id", "guest_name", "display_name", "body", "comment_type",
+            "time_start", "time_end", "x", "y", "drawing", "resolved", "created_at",
+        )
+    } | {
+        "attachments": [
+            payload
+            for attachment in comment.get("attachments", [])
+            if (payload := _comment_attachment_payload(attachment, token))
+        ]
+    }
+
+
 def _public_asset_payload(asset_id: int, share: dict[str, Any]) -> dict[str, Any]:
     asset = state.workspaces.asset_detail(asset_id)
     if not asset or int(asset["project_id"]) != int(share["project_id"]):
         raise HTTPException(status_code=404, detail="分享素材不存在")
-    versions = asset["versions"] if share["can_view_versions"] else [
-        next(
-            (item for item in asset["versions"] if int(item["id"]) == int(asset.get("cover_version_id") or 0)),
-            asset["versions"][0] if asset["versions"] else None,
-        )
-    ]
+    versions = _shared_asset_versions(asset, share)
     public_versions = []
     share_token = str(share.get("token") or "")
     for version in (item for item in versions if item):
@@ -991,22 +1015,12 @@ def _public_asset_payload(asset_id: int, share: dict[str, Any]) -> dict[str, Any
                 "size", "duration", "width", "height", "proxy_status", "caption", "created_at",
             )
         } | {"media_url": media_url, "download_url": download_url})
+    visible_version_ids = {version["id"] for version in versions}
     comments = [
-        {
-            key: comment.get(key)
-            for key in (
-                "id", "version_id", "guest_name", "display_name", "body", "comment_type",
-                "time_start", "time_end", "x", "y", "drawing", "resolved", "created_at",
-            )
-        } | {
-            "attachments": [
-                payload
-                for attachment in comment.get("attachments", [])
-                if (payload := _comment_attachment_payload(attachment, share_token))
-            ]
-        }
+        _public_comment_payload(comment, share_token)
         for comment in asset["comments"]
         if comment.get("visibility") == "external"
+        and (comment.get("version_id") is None or comment["version_id"] in visible_version_ids)
     ]
     return {
         key: asset.get(key)
@@ -3017,8 +3031,57 @@ def public_share(token: str, payload: PublicShareAccess, request: Request) -> di
     }
 
 
+def _validated_public_drawing(value: Any) -> list[dict[str, Any]]:
+    # Do not echo malformed input (which may contain JSON non-finite numbers)
+    # back through FastAPI's validation error serializer.
+    invalid = HTTPException(status_code=422, detail="画笔笔划或坐标无效")
+    if not isinstance(value, list) or len(value) > 32:
+        raise invalid
+    result = []
+    total_points = 0
+    for stroke in value:
+        if not isinstance(stroke, dict) or set(stroke) - {"points", "color"}:
+            raise invalid
+        points = stroke.get("points")
+        color = stroke.get("color", "#ffcc57")
+        if not isinstance(points, list) or not 1 <= len(points) <= 256:
+            raise invalid
+        if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise invalid
+        total_points += len(points)
+        if total_points > 2048:
+            raise invalid
+        clean_points = []
+        for point in points:
+            if not isinstance(point, dict) or set(point) != {"x", "y"}:
+                raise invalid
+            if any(type(coord) not in (int, float) or not 0 <= coord <= 1 for coord in point.values()):
+                raise invalid
+            clean_points.append({"x": round(point["x"], 6), "y": round(point["y"], 6)})
+        result.append({"points": clean_points, "color": color.lower()})
+    return result
+
+
 @app.post("/api/public/shares/{token}/comments", status_code=201)
-def public_share_comment(
+async def public_share_comment(token: str, request: Request) -> dict[str, Any]:
+    # Cap the request before JSON decoding, even when sent without Content-Length.
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 160 * 1024:
+            raise HTTPException(status_code=413, detail="审阅意见请求体过大")
+        raw.extend(chunk)
+    try:
+        payload = PublicReviewComment.model_validate_json(raw)
+    except ValidationError as exc:
+        # Keep legacy field-level errors without reflecting the access code or unbounded input.
+        raise HTTPException(status_code=422, detail=[
+            {"loc": ["body", *item["loc"]], "msg": item["msg"], "type": item["type"]}
+            for item in exc.errors(include_input=False, include_context=False, include_url=False)
+        ]) from exc
+    return await run_in_threadpool(_save_public_share_comment, token, payload, request)
+
+
+def _save_public_share_comment(
     token: str,
     payload: PublicReviewComment,
     request: Request,
@@ -3063,23 +3126,51 @@ def public_share_comment(
         30,
         3600,
     )
+    versions = _shared_asset_versions(asset, share)
+    version = next((item for item in versions if item["id"] == payload.version_id), None)
+    if payload.version_id is not None and version is None:
+        raise HTTPException(status_code=409, detail="素材版本不存在或未公开")
+    drawing = _validated_public_drawing(payload.drawing)
+    for timestamp in (payload.time_start, payload.time_end):
+        if timestamp is not None and (not math.isfinite(timestamp) or timestamp < 0):
+            raise HTTPException(status_code=422, detail="审阅时间点无效")
+    if drawing:
+        if not version or version["kind"] not in ("image", "video"):
+            raise HTTPException(status_code=409, detail="仅支持在已分享的图片或视频上圈改")
+        if not payload.body.strip() or not payload.guest_name.strip():
+            raise HTTPException(status_code=422, detail="圈改需要填写名字与审阅意见")
+        if payload.time_end is not None or (version["kind"] == "image" and payload.time_start is not None):
+            raise HTTPException(status_code=409, detail="圈改不支持时间范围或图片时间点")
+        if version["kind"] == "video":
+            duration = version.get("duration")
+            if (
+                payload.time_start is None
+                or payload.time_start > 31 * 86400
+                or (duration and duration > 0 and payload.time_start > duration + 0.1)
+            ):
+                raise HTTPException(status_code=409, detail="圈改需要有效的视频时间点")
+    comment_type = (
+        "drawing" if drawing else "range" if payload.time_end is not None
+        else "point" if payload.time_start is not None else "text"
+    )
     try:
-        return state.workspaces.add_comment(
+        comment = state.workspaces.add_comment(
             payload.asset_id,
             payload.version_id,
             payload.body,
-            "range" if payload.time_end is not None else "point" if payload.time_start is not None else "text",
+            comment_type,
             payload.time_start,
             payload.time_end,
             None,
             None,
-            [],
+            drawing,
             "external",
             None,
             payload.guest_name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _public_comment_payload(comment, token)
 
 
 @app.post("/api/public/shares/{token}/comments/{comment_id}/attachments", status_code=201)
@@ -3126,13 +3217,14 @@ async def public_share_comment_attachment(
         or not str(comment.get("guest_name") or "").strip()
     ):
         raise HTTPException(status_code=404, detail="审阅意见不存在")
-    asset = state.database.fetchone(
-        "SELECT project_id FROM assets WHERE id = ?",
-        (int(comment["asset_id"]),),
-    )
+    if share.get("asset_id") and int(share["asset_id"]) != int(comment["asset_id"]):
+        raise HTTPException(status_code=404, detail="审阅意见不存在")
+    asset = state.workspaces.asset_detail(int(comment["asset_id"]))
     if not asset or int(asset["project_id"]) != int(share["project_id"]):
         raise HTTPException(status_code=404, detail="审阅意见不存在")
-    if share.get("asset_id") and int(share["asset_id"]) != int(comment["asset_id"]):
+    if comment["version_id"] is not None and not any(
+        version["id"] == comment["version_id"] for version in _shared_asset_versions(asset, share)
+    ):
         raise HTTPException(status_code=404, detail="审阅意见不存在")
     _record_rate_attempt(
         PUBLIC_ATTACHMENT_ATTEMPTS,
