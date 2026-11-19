@@ -2427,7 +2427,8 @@ function resetEditHandoff() {
 
 $('#openEditHandoff').addEventListener('click', async () => {
   const id = state.currentProjectId;
-  if (!id) return;
+  if (!id || Number(state.projectDetails?.project?.id) !== id ||
+      !['owner', 'manager', 'editor'].includes(state.projectDetails?.access_role)) return;
   resetEditHandoff();
   handoffProjectId = id;
   const session = handoffSession;

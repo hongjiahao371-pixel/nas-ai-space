@@ -43,7 +43,10 @@ window.MaterialBasket = (() => {
     const next = deps.user()?.id ?? null;
     if (owner === next) return;
     owner = next; generation++; items = []; busy = false;
-    deps.close($('#materialBasketModal')); render();
+    deps.close($('#materialBasketModal'));
+    $('#materialBasketProject').replaceChildren(new Option('选择有编辑权限的项目', ''));
+    $('#materialBasketResult').replaceChildren();
+    render();
     if (next) refresh().catch(() => {});
   }
   async function open() {
