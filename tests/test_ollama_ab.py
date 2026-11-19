@@ -39,3 +39,42 @@ class ComparisonTests(unittest.TestCase):
                        [dict(old,cleanup_errors=['remove failed']),new],
                        [old,dict(new,cleanup_errors=['collect failed'])]]:
             self.assertEqual(ab.conclusion(phases),'inconclusive_cleanup')
+
+    def test_ps_projection_is_bounded_and_redacts_unexpected_data(self):
+        secret='https://example.invalid/?token=SECRET'
+        row=dict(name=ab.MODELS[0],model='registry.ollama.ai/library/'+ab.MODELS[0],digest='a'*64,
+                 size=123,size_vram=522977280,context_length=4096,token=secret,url=secret,details={'secret':secret})
+        result=ab.safe_process_sample({'models':[row]*9,'token':secret})
+        self.assertEqual(len(result['models']),8)
+        self.assertTrue(result['truncated'])
+        self.assertEqual(result['models'][0],{k:row[k] for k in ('name','model','digest','size','size_vram','context_length')})
+        self.assertNotIn('SECRET',str(result))
+        for key in ('name','model','digest','size','size_vram','context_length'):
+            result=ab.safe_process_sample({'models':[dict(row,**{key:secret})]})
+            self.assertNotIn('SECRET',str(result))
+        self.assertEqual(ab.safe_process_sample({'models':None}),{'models_valid':False})
+        self.assertEqual(ab.safe_process_sample({'models':[None]})['models'],[{'valid':False}])
+        for value in (True,-1,2**63,1.5,None):
+            self.assertEqual(ab.safe_process_sample({'models':[{'size_vram':value}]})['models'][0]['size_vram'],'[invalid]')
+
+    def test_same_single_ps_sample_preserves_original_cpu_gate(self):
+        from unittest.mock import patch
+        trial=object.__new__(ab.LockedAcceptance)
+        trial.report={'checks':{}}
+        trial.save=lambda:None
+        cases=[([{'name':ab.MODELS[0],'size_vram':0}],True),
+               ([{'name':ab.MODELS[0],'size_vram':522977280}],False),
+               ([{'name':'different','size_vram':0}],False),
+               ([],False),([{'name':ab.MODELS[0]}],False),
+               ([{'name':ab.MODELS[0],'size_vram':0}]*2,False)]
+        for models,passes in cases:
+            response={'models':models}
+            with patch.object(ab.original.OllamaAcceptance,'request',return_value=response) as request:
+                if passes: trial.check_cpu('http://127.0.0.1',ab.MODELS[0])
+                else:
+                    with self.assertRaisesRegex(ValueError,'loaded entirely on CPU'):
+                        trial.check_cpu('http://127.0.0.1',ab.MODELS[0])
+                request.assert_called_once_with('http://127.0.0.1','/api/ps')
+                self.assertIs(request.return_value,response)
+        self.assertEqual(len(trial.report['cpu_process_samples']),2)
+        self.assertEqual(trial.report['cpu_process_samples'][1]['models'][0]['size_vram'],522977280)

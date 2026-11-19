@@ -37,3 +37,21 @@ failure evidence and container logs to separate server errors from timeouts or
 resource failures. Baseline success is `inconclusive_baseline_not_reproduced`;
 setup failure, novel baseline failures (including timeouts), missing Intel AMX, model drift and candidate failure are nonzero. No repeated-runner retry is scheduled.
 No model quality, latency, performance, production/NAS or exploit testing is done.
+
+## Bounded CPU diagnostic (no gate change)
+
+The A/B wrapper records the same `/api/ps` response object consumed by the
+unchanged CPU gate, without another request. `cpu_process_samples` keeps at most
+two samples of eight rows, with only known Qwen names (including official fully
+qualified variants), validated hex digests and bounded integer size/context
+fields. Unknown strings are replaced; arbitrary URLs, tokens and nested fields
+are never copied. This projection is diagnostic only, not acceptance input.
+A nonzero `size_vram` still fails. No automatic retry or continuation to vision.
+
+The previous candidate log reports a 498.75 MiB AMX model buffer. Official
+v0.32.3 code has an AMX accounting hypothesis to verify, not assume:
+- https://github.com/ollama/ollama/blob/v0.32.3/llm/llama_server.go#L2680-L2693 (`isGPUBuffer` does not exclude AMX)
+- https://github.com/ollama/ollama/blob/v0.32.3/llm/llama_server.go#L2755-L2785 (accumulates `memGPU`)
+- https://github.com/ollama/ollama/blob/v0.32.3/llm/llama_server.go#L2572-L2609 (`MemorySize`)
+- https://github.com/ollama/ollama/blob/v0.32.3/server/routes.go#L2262-L2307 (`PsHandler` assigns `size_vram`)
+The predicted value is 522977280 bytes; the next sample may confirm or refute it.

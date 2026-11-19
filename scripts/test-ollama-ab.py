@@ -32,6 +32,33 @@ def identities(models):
     return result
 
 
+def safe_process_sample(response):
+    """Bounded diagnostic projection only; never used to decide CPU acceptance."""
+    models = response.get('models') if isinstance(response, dict) else None
+    if not isinstance(models, list):
+        return {'models_valid': False}
+    allowed_names = {prefix + name for name in MODELS
+                     for prefix in ('', 'library/', 'registry.ollama.ai/library/')}
+    rows = []
+    for model in models[:8]:
+        if not isinstance(model, dict):
+            rows.append({'valid': False})
+            continue
+        row = {}
+        for key in ('name', 'model'):
+            if key in model:
+                row[key] = model[key] if isinstance(model[key], str) and model[key] in allowed_names else '[unexpected]'
+        if 'digest' in model:
+            value = model['digest']
+            row['digest'] = value if isinstance(value, str) and re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}', value) else '[invalid]'
+        for key in ('size', 'size_vram', 'context_length'):
+            if key in model:
+                value = model[key]
+                row[key] = value if type(value) is int and 0 <= value <= 2**63-1 else '[invalid]'
+        rows.append(row)
+    return {'models_valid': True, 'models': rows, 'truncated': len(models) > 8}
+
+
 def known_embedding_crash(errors):
     return any(e.get('method') == 'POST' and e.get('path') == '/api/embed'
                and e.get('model') == MODELS[0] and e.get('status') == 500
@@ -76,7 +103,15 @@ class LockedAcceptance(original.OllamaAcceptance):
                 raise ValueError('Inference without model identity lock')
             self.inference_started = True
         try:
-            return super().request(base, path, **kwargs)
+            response = super().request(base, path, **kwargs)
+            if path == '/api/ps':
+                # Observe the very same sample used by unchanged check_cpu().
+                # Do not poll, coerce, normalize or substitute acceptance data.
+                samples = self.report.setdefault('cpu_process_samples', [])
+                if len(samples) < 2:
+                    samples.append(safe_process_sample(response))
+                    self.save()
+            return response
         except Exception:
             if path in ('/api/embed', '/api/generate'):
                 self.inference_failed = True
