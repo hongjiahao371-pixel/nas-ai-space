@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import tempfile
 import tarfile
 import hashlib
@@ -4006,6 +4007,9 @@ def purge_recycle(item_id: int, principal: Auth) -> dict[str, Any]:
 def file_details(file_id: int, principal: Auth) -> dict[str, Any]:
     row = _visible_file(file_id, principal)
     result = _public_file(row)
+    if row.get("kind") == "video":
+        # Pass the nanosecond mtime as an opaque string (JavaScript loses precision).
+        result["frame_revision"] = f"{row['mtime_ns']}:{row['size']}"
     if row.get("kind") in {"audio", "video"}:
         result["manual_transcript"] = str(row.get("manual_transcript") or "")[:200000]
         result["extracted_text"] = str(row.get("extracted_text") or "")[:200000]
@@ -4118,6 +4122,54 @@ def video_frame(file_id: int, principal: Auth, time: float = Query(ge=0), revisi
         raise HTTPException(409, str(exc)) from exc
     except (TimeoutError, OSError) as exc:
         raise HTTPException(503, "画面读取繁忙，请稍后重试") from exc
+
+
+_video_frame_search_slot = threading.BoundedSemaphore(1)
+
+
+@app.post("/api/files/{file_id}/frame-similar")
+def video_frame_similar(
+    file_id: int, principal: Auth, response: Response,
+    time: float = Query(ge=0), revision: str = Query(min_length=1, max_length=80),
+    limit: int = Query(default=20, ge=1, le=60),
+) -> dict[str, Any]:
+    """Find other visible videos with matching indexed frames, not audio hits."""
+    row = _moment_file(file_id, principal)
+    if revision != f"{row['mtime_ns']}:{row['size']}":
+        raise HTTPException(409, "素材版本已变化，请重新打开视频")
+    media = state.search.multimodal
+    if not media.enabled:
+        raise HTTPException(409, "请先启用素材语义模型，再用当前帧查找")
+    libraries = _library_ids(principal)
+    if not _video_frame_search_slot.acquire(blocking=False):
+        raise HTTPException(503, "已有画面搜索正在进行，请稍后再试")
+    try:
+        try:
+            frame = state.video_moments.frame(row, time)
+        except (ValueError, FileNotFoundError):
+            raise HTTPException(409, "当前时间点无法读帧，请稍微拖动进度条后再试") from None
+        except (TimeoutError, OSError):
+            raise HTTPException(503, "画面读取暂不可用，请稍后再试") from None
+
+        label = "直接视频画面"
+        encoded = base64.b64encode(frame).decode("ascii")
+        content = {"content": [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded}}]}
+        try:
+            hits = media.image_search(content, max(80, limit * 5), "video", libraries, source_label=label)
+        except (httpx.HTTPError, ValueError, RuntimeError):
+            raise HTTPException(503, "素材语义服务暂不可用，请稍后再试") from None
+        # Recheck the source revision and use SQL-filtered results rather than
+        # treating vector-index payloads as authoritative visibility records.
+        current = _moment_file(file_id, principal)
+        if revision != f"{current['mtime_ns']}:{current['size']}":
+            raise HTTPException(409, "素材版本已变化，请重新打开视频")
+        hits = [hit for hit in hits if (hit.get("payload") or {}).get("source_label") == label]
+        result = state.search.visual_results(hits, "video", limit, libraries, exclude_id=file_id)
+        result.update(query="当前帧找相似视频", source_time=time)
+        response.headers["Cache-Control"] = "private, no-store"
+        return result
+    finally:
+        _video_frame_search_slot.release()
 
 
 @app.get("/api/files/{file_id}/similar")

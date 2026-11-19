@@ -240,6 +240,8 @@ class VectorStore:
         kind: str = "",
         library_ids: list[int] | None = None,
         file_ids: list[int] | None = None,
+        *,
+        source_label: str = "",
     ) -> list[dict[str, Any]]:
         if not vector:
             return []
@@ -256,6 +258,8 @@ class VectorStore:
             if not file_ids:
                 return []
             filters.append({"key": "file_id", "match": {"any": file_ids}})
+        if source_label:
+            filters.append({"key": "source_label", "match": {"value": source_label}})
         if filters:
             payload["filter"] = {"must": filters}
         client = self._http()

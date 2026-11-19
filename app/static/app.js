@@ -1990,6 +1990,54 @@ let fileViewerRequest = 0;
 let videoMomentRequest = 0;
 let currentMomentRevision = '';
 
+async function findUsingVideoFrame() {
+  const video = $('#filePreview video');
+  const file = state.currentFile;
+  const button = $('#findVideoFrame');
+  const status = $('#videoFrameStatus');
+  if (!video || file?.kind !== 'video' || button.disabled || video.seeking || video.readyState < 2) return;
+  const stamp = Number(video.currentTime);
+  if (!Number.isFinite(stamp) || stamp < 0 || stamp >= Number(file.duration)) {
+    status.textContent = '请选择视频结束前的一帧。';
+    return;
+  }
+  video.pause();
+  button.disabled = true;
+  status.textContent = '正在提取并搜索当前帧…';
+  const viewerRequest = fileViewerRequest;
+  const searchSequence = state.searchSequence;
+  const current = () => viewerRequest === fileViewerRequest && state.currentFile?.id === file.id;
+  const params = new URLSearchParams({time: String(stamp), revision: file.frame_revision});
+  try {
+    const data = await api(`/api/files/${file.id}/frame-similar?${params}`, { method: 'POST' });
+    if (!current()) return;
+    if (searchSequence !== state.searchSequence) {
+      status.textContent = '已切换搜索，可重新点按钮搜索当前帧。';
+      return;
+    }
+    ++state.searchSequence;
+    closeFileViewer();
+    showView('search');
+    state.searchQuery = '';
+    state.currentSearchFeedbackQuery = '';
+    state.searchOffset = 0;
+    state.searchHasMore = false;
+    state.searchResults = data.results || [];
+    state.searchTotal = Number(data.total || 0);
+    $('#mainSearchInput').value = '当前帧找相似视频';
+    $('#searchMore').hidden = true;
+    $('#searchSummary').textContent = `“${file.name}” ${stamp.toFixed(2)} 秒画面 · 找到 ${fmtCount(state.searchTotal)} 个视频候选`;
+    if (state.searchResults.length) renderFileList($('#searchResults'), state.searchResults);
+    else $('#searchResults').innerHTML = '<div class="empty-state"><b>没有找到其他相似视频</b><p>可以换一帧试试，或确认其他视频已完成素材语义索引。</p></div>';
+  } catch (error) {
+    if (current()) status.textContent = error.message;
+  } finally {
+    if (current()) button.disabled = false;
+  }
+}
+
+$('#findVideoFrame').addEventListener('click', findUsingVideoFrame);
+
 async function loadMomentFrames(root, current) {
   // Original video decoding is more expensive than existing thumbnail reads.
   for (const image of $$('img[data-moment-frame]', root)) {
@@ -2131,6 +2179,12 @@ async function openFileViewer(fileId, matchTime = null) {
     } else if (details.kind === 'video') {
       $('#filePreview').innerHTML = `<video controls preload="metadata" src="${esc(ticket.url)}"></video>`;
       const video = $('#filePreview video');
+      const frameButton = $('#findVideoFrame');
+      frameButton.disabled = true;
+      $('#videoFrameStatus').textContent = '把进度条拖到想找的画面，搜索已索引的其他视频。';
+      video.addEventListener('loadeddata', () => {
+        if (request === fileViewerRequest) frameButton.disabled = !Number(details.duration) || !details.frame_revision;
+      }, { once: true });
       if (matchTime != null && Number.isFinite(Number(matchTime))) video.addEventListener('loadedmetadata', () => { video.currentTime = Number(matchTime); }, { once: true });
       $('#videoMoments').hidden = false;
       $('#videoMomentQuery').value = state.searchQuery || '';
