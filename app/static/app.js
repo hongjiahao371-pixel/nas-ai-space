@@ -229,6 +229,7 @@ function openModal(modal) {
 function closeModal(modal) {
   if (!modal?.classList.contains('open')) return;
   if (modal.id === 'integrationKeyModal') $('#integrationKeyValue').value = '';
+  if (modal.id === 'editHandoffModal') resetEditHandoff();
   // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
   if (modal.id === 'fileModal') {
     fileViewerRequest += 1;
@@ -323,7 +324,7 @@ $('#dialogInput').addEventListener('keydown', event => {
   }
 });
 
-async function api(path, options = {}) {
+async function api(path, { responseType = "json", ...options } = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
   if (options.method && !['GET', 'HEAD', 'OPTIONS'].includes(options.method.toUpperCase())) {
@@ -353,7 +354,7 @@ async function api(path, options = {}) {
     error.status = response.status;
     throw error;
   }
-  return response.status === 204 ? null : response.json();
+  return response.status === 204 ? null : responseType === "blob" ? response.blob() : response.json();
 }
 
 const titles = {
@@ -1105,7 +1106,7 @@ function resultCard(item) {
     : '';
   const clipExport = item.kind==='video' ? `<button class="find-similar" data-video-moments="${item.id}" data-time="${item.match_time ?? ''}">核对片段</button><button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
-  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
+  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${MaterialBasket.button(item.id)}${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
 }
 
 // 阶段三（布局重构）：列表行模式，与网格卡片并列；缩略图复用同一条懒加载管线
@@ -1119,7 +1120,7 @@ function resultRow(item) {
   const meta = [item.kind, fmtBytes(item.size), date ? fmtDate(date) : '', library ? library.name : '']
     .filter(Boolean).join(' · ');
   const favorite = item.favorite != null ? `<button class="card-favorite ${item.favorite ? 'active' : ''}" data-favorite-card="${item.id}" data-enabled="${item.favorite ? '1' : '0'}" aria-label="${item.favorite ? '取消收藏' : '收藏'}">${icon('star')}</button>` : '';
-  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${favorite}</div>`;
+  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${MaterialBasket.button(item.id)}${favorite}</div>`;
 }
 
 // 按当前布局模式渲染结果容器（grid 卡片 / list 行），并恢复选中态
@@ -1188,6 +1189,7 @@ function renderInspector(details) {
     ${summary ? `<p class="inspector-caption">${esc(summary)}</p>` : ''}
     <div class="inspector-actions">
       ${favoriteButton}
+      ${MaterialBasket.button(details.id)}
       <button class="secondary" data-inspector-detail="${details.id}">打开完整详情</button>
       <button class="primary" data-inspector-open="${details.id}">打开原文件</button>
     </div>`;
@@ -1606,6 +1608,8 @@ function isAdmin() {
 }
 
 function applyRole() {
+  MaterialBasket.userChanged();
+  if (!state.authReady) closeModal($('#editHandoffModal'));
   const admin = isAdmin();
   $$('.admin-only').forEach(element => { element.hidden = !admin; });
   $$('.personal-only').forEach(element => { element.hidden = !state.user?.id; });
@@ -1990,6 +1994,54 @@ let fileViewerRequest = 0;
 let videoMomentRequest = 0;
 let currentMomentRevision = '';
 
+async function findUsingVideoFrame() {
+  const video = $('#filePreview video');
+  const file = state.currentFile;
+  const button = $('#findVideoFrame');
+  const status = $('#videoFrameStatus');
+  if (!video || file?.kind !== 'video' || button.disabled || video.seeking || video.readyState < 2) return;
+  const stamp = Number(video.currentTime);
+  if (!Number.isFinite(stamp) || stamp < 0 || stamp >= Number(file.duration)) {
+    status.textContent = '请选择视频结束前的一帧。';
+    return;
+  }
+  video.pause();
+  button.disabled = true;
+  status.textContent = '正在提取并搜索当前帧…';
+  const viewerRequest = fileViewerRequest;
+  const searchSequence = state.searchSequence;
+  const current = () => viewerRequest === fileViewerRequest && state.currentFile?.id === file.id;
+  const params = new URLSearchParams({time: String(stamp), revision: file.frame_revision});
+  try {
+    const data = await api(`/api/files/${file.id}/frame-similar?${params}`, { method: 'POST' });
+    if (!current()) return;
+    if (searchSequence !== state.searchSequence) {
+      status.textContent = '已切换搜索，可重新点按钮搜索当前帧。';
+      return;
+    }
+    ++state.searchSequence;
+    closeFileViewer();
+    showView('search');
+    state.searchQuery = '';
+    state.currentSearchFeedbackQuery = '';
+    state.searchOffset = 0;
+    state.searchHasMore = false;
+    state.searchResults = data.results || [];
+    state.searchTotal = Number(data.total || 0);
+    $('#mainSearchInput').value = '当前帧找相似视频';
+    $('#searchMore').hidden = true;
+    $('#searchSummary').textContent = `“${file.name}” ${stamp.toFixed(2)} 秒画面 · 找到 ${fmtCount(state.searchTotal)} 个视频候选`;
+    if (state.searchResults.length) renderFileList($('#searchResults'), state.searchResults);
+    else $('#searchResults').innerHTML = '<div class="empty-state"><b>没有找到其他相似视频</b><p>可以换一帧试试，或确认其他视频已完成素材语义索引。</p></div>';
+  } catch (error) {
+    if (current()) status.textContent = error.message;
+  } finally {
+    if (current()) button.disabled = false;
+  }
+}
+
+$('#findVideoFrame').addEventListener('click', findUsingVideoFrame);
+
 async function loadMomentFrames(root, current) {
   // Original video decoding is more expensive than existing thumbnail reads.
   for (const image of $$('img[data-moment-frame]', root)) {
@@ -2131,6 +2183,12 @@ async function openFileViewer(fileId, matchTime = null) {
     } else if (details.kind === 'video') {
       $('#filePreview').innerHTML = `<video controls preload="metadata" src="${esc(ticket.url)}"></video>`;
       const video = $('#filePreview video');
+      const frameButton = $('#findVideoFrame');
+      frameButton.disabled = true;
+      $('#videoFrameStatus').textContent = '把进度条拖到想找的画面，搜索已索引的其他视频。';
+      video.addEventListener('loadeddata', () => {
+        if (request === fileViewerRequest) frameButton.disabled = !Number(details.duration) || !details.frame_revision;
+      }, { once: true });
       if (matchTime != null && Number.isFinite(Number(matchTime))) video.addEventListener('loadedmetadata', () => { video.currentTime = Number(matchTime); }, { once: true });
       $('#videoMoments').hidden = false;
       $('#videoMomentQuery').value = state.searchQuery || '';
@@ -2325,6 +2383,7 @@ async function loadProjectWorkspace(projectId, quiet = false) {
     const canManage = ['owner', 'manager'].includes(details.access_role);
     $('#addProjectAsset').hidden = !canEdit;
     $('#projectInboxButton').hidden = !canEdit;
+    $('#openEditHandoff').hidden = !canEdit;
     $('#createProjectFolder').hidden = !canEdit;
     $('#projectMembersButton').hidden = !canManage;
     $('#projectShareButton').hidden = !canManage;
@@ -2343,6 +2402,173 @@ async function loadProjectWorkspace(projectId, quiet = false) {
     if (!quiet) toast(error.message, true);
   }
 }
+
+let handoffSession = 0;
+let handoffVersionRequest = 0;
+let handoffVersions = [];
+let handoffAssetTitle = '';
+let handoffProjectId = null;
+
+function resetEditHandoff() {
+  ++handoffSession;
+  ++handoffVersionRequest;
+  handoffVersions = [];
+  handoffAssetTitle = '';
+  handoffProjectId = null;
+  $('#editHandoffForm').reset();
+  $('#editHandoffClips').replaceChildren();
+  $('#editHandoffAsset').innerHTML = '<option value="">请选择视频素材</option>';
+  $('#editHandoffVersion').innerHTML = '<option value="">先选择素材</option>';
+  $('#editHandoffAsset').disabled = true;
+  $('#editHandoffVersion').disabled = true;
+  $('#editHandoffAdd').disabled = true;
+  $('#editHandoffExport').disabled = true;
+  $('#editHandoffStatus').textContent = '';
+}
+
+$('#openEditHandoff').addEventListener('click', async () => {
+  const id = state.currentProjectId;
+  if (!state.authReady || !id || Number(state.projectDetails?.project?.id) !== id ||
+      !['owner', 'manager', 'editor'].includes(state.projectDetails?.access_role)) return;
+  resetEditHandoff();
+  handoffProjectId = id;
+  const session = handoffSession;
+  const status = $('#editHandoffStatus');
+  openModal($('#editHandoffModal'));
+  status.textContent = '正在读取项目素材…';
+  try {
+    const data = await api(`/api/projects/${id}/assets?limit=200`);
+    if (session !== handoffSession || id !== state.currentProjectId) return;
+    const videos = data.items.filter(item => item.kind === 'video');
+    const select = $('#editHandoffAsset');
+    for (const item of videos) select.add(new Option(item.title || item.file_name, item.id));
+    select.disabled = !videos.length;
+    status.textContent = !videos.length ? '当前项目没有可选的视频素材。'
+      : data.total > data.items.length ? '仅显示最近 200 项项目素材中的视频。' : '';
+  } catch (error) {
+    if (session === handoffSession) status.textContent = error.message;
+  }
+});
+
+$('#editHandoffAsset').addEventListener('change', async event => {
+  const request = ++handoffVersionRequest;
+  const session = handoffSession;
+  const versionSelect = $('#editHandoffVersion');
+  const status = $('#editHandoffStatus');
+  handoffVersions = [];
+  versionSelect.disabled = true;
+  versionSelect.innerHTML = '<option value="">请选择版本</option>';
+  $('#editHandoffAdd').disabled = true;
+  status.textContent = '';
+  if (!event.target.value) return;
+  const assetId = Number(event.target.value);
+  status.textContent = '正在读取视频版本…';
+  try {
+    const asset = await api(`/api/assets/${assetId}`);
+    if (session !== handoffSession || request !== handoffVersionRequest ||
+        Number(asset.project_id) !== handoffProjectId) return;
+    handoffVersions = asset.versions.filter(v => v.kind === 'video' && Number(v.duration) > 0);
+    handoffAssetTitle = asset.title;
+    for (const v of handoffVersions) versionSelect.add(new Option(
+      `V${v.version_number} · ${v.label || v.file_name} · ${v.frame_rate ? Number(v.frame_rate).toFixed(3) + ' fps' : '未知帧率'}`, v.id));
+    versionSelect.disabled = !handoffVersions.length;
+    if (handoffVersions.length) versionSelect.selectedIndex = 1;
+    $('#editHandoffAdd').disabled = !handoffVersions.length;
+    status.textContent = handoffVersions.length ? '' : '视频还没有可用的时长，请等索引完成。';
+  } catch (error) {
+    if (session === handoffSession && request === handoffVersionRequest) status.textContent = error.message;
+  }
+});
+$('#editHandoffVersion').addEventListener('change', event => {
+  $('#editHandoffAdd').disabled = !event.target.value;
+});
+
+$('#editHandoffAdd').addEventListener('click', () => {
+  const version = handoffVersions.find(v => Number(v.id) === Number($('#editHandoffVersion').value));
+  const list = $('#editHandoffClips');
+  if (!version || list.children.length >= 200) return;
+  const row = document.createElement('li');
+  row.dataset.versionId = version.id;
+  const fps = Number(version.frame_rate);
+  row.innerHTML = `<b>${esc(handoffAssetTitle)} · V${esc(version.version_number)}</b>
+    <div class="form-row">
+      <label>入点（秒）<input data-cut-start type="number" min="0" max="${Number(version.duration)}" step="any" value="0" required></label>
+      <label>出点（秒）<input data-cut-end type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(version.duration)}" required></label>
+    </div>
+    <label>剪辑电脑文件路径<input data-cut-path type="text" maxlength="4096" required placeholder="/Volumes/素材库/视频.mp4"></label>
+    <div class="form-row">
+      <button type="button" class="secondary compact" data-cut-move="up">上移</button>
+      <button type="button" class="secondary compact" data-cut-move="down">下移</button>
+      <button type="button" class="secondary compact" data-cut-move="remove">移除</button>
+    </div>`;
+  const prior = [...list.children].find(item => item.dataset.versionId === row.dataset.versionId);
+  if (prior) row.querySelector('[data-cut-path]').value = prior.querySelector('[data-cut-path]').value;
+  if (!list.children.length && fps > 0) {
+    const rates = $('#editHandoffForm').elements.frame_rate;
+    const option = [...rates.options].find(o => {
+      const [a, b = '1'] = o.value.split('/');
+      return Math.abs(Number(a) / Number(b) - fps) < .00001;
+    });
+    if (option) rates.value = option.value;
+  }
+  list.append(row);
+  $('#editHandoffExport').disabled = false;
+  row.querySelector('[data-cut-start]').focus();
+});
+$('#editHandoffClips').addEventListener('click', event => {
+  const action = event.target.closest('[data-cut-move]');
+  if (!action) return;
+  const row = action.closest('li');
+  if (action.dataset.cutMove === 'remove') row.remove();
+  else if (action.dataset.cutMove === 'up' && row.previousElementSibling) {
+    row.parentElement.insertBefore(row, row.previousElementSibling);
+    action.focus();
+  } else if (action.dataset.cutMove === 'down' && row.nextElementSibling) {
+    row.parentElement.insertBefore(row.nextElementSibling, row);
+    action.focus();
+  }
+  $('#editHandoffExport').disabled = !$('#editHandoffClips').children.length;
+});
+$('#editHandoffForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const id = handoffProjectId;
+  const session = handoffSession;
+  const button = $('#editHandoffExport');
+  const status = $('#editHandoffStatus');
+  if (!id || id !== state.currentProjectId || button.disabled) return;
+  const clips = [...$('#editHandoffClips').children].map(row => ({
+    version_id: Number(row.dataset.versionId),
+    start_time: Number(row.querySelector('[data-cut-start]').value),
+    end_time: Number(row.querySelector('[data-cut-end]').value),
+    media_path: row.querySelector('[data-cut-path]').value.trim(),
+  }));
+  if (!clips.length || clips.some(c => !c.media_path || c.end_time <= c.start_time)) {
+    status.textContent = '检查每段的剪辑电脑文件路径，并确保入点早于出点。';
+    return;
+  }
+  button.disabled = true;
+  status.textContent = '正在生成粗剪包…';
+  try {
+    const blob = await api(`/api/projects/${id}/edit-handoff`, {
+      method: 'POST', responseType: 'blob',
+      body: JSON.stringify({frame_rate: event.target.elements.frame_rate.value, clips}),
+    });
+    if (session !== handoffSession || id !== state.currentProjectId) return;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = '粗剪时间线.zip';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    status.textContent = '粗剪包已生成。解压后，在剪辑软件里导入 FCPXML。';
+  } catch (error) {
+    if (session === handoffSession) status.textContent = error.message;
+  } finally {
+    if (session === handoffSession) button.disabled = !$('#editHandoffClips').children.length;
+  }
+});
 
 async function loadProjectAssets() {
   if (!state.currentProjectId) return;
@@ -4953,6 +5179,8 @@ function setGreeting() {
 
 async function boot() {
   state.authReady = false;
+  MaterialBasket.userChanged();
+  closeModal($('#editHandoffModal'));
   try {
     const health = await api('/api/health');
     $('.service-card').classList.add('ok');
@@ -5022,6 +5250,7 @@ window.addEventListener('storage', event => {
   state.token = token;
   state.user = null;
   state.authReady = false;
+  applyRole();
   if (token) {
     closeModal($('#tokenModal'));
     boot();
@@ -5029,7 +5258,6 @@ window.addEventListener('storage', event => {
   }
   // 令牌已在其他标签页清除：回到登录流程
   $('#tokenForm [name=token]').value = '';
-  applyRole();
   openModal($('#tokenModal'));
 });
 
@@ -5141,3 +5369,5 @@ document.addEventListener('click', async event => {
     catch { $('#integrationKeyValue').select(); toast('请手动复制选中的密钥'); }
   }
 });
+
+MaterialBasket.init({api, user:()=>state.authReady ? state.user : null, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject});

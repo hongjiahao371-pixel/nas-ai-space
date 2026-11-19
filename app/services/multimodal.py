@@ -222,14 +222,17 @@ class MultimodalService:
         except (httpx.HTTPError,ValueError,KeyError,RuntimeError) as exc:
             return {'enabled':True,'reachable':False,'error':type(exc).__name__}
 
-    def image_search(self, content: dict, limit: int, kind='', library_ids=None, file_ids=None) -> list[dict]:
+    def image_search(self, content: dict, limit: int, kind='', library_ids=None, file_ids=None,
+                     *, source_label: str = "") -> list[dict]:
         if not self.enabled:
             raise ValueError('请先启用素材语义模型')
         if library_ids == [] or file_ids == []:
             return []
         with self.interactive_request():
             vector = self.embed(content, timeout=90)
-        return self.vectors.search(vector,limit,kind,library_ids,file_ids)
+        if source_label:
+            return self.vectors.search(vector, limit, kind, library_ids, file_ids, source_label=source_label)
+        return self.vectors.search(vector, limit, kind, library_ids, file_ids)
 
     def heartbeat(self, status="running"):
         with self._state() as db:

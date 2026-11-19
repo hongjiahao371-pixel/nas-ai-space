@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import tempfile
 import tarfile
 import hashlib
@@ -26,7 +27,7 @@ from typing import Annotated, Any, Optional
 from urllib.parse import quote, unquote
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as RoutePath, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -39,6 +40,7 @@ from app.services.extractors import create_thumbnail
 from app.services.hardware import detect_hardware, memory_runtime, runtime_metrics
 from app.services.ingest import project_inbox
 from app.services.local_ai import LocalAIClient
+from app.services.material_basket import MAX_ITEMS as MATERIAL_BASKET_LIMIT, BasketFull, MaterialBasket
 from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
@@ -374,6 +376,17 @@ class AutomationRunCreate(BaseModel):
     file_ids: list[int] = Field(default_factory=list, max_length=500)
 
 
+BasketID = Annotated[int, Field(ge=1, le=2**63 - 1, strict=True)]
+
+
+class MaterialBasketAdd(BaseModel):
+    file_ids: list[BasketID] = Field(min_length=1, max_length=MATERIAL_BASKET_LIMIT)
+
+
+class MaterialBasketHandoff(BaseModel):
+    project_id: BasketID
+
+
 class AppState:
     database: Database
     ai: LocalAIClient
@@ -383,6 +396,7 @@ class AppState:
     watcher: LibraryWatcher
     recycle: RecycleBin
     workspaces: WorkspaceService
+    material_basket: MaterialBasket
     productivity: ProductivityService
     media_tickets: dict[str, tuple[int, float]]
     workspace_tickets: dict[str, tuple[str, str, str, float, bool, str]]
@@ -443,6 +457,7 @@ async def lifespan(_: FastAPI):
     state.productivity = state.tasks.productivity
     state.recycle = RecycleBin(state.database, settings, state.vectors)
     state.workspaces = WorkspaceService(state.database)
+    state.material_basket = MaterialBasket(state.database, state.workspaces)
     state.media_tickets = {}
     state.workspace_tickets = {}
     await state.tasks.start()
@@ -2199,6 +2214,96 @@ def delete_automation(workflow_id: int, principal: Auth) -> dict[str, bool]:
     return {"ok": True}
 
 
+def _basket_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
+    file = _visible_file(file_id, principal)
+    library = state.database.get_library(int(file["library_id"]))
+    if not library or not library.get("enabled"):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        # Drop stale revisions and paths redirected outside the allowlisted roots.
+        state.search.multimodal.source_path(file)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="文件不存在") from None
+    return file
+
+
+def _basket_payload(user_id: int, principal: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for file_id in state.material_basket.ids(user_id):
+        try:
+            file = _basket_file(file_id, principal)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            items.append({"id": file_id, "available": False})
+        else:
+            items.append(_public_file(file) | {"available": True})
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/material-basket")
+def get_material_basket(principal: Auth) -> dict[str, Any]:
+    return _basket_payload(_personal_user_id(principal), principal)
+
+
+@app.post("/api/material-basket")
+def add_material_basket(payload: MaterialBasketAdd, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    try:
+        state.material_basket.add(user_id, payload.file_ids, lambda file_id: _basket_file(file_id, principal))
+    except BasketFull as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _basket_payload(user_id, principal)
+
+
+@app.delete("/api/material-basket")
+def clear_material_basket(principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    state.material_basket.clear(user_id)
+    return _basket_payload(user_id, principal)
+
+
+@app.delete("/api/material-basket/{file_id}")
+def remove_material_basket(
+    file_id: Annotated[int, RoutePath(ge=1, le=2**63 - 1)],
+    principal: Auth,
+) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    state.material_basket.remove(user_id, file_id)
+    return _basket_payload(user_id, principal)
+
+
+@app.post("/api/material-basket/handoff")
+def handoff_material_basket(payload: MaterialBasketHandoff, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    project_id = payload.project_id
+    current_principal = principal.copy()
+
+    def check_project() -> None:
+        # Read current account permissions after acquiring the write lock, rather
+        # than reusing a session snapshot taken before a concurrent permission change.
+        user = state.database.get_user(user_id)
+        if not user or not user["enabled"]:
+            raise HTTPException(status_code=401, detail="账号会话已失效")
+        current_principal.update(role=user["role"], library_ids=user["library_ids"])
+        _project_context(project_id, current_principal, EDIT_ROLES)
+
+    def lookup(file_id: int) -> dict[str, Any]:
+        try:
+            return _basket_file(file_id, current_principal)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            raise HTTPException(status_code=409, detail="素材篮包含已失效或不可访问的素材，请移除后重试") from exc
+
+    result = state.material_basket.handoff(user_id, project_id, check_project, lookup)
+    if result["added"]:
+        _audit(principal, "material_basket.handoff", "project", str(project_id), {
+            "added": result["added"], "skipped": result["skipped"],
+        })
+    return result
+
+
 @app.get("/api/projects")
 def list_projects(principal: Auth) -> list[dict[str, Any]]:
     return state.workspaces.list_projects(
@@ -2845,6 +2950,94 @@ def asset_review_brief(asset_id: int, principal: Auth) -> dict[str, Any]:
             + (f"\n修改清单：\n- " + "\n- ".join(unresolved[:12]) if unresolved else "\n当前没有待处理审阅意见。")
         )
     return {"brief": brief, "source_count": len(sources)}
+
+
+class EditHandoffClip(BaseModel):
+    model_config = {"extra": "forbid"}
+    version_id: int = Field(gt=0, strict=True)
+    start_time: float = Field(ge=0, le=2678400, allow_inf_nan=False)
+    end_time: float = Field(gt=0, le=2678400, allow_inf_nan=False)
+    media_path: str = Field(min_length=1, max_length=4096)
+
+
+class EditHandoffRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    frame_rate: str = Field(default="25", max_length=20)
+    clips: list[EditHandoffClip] = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/projects/{project_id}/edit-handoff")
+async def export_edit_handoff(project_id: int, request: Request, principal: Auth) -> Response:
+    # Read-only export, but requires editing role and current source-library access.
+    _project_context(project_id, principal, {"owner", "manager", "editor"})
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 128 * 1024:
+            raise HTTPException(status_code=413, detail="剪辑交接请求体过大")
+        raw.extend(chunk)
+    try:
+        payload = EditHandoffRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        # Do not reflect invalid numbers or user paths through the error serializer.
+        raise HTTPException(status_code=422, detail="剪辑交接参数无效") from exc
+    return await run_in_threadpool(_export_edit_handoff, project_id, payload, principal)
+
+
+def _export_edit_handoff(project_id: int, payload: EditHandoffRequest, principal: dict[str, Any]) -> Response:
+    from app.services.edit_handoff import build_edit_handoff
+    project, _ = _project_context(project_id, principal, {"owner", "manager", "editor"})
+    clips, checked = [], []
+    for item in payload.clips:
+        version = state.workspaces.version(item.version_id)
+        asset = state.database.fetchone("SELECT project_id FROM assets WHERE id = ?", (version["asset_id"],)) if version else None
+        if not version or not asset or int(asset["project_id"]) != project_id or not version.get("file_id"):
+            raise HTTPException(status_code=404, detail="素材版本不存在")
+        file = _visible_file(int(version["file_id"]), principal)
+        library = state.database.get_library(int(file["library_id"]))
+        if not library or not library.get("enabled"):
+            raise HTTPException(status_code=404, detail="媒体库不可用")
+        if version["kind"] != "video" or file["kind"] != "video":
+            raise HTTPException(status_code=422, detail="首版剪辑交接仅支持视频素材")
+        try:
+            # Verify allowlisted roots and unchanged source; never serialize this path.
+            state.search.multimodal.source_path(file)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=409, detail="素材不可读或已变化，请重新扫描")
+        try:
+            metadata = json.loads(file.get("metadata_json") or "{}")
+            if not isinstance(metadata, dict):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=409, detail="素材元数据不可用")
+        clips.append({**item.model_dump(), "file_id": file["id"], "name": version["file_name"],
+                      "duration": file.get("duration"), "width": file.get("width"), "height": file.get("height"),
+                      "frame_rate": metadata.get("frame_rate"), "audio_codec": metadata.get("audio_codec")})
+        checked.append((item.version_id, file["id"], tuple(file.get(k) for k in ("path", "size", "mtime_ns", "metadata_json", "duration", "width", "height"))))
+    try:
+        package = build_edit_handoff(str(project["name"]), clips, payload.frame_rate)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Recheck source/version ownership and permissions just before returning bytes.
+    _project_context(project_id, principal, {"owner", "manager", "editor"})
+    for version_id, file_id, revision in checked:
+        version = state.workspaces.version(version_id)
+        asset = state.database.fetchone("SELECT project_id FROM assets WHERE id = ?", (version["asset_id"],)) if version else None
+        if not version or not asset or asset["project_id"] != project_id or version["file_id"] != file_id:
+            raise HTTPException(status_code=409, detail="素材版本已变化，请重试")
+        file = _visible_file(file_id, principal)
+        library = state.database.get_library(int(file["library_id"]))
+        if not library or not library.get("enabled"):
+            raise HTTPException(status_code=404, detail="媒体库不可用")
+        if tuple(file.get(k) for k in ("path", "size", "mtime_ns", "metadata_json", "duration", "width", "height")) != revision:
+            raise HTTPException(status_code=409, detail="素材在导出期间发生变化，请重试")
+        try:
+            state.search.multimodal.source_path(file)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=409, detail="素材不可读或已变化，请重新扫描")
+    return Response(package, media_type="application/zip", headers={
+        "Content-Disposition": "attachment; filename=edit-handoff.zip",
+        "Cache-Control": "no-store",
+    })
 
 
 @app.get("/api/projects/{project_id}/review-export")
@@ -4006,6 +4199,9 @@ def purge_recycle(item_id: int, principal: Auth) -> dict[str, Any]:
 def file_details(file_id: int, principal: Auth) -> dict[str, Any]:
     row = _visible_file(file_id, principal)
     result = _public_file(row)
+    if row.get("kind") == "video":
+        # Pass the nanosecond mtime as an opaque string (JavaScript loses precision).
+        result["frame_revision"] = f"{row['mtime_ns']}:{row['size']}"
     if row.get("kind") in {"audio", "video"}:
         result["manual_transcript"] = str(row.get("manual_transcript") or "")[:200000]
         result["extracted_text"] = str(row.get("extracted_text") or "")[:200000]
@@ -4118,6 +4314,54 @@ def video_frame(file_id: int, principal: Auth, time: float = Query(ge=0), revisi
         raise HTTPException(409, str(exc)) from exc
     except (TimeoutError, OSError) as exc:
         raise HTTPException(503, "画面读取繁忙，请稍后重试") from exc
+
+
+_video_frame_search_slot = threading.BoundedSemaphore(1)
+
+
+@app.post("/api/files/{file_id}/frame-similar")
+def video_frame_similar(
+    file_id: int, principal: Auth, response: Response,
+    time: float = Query(ge=0), revision: str = Query(min_length=1, max_length=80),
+    limit: int = Query(default=20, ge=1, le=60),
+) -> dict[str, Any]:
+    """Find other visible videos with matching indexed frames, not audio hits."""
+    row = _moment_file(file_id, principal)
+    if revision != f"{row['mtime_ns']}:{row['size']}":
+        raise HTTPException(409, "素材版本已变化，请重新打开视频")
+    media = state.search.multimodal
+    if not media.enabled:
+        raise HTTPException(409, "请先启用素材语义模型，再用当前帧查找")
+    libraries = _library_ids(principal)
+    if not _video_frame_search_slot.acquire(blocking=False):
+        raise HTTPException(503, "已有画面搜索正在进行，请稍后再试")
+    try:
+        try:
+            frame = state.video_moments.frame(row, time)
+        except (ValueError, FileNotFoundError):
+            raise HTTPException(409, "当前时间点无法读帧，请稍微拖动进度条后再试") from None
+        except (TimeoutError, OSError):
+            raise HTTPException(503, "画面读取暂不可用，请稍后再试") from None
+
+        label = "直接视频画面"
+        encoded = base64.b64encode(frame).decode("ascii")
+        content = {"content": [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded}}]}
+        try:
+            hits = media.image_search(content, max(80, limit * 5), "video", libraries, source_label=label)
+        except (httpx.HTTPError, ValueError, RuntimeError):
+            raise HTTPException(503, "素材语义服务暂不可用，请稍后再试") from None
+        # Recheck the source revision and use SQL-filtered results rather than
+        # treating vector-index payloads as authoritative visibility records.
+        current = _moment_file(file_id, principal)
+        if revision != f"{current['mtime_ns']}:{current['size']}":
+            raise HTTPException(409, "素材版本已变化，请重新打开视频")
+        hits = [hit for hit in hits if (hit.get("payload") or {}).get("source_label") == label]
+        result = state.search.visual_results(hits, "video", limit, libraries, exclude_id=file_id)
+        result.update(query="当前帧找相似视频", source_time=time)
+        response.headers["Cache-Control"] = "private, no-store"
+        return result
+    finally:
+        _video_frame_search_slot.release()
 
 
 @app.get("/api/files/{file_id}/similar")
