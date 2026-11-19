@@ -2417,6 +2417,7 @@ function resetEditHandoff() {
   handoffProjectId = null;
   $('#editHandoffForm').reset();
   $('#editHandoffClips').replaceChildren();
+  $('#editHandoffSources').replaceChildren();
   $('#editHandoffAsset').innerHTML = '<option value="">请选择视频素材</option>';
   $('#editHandoffVersion').innerHTML = '<option value="">先选择素材</option>';
   $('#editHandoffAsset').disabled = true;
@@ -2486,6 +2487,38 @@ $('#editHandoffVersion').addEventListener('change', event => {
   $('#editHandoffAdd').disabled = !event.target.value;
 });
 
+function syncEditHandoffSources() {
+  const container = $('#editHandoffSources');
+  const versions = new Map();
+  for (const row of $('#editHandoffClips').children) {
+    if (!versions.has(row.dataset.versionId)) versions.set(row.dataset.versionId, row.querySelector('b').textContent);
+  }
+  const existing = new Map([...container.children].map(source => [source.dataset.sourceVersion, source]));
+  for (const [id, source] of existing) {
+    if (!versions.has(id)) { source.remove(); existing.delete(id); }
+  }
+  for (const [id, title] of versions) {
+    let source = existing.get(id);
+    if (!source) {
+      source = document.createElement('label');
+      source.dataset.sourceVersion = id;
+      const label = document.createElement('span');
+      label.textContent = `${title} · 剪辑电脑文件路径（同版本所有片段共用）`;
+      const input = document.createElement('input');
+      input.type = 'text'; input.dataset.cutPath = ''; input.maxLength = 4096;
+      input.required = true; input.placeholder = '/Volumes/素材库/视频.mp4';
+      source.append(label, input);
+      container.append(source);
+    }
+    // Existing source fields never move: clip order changes must preserve focus.
+  }
+}
+
+function editHandoffSourcePath(versionId) {
+  const source = [...$('#editHandoffSources').children].find(item => item.dataset.sourceVersion === String(versionId));
+  return source?.querySelector('[data-cut-path]').value.trim() || '';
+}
+
 function appendEditHandoffClip(version, title, start = 0, end = version?.duration) {
   const list = $('#editHandoffClips');
   if (!version || list.children.length >= 200) return;
@@ -2498,14 +2531,11 @@ function appendEditHandoffClip(version, title, start = 0, end = version?.duratio
       <label>入点（秒）<input data-cut-start type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(start)}" required></label>
       <label>出点（秒）<input data-cut-end type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(end)}" required></label>
     </div>
-    <label>剪辑电脑文件路径<input data-cut-path type="text" maxlength="4096" required placeholder="/Volumes/素材库/视频.mp4"></label>
     <div class="form-row">
       <button type="button" class="secondary compact" data-cut-move="up">上移</button>
       <button type="button" class="secondary compact" data-cut-move="down">下移</button>
       <button type="button" class="secondary compact" data-cut-move="remove">移除</button>
     </div>`;
-  const prior = [...list.children].find(item => item.dataset.versionId === row.dataset.versionId);
-  if (prior) row.querySelector('[data-cut-path]').value = prior.querySelector('[data-cut-path]').value;
   if (!list.children.length && fps > 0) {
     const rates = $('#editHandoffForm').elements.frame_rate;
     const option = [...rates.options].find(o => {
@@ -2515,6 +2545,7 @@ function appendEditHandoffClip(version, title, start = 0, end = version?.duratio
     if (option) rates.value = option.value;
   }
   list.append(row);
+  syncEditHandoffSources();
   $('#editHandoffExport').disabled = false;
   row.querySelector('[data-cut-start]').focus();
 }
@@ -2532,6 +2563,7 @@ $('#editHandoffClips').addEventListener('click', event => {
     row.parentElement.insertBefore(row.nextElementSibling, row);
     action.focus();
   }
+  syncEditHandoffSources();
   $('#editHandoffExport').disabled = !$('#editHandoffClips').children.length;
 });
 $('#editHandoffForm').addEventListener('submit', async event => {
@@ -2545,11 +2577,11 @@ $('#editHandoffForm').addEventListener('submit', async event => {
     version_id: Number(row.dataset.versionId),
     start_time: Number(row.querySelector('[data-cut-start]').value),
     end_time: Number(row.querySelector('[data-cut-end]').value),
-    media_path: row.querySelector('[data-cut-path]').value.trim(),
+    media_path: editHandoffSourcePath(row.dataset.versionId),
     ...(row.dataset.sourceRevision ? {source_revision:row.dataset.sourceRevision} : {}),
   }));
   if (!clips.length || clips.some(c => !c.media_path || c.end_time <= c.start_time)) {
-    status.textContent = '检查每段的剪辑电脑文件路径，并确保入点早于出点。';
+    status.textContent = '检查每个源版本的剪辑电脑文件路径，并确保入点早于出点。';
     return;
   }
   button.disabled = true;
