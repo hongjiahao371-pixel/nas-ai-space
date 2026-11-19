@@ -2216,12 +2216,15 @@ def delete_automation(workflow_id: int, principal: Auth) -> dict[str, bool]:
 
 def _basket_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
     file = _visible_file(file_id, principal)
+    library = state.database.get_library(int(file["library_id"]))
+    if not library or not library.get("enabled"):
+        raise HTTPException(status_code=404, detail="文件不存在")
     try:
-        if Path(file["path"]).is_file():
-            return file
-    except OSError:
-        pass
-    raise HTTPException(status_code=404, detail="文件不存在")
+        # Drop stale revisions and paths redirected outside the allowlisted roots.
+        state.search.multimodal.source_path(file)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="文件不存在") from None
+    return file
 
 
 def _basket_payload(user_id: int, principal: dict[str, Any]) -> dict[str, Any]:

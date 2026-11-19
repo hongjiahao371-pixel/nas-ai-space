@@ -105,6 +105,15 @@ class MaterialBasketTests(unittest.TestCase):
         self.assertEqual(self.handoff().status_code, 409)
         self.assertEqual(state.workspaces.list_assets(self.project)["total"], 0)
 
+    def test_source_changed_before_handoff_needs_rescan(self):
+        first = self.file["id"]
+        self.assertEqual(self.add(first).status_code, 200)
+        original = state.database.get_file(first)
+        Path(original["path"]).write_bytes(b"synthetic updated content, not yet indexed")
+        self.assertEqual(self.basket()["items"], [{"id": first, "available": False}])
+        self.assertEqual(self.handoff().status_code, 409)
+        self.assertEqual(state.workspaces.list_assets(self.project)["total"], 0)
+
     def test_handoff_project_permissions_idempotence_and_retry(self):
         first, second = self.file["id"], self.second_file["id"]
         self.assertEqual(self.add(first, second, headers=self.member_headers).status_code, 200)
