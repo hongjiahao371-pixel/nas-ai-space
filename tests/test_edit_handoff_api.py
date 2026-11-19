@@ -50,8 +50,9 @@ class EditHandoffAPITests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.headers['cache-control'],'no-store')
         with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-            self.assertEqual(set(z.namelist()),{'timeline.fcpxml','manifest.json','README.txt'})
+            self.assertEqual(set(z.namelist()),{'Timeline.fcpxmld/Info.fcpxml','timeline.fcpxml','manifest.json','README.txt'})
             self.assertIn(b'file:///Volumes/Edit/source.mp4',z.read('timeline.fcpxml'))
+            self.assertEqual(z.read('Timeline.fcpxmld/Info.fcpxml'), z.read('timeline.fcpxml'))
             self.assertNotIn(state.database.get_file(self.file_id)['path'].encode(), b''.join(z.read(n) for n in z.namelist()))
             self.assertEqual(json.loads(z.read('manifest.json'))['timeline_duration'],'2s')
 

@@ -2568,7 +2568,7 @@ $('#editHandoffForm').addEventListener('submit', async event => {
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
-    status.textContent = '粗剪包已生成。解压后，在剪辑软件里导入 FCPXML。';
+    status.textContent = '粗剪包已生成。解压后，Final Cut Pro 可尝试导入 Timeline.fcpxmld；另附独立 XML。';
   } catch (error) {
     if (session === handoffSession) status.textContent = error.message;
   } finally {
