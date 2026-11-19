@@ -1609,6 +1609,7 @@ function isAdmin() {
 
 function applyRole() {
   MaterialBasket.userChanged();
+  if (!state.authReady) closeModal($('#editHandoffModal'));
   const admin = isAdmin();
   $$('.admin-only').forEach(element => { element.hidden = !admin; });
   $$('.personal-only').forEach(element => { element.hidden = !state.user?.id; });
@@ -2427,7 +2428,7 @@ function resetEditHandoff() {
 
 $('#openEditHandoff').addEventListener('click', async () => {
   const id = state.currentProjectId;
-  if (!id || Number(state.projectDetails?.project?.id) !== id ||
+  if (!state.authReady || !id || Number(state.projectDetails?.project?.id) !== id ||
       !['owner', 'manager', 'editor'].includes(state.projectDetails?.access_role)) return;
   resetEditHandoff();
   handoffProjectId = id;
@@ -5178,6 +5179,8 @@ function setGreeting() {
 
 async function boot() {
   state.authReady = false;
+  MaterialBasket.userChanged();
+  closeModal($('#editHandoffModal'));
   try {
     const health = await api('/api/health');
     $('.service-card').classList.add('ok');
@@ -5247,6 +5250,7 @@ window.addEventListener('storage', event => {
   state.token = token;
   state.user = null;
   state.authReady = false;
+  applyRole();
   if (token) {
     closeModal($('#tokenModal'));
     boot();
@@ -5254,7 +5258,6 @@ window.addEventListener('storage', event => {
   }
   // 令牌已在其他标签页清除：回到登录流程
   $('#tokenForm [name=token]').value = '';
-  applyRole();
   openModal($('#tokenModal'));
 });
 
@@ -5367,4 +5370,4 @@ document.addEventListener('click', async event => {
   }
 });
 
-MaterialBasket.init({api, user:()=>state.user, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject});
+MaterialBasket.init({api, user:()=>state.authReady ? state.user : null, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject});
