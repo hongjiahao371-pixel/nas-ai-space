@@ -319,6 +319,7 @@
             <select id="projectSort"><option value="updated">最近更新</option><option value="name">名称</option></select>
             <button class="secondary" id="exportReviewCsv">导出 CSV</button>
             <button class="secondary" id="exportReviewXml">导出剪辑标记</button>
+            <button class="secondary" id="openEditHandoff" hidden>导出粗剪时间线</button>
           </div>
           <div class="workspace-layout">
             <aside class="folder-rail">
@@ -625,6 +626,26 @@
 <div class="modal" role="dialog" aria-modal="true" id="clipModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">片段交付</span><h2>导出视频片段</h2><p>保留原始视频，生成可下载的 MP4 片段，最长 5 分钟。</p><form id="clipForm"><input name="file_id" type="hidden"><div class="form-grid"><label>开始（秒）<input name="start" type="number" min="0" step="0.01" required></label><label>结束（秒）<input name="end" type="number" min="0" step="0.01" required></label></div><button class="primary">开始导出</button></form></div></div>
 
   <div class="modal" role="dialog" aria-modal="true" id="integrationKeyModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><h2>保存集成密钥</h2><p>密钥仅显示这一次。请放在调用方服务端，关闭后无法再次查看。</p><label>只读密钥<input id="integrationKeyValue" readonly autocomplete="off" spellcheck="false"></label><button class="secondary" id="copyIntegrationKey">复制密钥</button></div></div>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editHandoffTitle" id="editHandoffModal">
+    <div class="modal-card wide-modal">
+      <button class="modal-close" data-close aria-label="关闭">×</button>
+      <h2 id="editHandoffTitle">导出粗剪时间线</h2>
+      <p>选版本、填入出点，按列表顺序生成 FCPXML。只支持统一帧率；不打包原视频。请填写剪辑电脑已挂载的文件路径，不是 NAS 后台路径。</p>
+      <form id="editHandoffForm">
+        <label>项目素材<select id="editHandoffAsset"><option value="">请选择视频素材</option></select></label>
+        <label>素材版本<select id="editHandoffVersion" disabled><option value="">先选择素材</option></select></label>
+        <button type="button" class="secondary" id="editHandoffAdd" disabled>加入时间线</button>
+        <label>时间线帧率<select name="frame_rate">
+          <option value="24000/1001">23.976</option><option value="24">24</option><option value="25" selected>25</option>
+          <option value="30000/1001">29.97</option><option value="30">30</option><option value="50">50</option>
+          <option value="60000/1001">59.94</option><option value="60">60</option>
+        </select></label>
+        <ol id="editHandoffClips"></ol>
+        <p id="editHandoffStatus" class="muted" role="status"></p>
+        <button type="submit" class="primary" id="editHandoffExport" disabled>下载粗剪 ZIP</button>
+      </form>
+    </div>
+  </div>
   <script src="/assets/guest-annotations.js?v=59"></script>
   <script src="/assets/app.js?v=60"></script>
 </body>

@@ -229,6 +229,7 @@ function openModal(modal) {
 function closeModal(modal) {
   if (!modal?.classList.contains('open')) return;
   if (modal.id === 'integrationKeyModal') $('#integrationKeyValue').value = '';
+  if (modal.id === 'editHandoffModal') resetEditHandoff();
   // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
   if (modal.id === 'fileModal') {
     fileViewerRequest += 1;
@@ -323,7 +324,7 @@ $('#dialogInput').addEventListener('keydown', event => {
   }
 });
 
-async function api(path, options = {}) {
+async function api(path, { responseType = "json", ...options } = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
   if (options.method && !['GET', 'HEAD', 'OPTIONS'].includes(options.method.toUpperCase())) {
@@ -353,7 +354,7 @@ async function api(path, options = {}) {
     error.status = response.status;
     throw error;
   }
-  return response.status === 204 ? null : response.json();
+  return response.status === 204 ? null : responseType === "blob" ? response.blob() : response.json();
 }
 
 const titles = {
@@ -2379,6 +2380,7 @@ async function loadProjectWorkspace(projectId, quiet = false) {
     const canManage = ['owner', 'manager'].includes(details.access_role);
     $('#addProjectAsset').hidden = !canEdit;
     $('#projectInboxButton').hidden = !canEdit;
+    $('#openEditHandoff').hidden = !canEdit;
     $('#createProjectFolder').hidden = !canEdit;
     $('#projectMembersButton').hidden = !canManage;
     $('#projectShareButton').hidden = !canManage;
@@ -2397,6 +2399,172 @@ async function loadProjectWorkspace(projectId, quiet = false) {
     if (!quiet) toast(error.message, true);
   }
 }
+
+let handoffSession = 0;
+let handoffVersionRequest = 0;
+let handoffVersions = [];
+let handoffAssetTitle = '';
+let handoffProjectId = null;
+
+function resetEditHandoff() {
+  ++handoffSession;
+  ++handoffVersionRequest;
+  handoffVersions = [];
+  handoffAssetTitle = '';
+  handoffProjectId = null;
+  $('#editHandoffForm').reset();
+  $('#editHandoffClips').replaceChildren();
+  $('#editHandoffAsset').innerHTML = '<option value="">请选择视频素材</option>';
+  $('#editHandoffVersion').innerHTML = '<option value="">先选择素材</option>';
+  $('#editHandoffAsset').disabled = true;
+  $('#editHandoffVersion').disabled = true;
+  $('#editHandoffAdd').disabled = true;
+  $('#editHandoffExport').disabled = true;
+  $('#editHandoffStatus').textContent = '';
+}
+
+$('#openEditHandoff').addEventListener('click', async () => {
+  const id = state.currentProjectId;
+  if (!id) return;
+  resetEditHandoff();
+  handoffProjectId = id;
+  const session = handoffSession;
+  const status = $('#editHandoffStatus');
+  openModal($('#editHandoffModal'));
+  status.textContent = '正在读取项目素材…';
+  try {
+    const data = await api(`/api/projects/${id}/assets?limit=200`);
+    if (session !== handoffSession || id !== state.currentProjectId) return;
+    const videos = data.items.filter(item => item.kind === 'video');
+    const select = $('#editHandoffAsset');
+    for (const item of videos) select.add(new Option(item.title || item.file_name, item.id));
+    select.disabled = !videos.length;
+    status.textContent = !videos.length ? '当前项目没有可选的视频素材。'
+      : data.total > data.items.length ? '仅显示最近 200 项项目素材中的视频。' : '';
+  } catch (error) {
+    if (session === handoffSession) status.textContent = error.message;
+  }
+});
+
+$('#editHandoffAsset').addEventListener('change', async event => {
+  const request = ++handoffVersionRequest;
+  const session = handoffSession;
+  const versionSelect = $('#editHandoffVersion');
+  const status = $('#editHandoffStatus');
+  handoffVersions = [];
+  versionSelect.disabled = true;
+  versionSelect.innerHTML = '<option value="">请选择版本</option>';
+  $('#editHandoffAdd').disabled = true;
+  status.textContent = '';
+  if (!event.target.value) return;
+  const assetId = Number(event.target.value);
+  status.textContent = '正在读取视频版本…';
+  try {
+    const asset = await api(`/api/assets/${assetId}`);
+    if (session !== handoffSession || request !== handoffVersionRequest ||
+        Number(asset.project_id) !== handoffProjectId) return;
+    handoffVersions = asset.versions.filter(v => v.kind === 'video' && Number(v.duration) > 0);
+    handoffAssetTitle = asset.title;
+    for (const v of handoffVersions) versionSelect.add(new Option(
+      `V${v.version_number} · ${v.label || v.file_name} · ${v.frame_rate ? Number(v.frame_rate).toFixed(3) + ' fps' : '未知帧率'}`, v.id));
+    versionSelect.disabled = !handoffVersions.length;
+    if (handoffVersions.length) versionSelect.selectedIndex = 1;
+    $('#editHandoffAdd').disabled = !handoffVersions.length;
+    status.textContent = handoffVersions.length ? '' : '视频还没有可用的时长，请等索引完成。';
+  } catch (error) {
+    if (session === handoffSession && request === handoffVersionRequest) status.textContent = error.message;
+  }
+});
+$('#editHandoffVersion').addEventListener('change', event => {
+  $('#editHandoffAdd').disabled = !event.target.value;
+});
+
+$('#editHandoffAdd').addEventListener('click', () => {
+  const version = handoffVersions.find(v => Number(v.id) === Number($('#editHandoffVersion').value));
+  const list = $('#editHandoffClips');
+  if (!version || list.children.length >= 200) return;
+  const row = document.createElement('li');
+  row.dataset.versionId = version.id;
+  const fps = Number(version.frame_rate);
+  row.innerHTML = `<b>${esc(handoffAssetTitle)} · V${esc(version.version_number)}</b>
+    <div class="form-row">
+      <label>入点（秒）<input data-cut-start type="number" min="0" max="${Number(version.duration)}" step="any" value="0" required></label>
+      <label>出点（秒）<input data-cut-end type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(version.duration)}" required></label>
+    </div>
+    <label>剪辑电脑文件路径<input data-cut-path type="text" maxlength="4096" required placeholder="/Volumes/素材库/视频.mp4"></label>
+    <div class="form-row">
+      <button type="button" class="secondary compact" data-cut-move="up">上移</button>
+      <button type="button" class="secondary compact" data-cut-move="down">下移</button>
+      <button type="button" class="secondary compact" data-cut-move="remove">移除</button>
+    </div>`;
+  const prior = [...list.children].find(item => item.dataset.versionId === row.dataset.versionId);
+  if (prior) row.querySelector('[data-cut-path]').value = prior.querySelector('[data-cut-path]').value;
+  if (!list.children.length && fps > 0) {
+    const rates = $('#editHandoffForm').elements.frame_rate;
+    const option = [...rates.options].find(o => {
+      const [a, b = '1'] = o.value.split('/');
+      return Math.abs(Number(a) / Number(b) - fps) < .00001;
+    });
+    if (option) rates.value = option.value;
+  }
+  list.append(row);
+  $('#editHandoffExport').disabled = false;
+  row.querySelector('[data-cut-start]').focus();
+});
+$('#editHandoffClips').addEventListener('click', event => {
+  const action = event.target.closest('[data-cut-move]');
+  if (!action) return;
+  const row = action.closest('li');
+  if (action.dataset.cutMove === 'remove') row.remove();
+  else if (action.dataset.cutMove === 'up' && row.previousElementSibling) {
+    row.parentElement.insertBefore(row, row.previousElementSibling);
+    action.focus();
+  } else if (action.dataset.cutMove === 'down' && row.nextElementSibling) {
+    row.parentElement.insertBefore(row.nextElementSibling, row);
+    action.focus();
+  }
+  $('#editHandoffExport').disabled = !$('#editHandoffClips').children.length;
+});
+$('#editHandoffForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const id = handoffProjectId;
+  const session = handoffSession;
+  const button = $('#editHandoffExport');
+  const status = $('#editHandoffStatus');
+  if (!id || id !== state.currentProjectId || button.disabled) return;
+  const clips = [...$('#editHandoffClips').children].map(row => ({
+    version_id: Number(row.dataset.versionId),
+    start_time: Number(row.querySelector('[data-cut-start]').value),
+    end_time: Number(row.querySelector('[data-cut-end]').value),
+    media_path: row.querySelector('[data-cut-path]').value.trim(),
+  }));
+  if (!clips.length || clips.some(c => !c.media_path || c.end_time <= c.start_time)) {
+    status.textContent = '检查每段的剪辑电脑文件路径，并确保入点早于出点。';
+    return;
+  }
+  button.disabled = true;
+  status.textContent = '正在生成粗剪包…';
+  try {
+    const blob = await api(`/api/projects/${id}/edit-handoff`, {
+      method: 'POST', responseType: 'blob',
+      body: JSON.stringify({frame_rate: event.target.elements.frame_rate.value, clips}),
+    });
+    if (session !== handoffSession || id !== state.currentProjectId) return;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = '粗剪时间线.zip';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    status.textContent = '粗剪包已生成。解压后，在剪辑软件里导入 FCPXML。';
+  } catch (error) {
+    if (session === handoffSession) status.textContent = error.message;
+  } finally {
+    if (session === handoffSession) button.disabled = !$('#editHandoffClips').children.length;
+  }
+});
 
 async function loadProjectAssets() {
   if (!state.currentProjectId) return;
