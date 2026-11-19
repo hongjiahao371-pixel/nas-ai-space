@@ -15,10 +15,19 @@ class ComparisonTests(unittest.TestCase):
         for broken in [[],models[:1],models+models, [dict(m,digest='latest') for m in models]]:
             with self.assertRaises(ValueError):ab.identities(broken)
     def test_fail_closed_classification(self):
-        old={'status':'failed','model_ids':{'x':'a'},'inference_failed':True}
+        old={'status':'failed','model_ids':{'x':'a'},'inference_failed':True,'known_embedding_crash':True}
         new=dict(old,status='passed')
         self.assertEqual(ab.conclusion([old,new]),'candidate_passes_baseline_inference_fails')
         self.assertEqual(ab.conclusion([new,new]),'inconclusive_baseline_not_reproduced')
         self.assertEqual(ab.conclusion([dict(old,inference_failed=False),new]),'inconclusive_setup')
         self.assertEqual(ab.conclusion([old,dict(new,model_ids={'x':'b'})]),'inconclusive_model_drift')
         self.assertEqual(ab.conclusion([old,old]),'candidate_failed')
+
+    def test_known_crash_requires_exact_embedding_http_fingerprint(self):
+        e=dict(method='POST',path='/api/embed',model=ab.MODELS[0],status=500,response_body='runner terminated: signal: segmentation fault')
+        self.assertTrue(ab.known_embedding_crash([e]))
+        self.assertTrue(ab.known_embedding_crash([dict(e,response_body='SIGSEGV')]))
+        for key,value in [('path','/api/generate'),('model',ab.MODELS[1]),('status',504),('response_body','connection timeout'),('method','GET')]:
+            self.assertFalse(ab.known_embedding_crash([dict(e,**{key:value})]))
+        old=dict(status='failed',model_ids={'x':'a'},inference_failed=True,known_embedding_crash=False)
+        self.assertEqual(ab.conclusion([old,dict(old,status='passed')]),'inconclusive_different_baseline_failure')

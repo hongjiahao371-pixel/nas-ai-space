@@ -32,6 +32,13 @@ def identities(models):
     return result
 
 
+def known_embedding_crash(errors):
+    return any(e.get('method') == 'POST' and e.get('path') == '/api/embed'
+               and e.get('model') == MODELS[0] and e.get('status') == 500
+               and re.search(r'\bSIGSEGV\b|segmentation fault', e.get('response_body', ''), re.I)
+               for e in errors)
+
+
 def conclusion(phases):
     if len(phases) != 2 or not all(p.get('model_ids') for p in phases):
         return 'inconclusive_setup'
@@ -41,6 +48,8 @@ def conclusion(phases):
         return 'inconclusive_baseline_not_reproduced'
     if not phases[0].get('inference_failed'):
         return 'inconclusive_setup'
+    if not phases[0].get('known_embedding_crash'):
+        return 'inconclusive_different_baseline_failure'
     return 'candidate_passes_baseline_inference_fails' if phases[1]['status'] == 'passed' else 'candidate_failed'
 
 
@@ -120,7 +129,9 @@ def main():
             trial.cleanup()
         summary['phases'].append({'version': version, 'status': trial.report['status'],
                                   'model_ids': trial.model_ids, 'inference_started': trial.inference_started,
-                                  'inference_failed': trial.inference_failed})
+                                  'inference_failed': trial.inference_failed,
+                                  'known_embedding_crash': bool(known_embedding_crash(trial.report.get('http_errors', []))),
+                                  'http_errors': trial.report.get('http_errors', [])})
         if version == VERSIONS[0]:
             lock = trial.model_ids
         save()

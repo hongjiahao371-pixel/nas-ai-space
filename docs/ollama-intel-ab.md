@@ -30,10 +30,10 @@ The unchanged test stops a phase at its first failure; if baseline embedding
 fails, baseline vision is NOT tested. The candidate must pass both. All trial
 containers/volumes are disposable and cleaned by the original runner.
 
-A green result means only: baseline inference request failed and candidate passed
+A green result means only: baseline POST /api/embed for qwen3-embedding:0.6b returned HTTP 500 with SIGSEGV/segmentation fault and candidate passed
 both ordinary workloads with identical model identities on this host. It does not
 prove AMX was the cause, or that all NAS hardware is fixed. Inspect bounded HTTP
 failure evidence and container logs to separate server errors from timeouts or
 resource failures. Baseline success is `inconclusive_baseline_not_reproduced`;
-setup failure, missing Intel AMX, model drift and candidate failure are nonzero.
+setup failure, novel baseline failures (including timeouts), missing Intel AMX, model drift and candidate failure are nonzero. No repeated-runner retry is scheduled.
 No model quality, latency, performance, production/NAS or exploit testing is done.
