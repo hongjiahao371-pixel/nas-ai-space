@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import stat
 import tempfile
@@ -10,6 +11,7 @@ from typing import Any, Callable
 from app.config import Settings
 from app.database import Database
 from app.services.scanner import scan_library
+from app.services.eagle_metadata import read_eagle_metadata
 from app.services.workspaces import WorkspaceService
 
 
@@ -23,17 +25,18 @@ def project_inbox(settings: Settings, project_id: int) -> Path:
     return root
 
 
-def _extract_packages(inbox: Path, maximum_bytes: int) -> set[Path]:
+def _extract_packages(inbox: Path, maximum_bytes: int, eagle_records: dict | None = None, eagle_roots: set | None = None, warnings: list | None = None) -> set[Path]:
     extracted: set[Path] = set()
     for package in inbox.rglob("*"):
         if not package.is_file() or package.suffix.lower() not in {".zip", ".eaglepack"}:
             continue
         if not zipfile.is_zipfile(package):
             continue
+        if package.is_symlink() or not package.resolve().is_relative_to(inbox.resolve()):
+            raise ValueError("入库包不可为符号链接或位于入库箱外")
         destination = package.with_name(f"{package.stem}-import")
-        if destination.is_dir():
-            extracted.add(package.resolve())
-            continue
+        if destination.is_symlink():
+            raise ValueError("解包目标不可为符号链接")
         temporary = Path(tempfile.mkdtemp(prefix=".nas-ai-import-", dir=package.parent))
         try:
             with zipfile.ZipFile(package) as archive:
@@ -43,6 +46,22 @@ def _extract_packages(inbox: Path, maximum_bytes: int) -> set[Path]:
                 total = sum(max(0, int(item.file_size)) for item in members)
                 if total > maximum_bytes:
                     raise ValueError(f"{package.name} 解压后超过入库大小限制")
+                if package.suffix.lower() == ".eaglepack":
+                    records, notes = read_eagle_metadata(archive)
+                    if warnings is not None:
+                        warnings.extend(notes)
+                    for path, record in records.items():
+                        with archive.open(path) as source:
+                            record["sha256"] = hashlib.file_digest(source, "sha256").hexdigest()
+                    if 'pack.json' in archive.namelist():
+                        if eagle_roots is not None:
+                            eagle_roots.add(destination.resolve())
+                        if eagle_records is not None:
+                            eagle_records.update({(destination / path).resolve(): record for path, record in records.items()})
+                if destination.is_dir():
+                    extracted.add(package.resolve())
+                    shutil.rmtree(temporary)
+                    continue
                 for member in members:
                     if member.flag_bits & 0x1:
                         raise ValueError(f"{package.name} 包含加密文件")
@@ -76,7 +95,8 @@ def collect_project_inbox(
     if not database.fetchone("SELECT id FROM projects WHERE id = ?", (project_id,)):
         raise ValueError("项目不存在")
     inbox = project_inbox(settings, project_id)
-    extracted_packages = _extract_packages(inbox, settings.max_upload_bytes)
+    eagle_records, eagle_roots, eagle_warnings = {}, set(), []
+    extracted_packages = _extract_packages(inbox, settings.max_upload_bytes, eagle_records, eagle_roots, eagle_warnings)
     library = database.fetchone("SELECT * FROM libraries WHERE path = ?", (str(settings.upload_root),))
     if not library:
         raise ValueError("上传空间媒体库不存在")
@@ -103,21 +123,40 @@ def collect_project_inbox(
     existing = {int(row["file_id"]) for row in existing_rows}
     workspaces = WorkspaceService(database)
     added = 0
+    metadata_imported = 0
+    eligible_files = []
     for index, file in enumerate(files):
         if cancelled():
             raise InterruptedError
         file_id = int(file["id"])
         if Path(file["path"]).resolve() in extracted_packages:
             continue
+        resolved = Path(file["path"]).resolve()
+        record = eagle_records.get(resolved)
+        if any(resolved.is_relative_to(root) for root in eagle_roots) and not record:
+            continue  # Recognized Eagle pack auxiliaries are not project assets.
+        if record:
+            if Path(file["path"]).is_symlink() or not resolved.is_relative_to(inbox.resolve()):
+                raise ValueError("Eagle 原始文件路径不安全")
+            with resolved.open("rb") as source:
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+            if digest != record["sha256"]:
+                raise ValueError("Eagle 原始文件与包内内容不一致，请使用新的入库包名称")
+        eligible_files.append(file)
         if file_id not in existing:
-            workspaces.create_asset(project_id, file, None, str(file["name"]), user_id)
+            asset = workspaces.create_asset(project_id, file, None, record["title"] if record else str(file["name"]), user_id)
+            if record:
+                # New assets only: do not overwrite later manual edits or user tags.
+                database.execute("UPDATE assets SET description=?, rating=? WHERE id=?",
+                                 (record["description"], record["rating"], asset["id"]))
+                metadata_imported += 1
             existing.add(file_id)
             added += 1
         if index and index % 100 == 0:
             progress(0.25 + 0.15 * index / max(1, len(files)), f"已整理 {index:,} 个入库文件")
     pending_ids = [
         int(file["id"])
-        for file in files
+        for file in eligible_files
         if file["status"] in {"pending", "partial", "error"} and not file["terminal_error"]
     ]
     progress(0.4, f"已加入 {added:,} 个项目素材")
@@ -127,5 +166,7 @@ def collect_project_inbox(
         "files": len(files),
         "assets_added": added,
         "packages_extracted": len(extracted_packages),
+        "eagle_metadata_imported": metadata_imported,
+        "eagle_warnings": eagle_warnings,
         "pending_file_ids": pending_ids,
     }
