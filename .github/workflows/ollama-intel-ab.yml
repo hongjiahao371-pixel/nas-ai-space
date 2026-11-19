@@ -1,0 +1,28 @@
+name: Isolated Intel Ollama A-B
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ollama-intel-ab.yml'
+      - 'scripts/test-ollama-ab.py'
+      - 'tests/test_ollama_ab.py'
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'test/ollama-intel-ab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test comparison gates
+        run: python3 -m unittest discover -s tests -p test_ollama_ab.py -v
+      - name: Same-host sequential baseline and candidate
+        run: python3 scripts/test-ollama-ab.py
+      - name: Preserve evidence including inconclusive hosts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-intel-ab-${{ github.run_id }}
+          path: ollama-ab-evidence/
+          if-no-files-found: warn
