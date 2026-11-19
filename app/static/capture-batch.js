@@ -17,7 +17,7 @@
       if (typeof d[k] !== 'string' || !d[k].trim() || [...d[k]].length > max || [...d[k]].some(c => { const n=c.codePointAt(0); return n>=0xd800 && n<=0xdfff || n===127 || n<32 && !(k==='text' && '\t\r\n'.includes(c)); })) throw Error('字段为空、超限或含无效字符');
     }
     const u = new URL(d.source_url);
-    if (!['http:','https:'].includes(u.protocol) || !u.hostname || u.username || u.password || u.search || u.hash || /[\\\s]/u.test(d.source_url) || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|\+00:00)$/.test(d.captured_at) || !Number.isFinite(Date.parse(d.captured_at))) throw Error('来源 URL 或 UTC 时间无效（不得含凭据、查询或片段）');
+    if (!['http:','https:'].includes(u.protocol) || !u.hostname || u.username || u.password || /^[a-z]+:\/\/[^/?#]*@/i.test(d.source_url) || u.search || u.hash || /[\\\s]/u.test(d.source_url) || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|\+00:00)$/.test(d.captured_at) || !Number.isFinite(Date.parse(d.captured_at))) throw Error('来源 URL 或 UTC 时间无效（不得含凭据、查询或片段）');
     // Canonicalizing removes ambiguous JSON representations before upload.
     return Object.fromEntries(Object.keys(d).sort().map(k => [k,d[k]]));
   }
@@ -27,14 +27,21 @@
     async prepare(files) {
       if (this.busy || this.preparing) return;
       const g=++this.generation; this.preparing=true;
-      this.rows=files.map(f => ({name:f.name,status:'loading',selected:false})); this.notify(this);
-      if (files.length>MAX_FILES || files.reduce((n,f)=>n+f.size,0)>MAX_TOTAL) {
-        this.rows.forEach(r=>{r.status='invalid';r.detail='整批拒绝：最多 10 份，总大小最多 1 MiB';}); this.preparing=false; this.notify(this); return;
+      // Check count before iterating FileList or constructing any per-file DOM/data.
+      if (files.length>MAX_FILES) {
+        this.rows=[{name:`已选择 ${files.length} 份`,status:'invalid',selected:false,detail:'整批拒绝：最多 10 份；没有读取或导入任何文件。请重新选择。'}];
+        this.preparing=false;this.notify(this);return;
       }
+      const bounded=Array.from(files);
+      this.rows=bounded.map(f => ({name:f.name,status:'loading',selected:false}));
+      if (bounded.reduce((n,f)=>n+f.size,0)>MAX_TOTAL) {
+        this.rows.forEach(r=>{r.status='invalid';r.detail='整批拒绝：总大小最多 1 MiB；没有读取或导入任何文件。';}); this.preparing=false; this.notify(this); return;
+      }
+      this.notify(this);
       const seen=new Set();
-      for (let i=0;i<files.length;i++) {
+      for (let i=0;i<bounded.length;i++) {
         if (g!==this.generation || !this.active()) return;
-        const f=files[i], r=this.rows[i];
+        const f=bounded[i], r=this.rows[i];
         try {
           if (!f.name.endsWith('.nas-capture.json') || !f.size || f.size>MAX_BYTES) throw Error('需 .nas-capture.json，单份 1–262144 字节');
           const data=parse(new TextDecoder('utf-8',{fatal:true}).decode(await f.arrayBuffer()));

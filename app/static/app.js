@@ -3066,11 +3066,14 @@ function renderCaptureBatch(batch) {
   for (const r of batch.rows) {
     const section=document.createElement('section'), label=document.createElement('label'), check=document.createElement('input');
     check.type='checkbox'; check.checked=r.selected; check.disabled=batch.busy || batch.preparing || r.status!=='ready';
-    check.addEventListener('change',()=>{r.selected=check.checked;renderCaptureBatch(batch);});
+    check.addEventListener('change',()=>{r.selected=check.checked;updateCaptureBatchControls(batch);});
     label.append(check,document.createTextNode(`${r.name} · ${labels[r.status]}`));section.append(label);
     const preview=document.createElement('pre');preview.className='web-capture-preview';
     preview.textContent=(r.data ? `标题：${r.data.title}\n来源（未经核验）：${r.data.source_url}\n时间：${r.data.captured_at}\n\n${r.data.text}\n\n` : '')+(r.detail||'');section.append(preview);list.append(section);
   }
+  updateCaptureBatchControls(batch);
+}
+function updateCaptureBatchControls(batch) {
   $('#captureBatchConfirm').disabled=batch.busy || batch.preparing || !batch.rows.some(r=>r.selected && r.status==='ready');
   $('#captureBatchFiles').disabled=batch.busy || batch.preparing;
 }
@@ -3082,7 +3085,7 @@ $('#captureBatchFiles').addEventListener('change',async event=>{
   if(captureBatch.busy || captureBatch.preparing || !state.authReady)return;
   captureBatchContext={actor:state.user,project:Number(state.currentProjectId)};
   $('#captureBatchTarget').textContent=`导入目标：${state.projectDetails?.project?.name || '项目'}（#${captureBatchContext.project}），项目成员可访问。`;
-  await captureBatch.prepare([...event.target.files]);
+  await captureBatch.prepare(event.target.files);
 });
 $('#captureBatchConfirm').addEventListener('click',async()=>{
   const context=captureBatchContext;if(!context)return;
