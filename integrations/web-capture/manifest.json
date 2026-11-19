@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"NAS AI Space 网页摘录","version":"0.1.0","permissions":["activeTab","scripting"],"action":{"default_popup":"popup.html"}}

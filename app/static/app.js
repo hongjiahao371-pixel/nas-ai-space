@@ -230,6 +230,7 @@ function closeModal(modal) {
   if (!modal?.classList.contains('open')) return;
   if (modal.id === 'integrationKeyModal') $('#integrationKeyValue').value = '';
   if (modal.id === 'editHandoffModal') resetEditHandoff();
+  if (modal.id === 'projectInboxModal') resetWebCapture();
   // 各弹窗的关闭清理：暂停并移除可能仍在播放的媒体
   if (modal.id === 'fileModal') {
     fileViewerRequest += 1;
@@ -3016,7 +3017,50 @@ async function openShareCreator(assetId = '') {
   openModal($('#shareModal'));
 }
 
+let webCaptureDraft = null;
+let webCaptureEpoch = 0;
+let webCaptureBusy = false;
+function resetWebCapture() {
+  webCaptureEpoch += 1; webCaptureDraft = null;
+  const file = $('#webCaptureFile'); if (file) file.value = '';
+  const preview = $('#webCapturePreview'); if (preview) preview.textContent = '';
+  const submit = $('#importWebCapture'); if (submit) submit.disabled = true;
+}
+document.addEventListener('change', async event => {
+  if (event.target.id !== 'webCaptureFile') return;
+  const epoch = ++webCaptureEpoch, project = Number(state.currentProjectId);
+  webCaptureDraft = null; $('#importWebCapture').disabled = true;
+  $('#webCapturePreview').textContent = '';
+  const file = event.target.files?.[0]; if (!file) return;
+  try {
+    if (webCaptureBusy || file.size > 256 * 1024 || !file.size) throw new Error('请选择不超过 256 KiB 的摘录 JSON 文件');
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+    const data = JSON.parse(text);
+    if (data.schema !== 'nas-ai-web-capture/v1' || data.selection_only !== true ||
+        ['title','source_url','captured_at','text'].some(key => typeof data[key] !== 'string')) throw new Error('不是受支持的网页选区摘录');
+    if (epoch !== webCaptureEpoch || project !== Number(state.currentProjectId) || !$('#projectInboxModal').classList.contains('open')) return;
+    webCaptureDraft = { project, text };
+    const name = state.projectDetails?.project?.name || `项目 ${project}`;
+    $('#webCapturePreview').textContent = `目标：${name}（#${project}）\n文件：${file.name}\n标题：${data.title}\n来源（未经独立核验）：${data.source_url}\n浏览器提供时间：${data.captured_at}\n\n${data.text}`;
+    $('#importWebCapture').disabled = false;
+  } catch (error) { if (epoch === webCaptureEpoch) $('#webCapturePreview').textContent = `不能预览：${error.message}`; }
+});
+async function importWebCapture() {
+  if (webCaptureBusy || !webCaptureDraft) return;
+  const draft = webCaptureDraft;
+  if (draft.project !== Number(state.currentProjectId)) { resetWebCapture(); return toast('项目已改变，请重新选择文件并确认', true); }
+  webCaptureBusy = true; $('#importWebCapture').disabled = true; $('#webCaptureFile').disabled = true;
+  try {
+    const result = await api(`/api/projects/${draft.project}/inbox/web-capture`, { method: 'POST', body: draft.text });
+    resetWebCapture();
+    toast(`摘录已保存到项目 #${draft.project}，${result.task_id ? '本文件索引已排队' : '未确认新索引任务，请查看素材状态'}；未抓取来源网址`);
+    if (draft.project === Number(state.currentProjectId)) await loadProjectAssets();
+  } catch (error) { toast(`导入未确认：${error.message}。同一文件可安全重试，不会覆盖已有内容。`, true); }
+  finally { webCaptureBusy = false; $('#webCaptureFile').disabled = false; $('#importWebCapture').disabled = !webCaptureDraft; }
+}
+
 async function openProjectInbox() {
+  resetWebCapture();
   if (!state.currentProjectId) return;
   try {
     const data = await api(`/api/projects/${state.currentProjectId}/inbox`);
@@ -3935,6 +3979,7 @@ document.addEventListener('click', async event => {
     return openModal($('#folderModal'));
   }
   if (event.target.closest('#projectInboxButton')) return openProjectInbox();
+  if (event.target.closest('#importWebCapture')) return importWebCapture();
   if (event.target.closest('#collectProjectInbox')) {
     try {
       const result = await api(`/api/projects/${state.currentProjectId}/inbox/collect`, { method: 'POST' });

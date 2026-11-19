@@ -39,6 +39,7 @@ from app.security import hash_password, session_token, token_digest, verify_pass
 from app.services.extractors import create_thumbnail
 from app.services.hardware import detect_hardware, memory_runtime, runtime_metrics
 from app.services.ingest import project_inbox
+from app.services.web_capture import MAX_CAPTURE_BYTES, parse_capture, publish_capture
 from app.services.local_ai import LocalAIClient
 from app.services.material_basket import source_revision, validate_clip_revision
 from app.services.material_basket import (
@@ -2544,6 +2545,54 @@ def project_inbox_status(project_id: int, principal: Auth) -> dict[str, Any]:
         "collected_files": int(collected["count"]),
         "active_task": active,
     }
+
+
+@app.post("/api/projects/{project_id}/inbox/web-capture", status_code=201)
+async def import_web_capture(project_id: int, request: Request, principal: Auth) -> dict[str, Any]:
+    _project_context(project_id, principal, EDIT_ROLES)
+    library = state.database.fetchone("SELECT * FROM libraries WHERE path = ?", (str(settings.upload_root),))
+    if not library or not library["enabled"] or not _allowed_library(principal, int(library["id"])):
+        raise HTTPException(status_code=403, detail="上传空间不可用或无权限")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > min(MAX_CAPTURE_BYTES, settings.max_upload_bytes):
+            raise HTTPException(status_code=413, detail="摘录超过 256 KiB 或上传限制")
+        raw.extend(chunk)
+    _project_context(project_id, principal, EDIT_ROLES)
+    library = state.database.fetchone("SELECT * FROM libraries WHERE path = ?", (str(settings.upload_root),))
+    if not library or not library["enabled"] or not _allowed_library(principal, int(library["id"])):
+        raise HTTPException(status_code=403, detail="上传空间不可用或无权限")
+    try:
+        capture = parse_capture(bytes(raw))
+        path, created = publish_capture(settings, project_id, capture)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail="摘录格式或入库路径无效，未覆盖已有文件") from exc
+    stat = path.stat()
+    file_id, _ = state.database.upsert_file({
+        "library_id": int(library["id"]), "path": str(path),
+        "relative_path": str(path.relative_to(settings.upload_root)), "name": path.name,
+        "extension": ".txt", "kind": "document", "mime_type": "text/plain", "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns, "inode": getattr(stat, "st_ino", 0), "scan_token": "web-capture",
+    })
+    file = state.database.get_file(file_id)
+    with state.database.transaction() as connection:
+        existing = connection.execute("SELECT a.id FROM assets a JOIN asset_versions av ON av.asset_id=a.id WHERE a.project_id=? AND av.file_id=?", (project_id, file_id)).fetchone()
+        if existing:
+            asset_id = int(existing["id"])
+        else:
+            asset_id = state.workspaces.insert_asset(connection, project_id, file, None, capture["title"], principal.get("user_id"))
+            description = "网页选区摘录（用户提供，未经独立核验）\n来源：" + capture["source_url"] + "\n采集时间（浏览器提供）：" + capture["captured_at"]
+            connection.execute("UPDATE assets SET description=? WHERE id=?", (description, asset_id))
+    task_id = None
+    # This operation indexes only the explicitly selected capture, not the whole inbox.
+    if file["status"] in {"pending", "partial", "error"}:
+        try:
+            task_id = await state.tasks.submit("index_files", {"file_ids": [file_id]}, priority=9, user_id=principal.get("user_id"))
+        except Exception:
+            logger.warning("Web capture saved; indexing queue unavailable")
+    _audit(principal, "project.web_capture.import", "asset", str(asset_id), {"project_id": project_id, "file_id": file_id, "created": created})
+    return {"asset_id": asset_id, "file_id": file_id, "created": created, "task_id": task_id,
+            "index_status": file["status"], "saved": True}
 
 
 @app.post("/api/projects/{project_id}/inbox/collect", status_code=202)
