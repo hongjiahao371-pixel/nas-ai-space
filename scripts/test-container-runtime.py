@@ -180,9 +180,35 @@ class Acceptance:
             raw = json.dumps(payload).encode()
             request_headers["Content-Type"] = "application/json"
         request = urllib.request.Request(base + path, data=raw, headers=request_headers, method=method)
-        with self.http.open(request, timeout=timeout) as response:
-            body = response.read()
-            return json.loads(body) if decode else body
+        try:
+            with self.http.open(request, timeout=timeout) as response:
+                body = response.read()
+                return json.loads(body) if decode else body
+        except urllib.error.HTTPError as exc:
+            # Preserve bounded failure evidence, not request input/auth headers.
+            # Re-raise the same error: no retry, fallback, or weakened gate.
+            limit = 8192
+            try:
+                raw_error = exc.read(limit + 1)
+                error_text = raw_error[:limit].decode("utf-8", errors="replace")
+                truncated = len(raw_error) > limit
+            except Exception:
+                error_text, truncated = "<response body could not be read>", False
+            finally:
+                exc.close()
+            evidence = {"method": method, "path": path.split("?", 1)[0],
+                        "status": exc.code, "response_body": self.redact(error_text),
+                        "response_body_truncated": truncated}
+            if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                evidence["model"] = self.redact(payload["model"][:200])
+            self.report.setdefault("http_errors", []).append(evidence)
+            self.report["http_errors"] = self.report["http_errors"][-10:]
+            try:
+                self.save()
+            except OSError:
+                pass  # Failure to save diagnostics must not hide the HTTP failure.
+            exc.add_note(self.redact(json.dumps(evidence, ensure_ascii=True)))
+            raise
 
     def running(self):
         for service, name in self.containers.items():
