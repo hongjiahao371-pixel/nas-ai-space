@@ -2952,6 +2952,94 @@ def asset_review_brief(asset_id: int, principal: Auth) -> dict[str, Any]:
     return {"brief": brief, "source_count": len(sources)}
 
 
+class EditHandoffClip(BaseModel):
+    model_config = {"extra": "forbid"}
+    version_id: int = Field(gt=0, strict=True)
+    start_time: float = Field(ge=0, le=2678400, allow_inf_nan=False)
+    end_time: float = Field(gt=0, le=2678400, allow_inf_nan=False)
+    media_path: str = Field(min_length=1, max_length=4096)
+
+
+class EditHandoffRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    frame_rate: str = Field(default="25", max_length=20)
+    clips: list[EditHandoffClip] = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/projects/{project_id}/edit-handoff")
+async def export_edit_handoff(project_id: int, request: Request, principal: Auth) -> Response:
+    # Read-only export, but requires editing role and current source-library access.
+    _project_context(project_id, principal, {"owner", "manager", "editor"})
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 128 * 1024:
+            raise HTTPException(status_code=413, detail="剪辑交接请求体过大")
+        raw.extend(chunk)
+    try:
+        payload = EditHandoffRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        # Do not reflect invalid numbers or user paths through the error serializer.
+        raise HTTPException(status_code=422, detail="剪辑交接参数无效") from exc
+    return await run_in_threadpool(_export_edit_handoff, project_id, payload, principal)
+
+
+def _export_edit_handoff(project_id: int, payload: EditHandoffRequest, principal: dict[str, Any]) -> Response:
+    from app.services.edit_handoff import build_edit_handoff
+    project, _ = _project_context(project_id, principal, {"owner", "manager", "editor"})
+    clips, checked = [], []
+    for item in payload.clips:
+        version = state.workspaces.version(item.version_id)
+        asset = state.database.fetchone("SELECT project_id FROM assets WHERE id = ?", (version["asset_id"],)) if version else None
+        if not version or not asset or int(asset["project_id"]) != project_id or not version.get("file_id"):
+            raise HTTPException(status_code=404, detail="素材版本不存在")
+        file = _visible_file(int(version["file_id"]), principal)
+        library = state.database.get_library(int(file["library_id"]))
+        if not library or not library.get("enabled"):
+            raise HTTPException(status_code=404, detail="媒体库不可用")
+        if version["kind"] != "video" or file["kind"] != "video":
+            raise HTTPException(status_code=422, detail="首版剪辑交接仅支持视频素材")
+        try:
+            # Verify allowlisted roots and unchanged source; never serialize this path.
+            state.search.multimodal.source_path(file)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=409, detail="素材不可读或已变化，请重新扫描")
+        try:
+            metadata = json.loads(file.get("metadata_json") or "{}")
+            if not isinstance(metadata, dict):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=409, detail="素材元数据不可用")
+        clips.append({**item.model_dump(), "file_id": file["id"], "name": version["file_name"],
+                      "duration": file.get("duration"), "width": file.get("width"), "height": file.get("height"),
+                      "frame_rate": metadata.get("frame_rate"), "audio_codec": metadata.get("audio_codec")})
+        checked.append((item.version_id, file["id"], tuple(file.get(k) for k in ("path", "size", "mtime_ns", "metadata_json", "duration", "width", "height"))))
+    try:
+        package = build_edit_handoff(str(project["name"]), clips, payload.frame_rate)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Recheck source/version ownership and permissions just before returning bytes.
+    _project_context(project_id, principal, {"owner", "manager", "editor"})
+    for version_id, file_id, revision in checked:
+        version = state.workspaces.version(version_id)
+        asset = state.database.fetchone("SELECT project_id FROM assets WHERE id = ?", (version["asset_id"],)) if version else None
+        if not version or not asset or asset["project_id"] != project_id or version["file_id"] != file_id:
+            raise HTTPException(status_code=409, detail="素材版本已变化，请重试")
+        file = _visible_file(file_id, principal)
+        library = state.database.get_library(int(file["library_id"]))
+        if not library or not library.get("enabled"):
+            raise HTTPException(status_code=404, detail="媒体库不可用")
+        if tuple(file.get(k) for k in ("path", "size", "mtime_ns", "metadata_json", "duration", "width", "height")) != revision:
+            raise HTTPException(status_code=409, detail="素材在导出期间发生变化，请重试")
+        try:
+            state.search.multimodal.source_path(file)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=409, detail="素材不可读或已变化，请重新扫描")
+    return Response(package, media_type="application/zip", headers={
+        "Content-Disposition": "attachment; filename=edit-handoff.zip",
+        "Cache-Control": "no-store",
+    })
+
+
 @app.get("/api/projects/{project_id}/review-export")
 def export_project_review(
     project_id: int,
