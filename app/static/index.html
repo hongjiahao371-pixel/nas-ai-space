@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=67">
+  <link rel="stylesheet" href="/assets/styles.css?v=69">
 </head>
 <body>
   <div class="app-shell">
@@ -641,6 +641,7 @@
           <option value="30000/1001">29.97</option><option value="30">30</option><option value="50">50</option>
           <option value="60000/1001">59.94</option><option value="60">60</option>
         </select></label>
+        <div id="editHandoffSources" aria-label="各源版本共用的剪辑电脑路径"></div>
         <ol id="editHandoffClips"></ol>
         <p id="editHandoffStatus" class="muted" role="status"></p>
         <button type="submit" class="primary" id="editHandoffExport" disabled>下载粗剪 ZIP</button>
@@ -650,6 +651,6 @@
 <div class="modal" role="dialog" aria-modal="true" id="materialBasketModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭素材篮">×</button><h2>素材篮</h2><p id="materialBasketStatus" role="status"></p><div class="basket-actions"><button type="button" class="secondary" id="materialBasketRefresh">复查可用性</button><button type="button" class="secondary" id="materialBasketClear">清空</button></div><div id="materialBasketItems"></div><h3>选片顺序与入出点</h3><div id="materialBasketClips"></div><label>交接项目<select id="materialBasketProject"><option value="">选择项目</option></select></label><p>项目成员将按项目权限访问这些素材。重复交接不重复创建资产。</p><button class="primary" id="materialBasketHandoff" disabled>加入所选项目</button><div id="materialBasketResult" role="status"></div></div></div>
   <script src="/assets/material-basket.js?v=65"></script>
   <script src="/assets/guest-annotations.js?v=63"></script>
-  <script src="/assets/app.js?v=67"></script>
+  <script src="/assets/app.js?v=69"></script>
 </body>
 </html>
