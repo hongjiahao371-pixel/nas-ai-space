@@ -38,6 +38,8 @@ jobs:
       - name: Verify static assets and scripts
         run: |
           node --check app/static/app.js
+          node --check app/static/capture-batch.js
+          node --test tests/js/capture-batch.test.cjs
           bash -n scripts/nas-ai scripts/nas-ai-multimodal scripts/*.sh
           git diff --check
           scripts/release-check.sh

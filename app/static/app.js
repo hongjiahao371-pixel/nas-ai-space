@@ -344,6 +344,7 @@ async function api(path, { responseType = "json", ...options } = {}) {
       state.token = '';
       state.user = null;
       state.authReady = false;
+      stopCaptureBatch();
       localStorage.removeItem('nasAiToken');
       $('#tokenForm [name=token]').value = '';
       applyRole();
@@ -392,6 +393,7 @@ function viewFromHash() {
 }
 
 function showView(view) {
+  if (view !== 'project') stopCaptureBatch();
   if (!titles[view]) return;
   if (state.publicMode) return;
   if (!state.authReady) {
@@ -2364,6 +2366,7 @@ function fillFolderSelect(selector, folders, selected = '') {
 }
 
 async function openProject(projectId) {
+  stopCaptureBatch();
   state.currentProjectId = Number(projectId);
   state.projectFolderId = null;
   showView('project');
@@ -2376,6 +2379,7 @@ async function loadProjectWorkspace(projectId, quiet = false) {
       api(`/api/projects/${projectId}/assets?limit=200`),
       api(`/api/projects/${projectId}/review-tasks`),
     ]);
+    if (state.currentProjectId !== Number(projectId)) stopCaptureBatch();
     state.currentProjectId = Number(projectId);
     state.currentProject = details.project;
     state.projectDetails = details;
@@ -3052,10 +3056,48 @@ async function openShareCreator(assetId = '') {
   openModal($('#shareModal'));
 }
 
+let captureBatchContext = null;
+const captureBatch = new CaptureBatch.Batch(() => Boolean(captureBatchContext && state.authReady &&
+  captureBatchContext.actor === state.user && captureBatchContext.project === Number(state.currentProjectId) &&
+  $('#projectInboxModal').classList.contains('open')), renderCaptureBatch);
+function renderCaptureBatch(batch) {
+  const list = $('#captureBatchRows'); list.replaceChildren();
+  const labels = {loading:'读取中',ready:'待确认',duplicate:'批内重复',invalid:'无效',sending:'正在发送',success:'成功',existing:'项目已有',failed:'失败 / 未确认'};
+  for (const r of batch.rows) {
+    const section=document.createElement('section'), label=document.createElement('label'), check=document.createElement('input');
+    check.type='checkbox'; check.checked=r.selected; check.disabled=batch.busy || batch.preparing || r.status!=='ready';
+    check.addEventListener('change',()=>{r.selected=check.checked;updateCaptureBatchControls(batch);});
+    label.append(check,document.createTextNode(`${r.name} · ${labels[r.status]}`));section.append(label);
+    const preview=document.createElement('pre');preview.className='web-capture-preview';
+    preview.textContent=(r.data ? `标题：${r.data.title}\n来源（未经核验）：${r.data.source_url}\n时间：${r.data.captured_at}\n\n${r.data.text}\n\n` : '')+(r.detail||'');section.append(preview);list.append(section);
+  }
+  updateCaptureBatchControls(batch);
+}
+function updateCaptureBatchControls(batch) {
+  $('#captureBatchConfirm').disabled=batch.busy || batch.preparing || !batch.rows.some(r=>r.selected && r.status==='ready');
+  $('#captureBatchFiles').disabled=batch.busy || batch.preparing;
+}
+function stopCaptureBatch() {
+  captureBatchContext=null;captureBatch.stop();
+  $('#captureBatchFiles').value='';$('#captureBatchTarget').textContent='';
+}
+$('#captureBatchFiles').addEventListener('change',async event=>{
+  if(captureBatch.busy || captureBatch.preparing || !state.authReady)return;
+  captureBatchContext={actor:state.user,project:Number(state.currentProjectId)};
+  $('#captureBatchTarget').textContent=`导入目标：${state.projectDetails?.project?.name || '项目'}（#${captureBatchContext.project}），项目成员可访问。`;
+  await captureBatch.prepare(event.target.files);
+});
+$('#captureBatchConfirm').addEventListener('click',async()=>{
+  const context=captureBatchContext;if(!context)return;
+  await captureBatch.run(body=>api(`/api/projects/${context.project}/inbox/web-capture`,{method:'POST',body}));
+  if(captureBatchContext===context && state.authReady && state.user===context.actor && Number(state.currentProjectId)===context.project) await loadProjectAssets();
+});
+
 let webCaptureDraft = null;
 let webCaptureEpoch = 0;
 let webCaptureBusy = false;
 function resetWebCapture() {
+  stopCaptureBatch();
   webCaptureEpoch += 1; webCaptureDraft = null;
   const file = $('#webCaptureFile'); if (file) file.value = '';
   const preview = $('#webCapturePreview'); if (preview) preview.textContent = '';
@@ -4803,6 +4845,7 @@ $('#loginForm').addEventListener('submit', async event => {
 });
 
 $('#logoutButton').addEventListener('click', async () => {
+  resetWebCapture();
   try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
   state.token = '';
   state.user = null;
