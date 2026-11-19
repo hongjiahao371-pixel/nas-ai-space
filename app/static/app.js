@@ -5383,4 +5383,10 @@ document.addEventListener('click', async event => {
   }
 });
 
-MaterialBasket.init({api, user:()=>state.authReady ? state.user : null, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject, roughCut:async(projectId,clips)=>{ await openProject(projectId); await loadProjectWorkspace(projectId); if(state.currentProjectId===projectId) await openEditHandoff(clips); }});
+MaterialBasket.init({api, user:()=>state.authReady ? state.user : null, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject, roughCut: async (projectId, clips) => {
+  const ownerId = state.user?.id;
+  if (!state.authReady || !ownerId) return;
+  await openProject(projectId);
+  await loadProjectWorkspace(projectId);
+  if (state.authReady && state.user?.id === ownerId && state.currentProjectId === projectId) await openEditHandoff(clips);
+}});
