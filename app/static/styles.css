@@ -2009,3 +2009,5 @@ button.productivity-feed-row { width: 100%; cursor: pointer; }
 .basket-clip .basket-actions { flex-wrap: wrap; }
 .basket-clip button { min-height: 36px; padding: 6px 10px; }
 #materialBasketClips { max-height: 45vh; overflow-y: auto; }
+
+.web-capture-preview { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--inset); font: inherit; }
