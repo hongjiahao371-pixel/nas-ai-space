@@ -40,6 +40,7 @@ from app.services.extractors import create_thumbnail
 from app.services.hardware import detect_hardware, memory_runtime, runtime_metrics
 from app.services.ingest import project_inbox
 from app.services.local_ai import LocalAIClient
+from app.services.material_basket import source_revision, validate_clip_revision
 from app.services.material_basket import (
     MAX_ITEMS as MATERIAL_BASKET_LIMIT, BasketFull, ClipConflict, ClipNotFound, InvalidClip,
     MaterialBasket, clip_frame_rate, validate_clip_file,
@@ -2264,11 +2265,15 @@ def _basket_payload(user_id: int, principal: dict[str, Any]) -> dict[str, Any]:
         if not file:
             continue
         try:
+            validate_clip_revision(clip, file)
             validate_clip_file(file, clip["end_time"])
         except ClipConflict:
             continue
         clip.update(available=True, name=file["name"], kind=file["kind"], duration=file["duration"],
                     frame_rate=clip_frame_rate(file))
+    for clip in clips:
+        clip.pop("source_mtime_ns", None)
+        clip.pop("source_size", None)
     return {"items": items, "total": len(items), "clips": clips, "clip_total": len(clips),
             "combined_total": len(items) + len(clips)}
 
@@ -3044,6 +3049,7 @@ class EditHandoffClip(BaseModel):
     start_time: float = Field(ge=0, le=2678400, allow_inf_nan=False)
     end_time: float = Field(gt=0, le=2678400, allow_inf_nan=False)
     media_path: str = Field(min_length=1, max_length=4096)
+    source_revision: str | None = Field(default=None, max_length=80, pattern=r"^[0-9]+:[0-9]+$")
 
 
 class EditHandoffRequest(BaseModel):
@@ -3082,6 +3088,8 @@ def _export_edit_handoff(project_id: int, payload: EditHandoffRequest, principal
         library = state.database.get_library(int(file["library_id"]))
         if not library or not library.get("enabled"):
             raise HTTPException(status_code=404, detail="媒体库不可用")
+        if item.source_revision is not None and item.source_revision != source_revision(file):
+            raise HTTPException(status_code=409, detail="选片源文件已变化，请重新核对入出点")
         if version["kind"] != "video" or file["kind"] != "video":
             raise HTTPException(status_code=422, detail="首版剪辑交接仅支持视频素材")
         try:

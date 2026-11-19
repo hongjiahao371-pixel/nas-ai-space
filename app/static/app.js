@@ -2443,7 +2443,7 @@ async function openEditHandoff(seedClips = []) {
     const select = $('#editHandoffAsset');
     for (const item of videos) select.add(new Option(item.title || item.file_name, item.id));
     select.disabled = !videos.length;
-    for (const clip of seedClips) appendEditHandoffClip({id:clip.version_id,duration:clip.source_duration,frame_rate:clip.frame_rate,version_number:clip.version_number}, clip.title, clip.start_time, clip.end_time);
+    for (const clip of seedClips) appendEditHandoffClip({id:clip.version_id,duration:clip.source_duration,frame_rate:clip.frame_rate,version_number:clip.version_number,source_revision:clip.source_revision}, clip.title, clip.start_time, clip.end_time);
     if(seedClips.length) status.textContent = '已带入选片篮顺序与入出点。请填写剪辑电脑路径后导出。';
     if (!seedClips.length) status.textContent = !videos.length ? '当前项目没有可选的视频素材。'
       : data.total > data.items.length ? '仅显示最近 200 项项目素材中的视频。' : '';
@@ -2491,6 +2491,7 @@ function appendEditHandoffClip(version, title, start = 0, end = version?.duratio
   if (!version || list.children.length >= 200) return;
   const row = document.createElement('li');
   row.dataset.versionId = version.id;
+  if(version.source_revision) row.dataset.sourceRevision = version.source_revision;
   const fps = Number(version.frame_rate);
   row.innerHTML = `<b>${esc(title)} · V${esc(version.version_number)}</b>
     <div class="form-row">
@@ -2545,6 +2546,7 @@ $('#editHandoffForm').addEventListener('submit', async event => {
     start_time: Number(row.querySelector('[data-cut-start]').value),
     end_time: Number(row.querySelector('[data-cut-end]').value),
     media_path: row.querySelector('[data-cut-path]').value.trim(),
+    ...(row.dataset.sourceRevision ? {source_revision:row.dataset.sourceRevision} : {}),
   }));
   if (!clips.length || clips.some(c => !c.media_path || c.end_time <= c.start_time)) {
     status.textContent = '检查每段的剪辑电脑文件路径，并确保入点早于出点。';

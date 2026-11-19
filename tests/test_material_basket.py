@@ -273,6 +273,7 @@ class MaterialBasketTests(unittest.TestCase):
             "id": first_id, "position": 0, "asset_id": old["id"], "version_id": existing_version, "version_number": 1,
             "file_id": file_id, "title": "existing", "start_time": 1.0, "end_time": 1.5,
             "duration": 0.5, "source_duration": 12.25, "frame_rate": 24.0,
+            "source_revision": f"{state.database.get_file(file_id)['mtime_ns']}:{state.database.get_file(file_id)['size']}",
         })
         repeated = self.handoff().json()
         self.assertEqual((repeated["added"], repeated["skipped"]), (0, 2))
@@ -290,6 +291,44 @@ class MaterialBasketTests(unittest.TestCase):
             database.execute("INSERT INTO material_basket_items (user_id,file_id) VALUES (?,?)", (owner["id"], 123))
             database.initialize()
             self.assertEqual(basket.snapshot(owner["id"]), ([123], []))
+
+    def test_saved_clip_revision_survives_metadata_but_not_rescanned_replacement(self):
+        file_id = self.make_video()
+        clip = self.add_clip(file_id).json()["clips"][0]
+        state.database.execute("UPDATE files SET ai_caption='metadata only' WHERE id=?", (file_id,))
+        self.assertTrue(self.basket()["clips"][0]["available"])
+        original = state.database.get_file(file_id)
+        path = Path(original["path"])
+        path.write_bytes(path.read_bytes() + b"replacement revision")
+        stat = path.stat()
+        state.database.execute("UPDATE files SET size=?,mtime_ns=? WHERE id=?", (stat.st_size, stat.st_mtime_ns, file_id))
+        entry = self.basket()["clips"][0]
+        self.assertFalse(entry["available"])
+        self.assertNotIn("name", entry)
+        self.assertEqual(self.handoff().status_code, 409)
+        self.assertEqual(self.add_clip(file_id).status_code, 409)
+        self.assertEqual(self.client.patch(URL + f"/clips/{clip['id']}", json={"start_time":0,"end_time":2}, headers=self.owner_headers).status_code, 409)
+        self.assertEqual(state.database.fetchone("SELECT COUNT(*) n FROM assets WHERE project_id=?", (self.project,))["n"], 0)
+
+    def test_unbound_old_clip_rows_fail_closed_after_additive_migration(self):
+        file_id = self.make_video()
+        self.add_clip(file_id)
+        state.database.execute("UPDATE material_basket_clips SET source_mtime_ns=NULL,source_size=NULL WHERE user_id=?", (self.owner["id"],))
+        self.assertFalse(self.basket()["clips"][0]["available"])
+        self.assertEqual(self.handoff().status_code, 409)
+        with TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "index.db")
+            self.addCleanup(database.close)
+            database.initialize()
+            owner = database.create_user("old-range-owner", "owner", "unused", "owner", [])
+            database.execute("ALTER TABLE material_basket_clips DROP COLUMN source_mtime_ns")
+            database.execute("ALTER TABLE material_basket_clips DROP COLUMN source_size")
+            database.execute("INSERT INTO material_basket_clips(user_id,file_id,start_time,end_time,position) VALUES (?,?,?,?,?)", (owner["id"], 123, 1, 2, 0))
+            database.initialize()
+            row = database.fetchone("SELECT * FROM material_basket_clips WHERE user_id=?", (owner["id"],))
+            self.assertIsNone(row["source_mtime_ns"])
+            self.assertIsNone(row["source_size"])
+            self.assertEqual(row["start_time"], 1)
 
     def test_authenticated_clip_basket_to_real_edit_handoff_zip(self):
         with TemporaryDirectory() as directory:
@@ -333,7 +372,7 @@ class MaterialBasketTests(unittest.TestCase):
         self.assertEqual([clip["version_number"] for clip in mapped], [1, 2, 1])
         result = self.client.post(f"/api/projects/{self.project}/edit-handoff", headers=self.owner_headers, json={
             "frame_rate": "25",
-            "clips": [{k: clip[k] for k in ("version_id", "start_time", "end_time")}
+            "clips": [{k: clip[k] for k in ("version_id", "start_time", "end_time", "source_revision")}
                       | {"media_path": f"/Volumes/FixtureEdit/v{clip['version_number']}.mp4"} for clip in mapped],
         })
         self.assertEqual(result.status_code, 200, result.text[:500])
@@ -348,3 +387,13 @@ class MaterialBasketTests(unittest.TestCase):
                           for entry in manifest["clips"]], [(0, 1), (2, 3), (1.2, 2.4)])
         self.assertEqual(manifest["clips"][0]["resource"], manifest["clips"][2]["resource"])
         self.assertNotEqual(manifest["clips"][0]["resource"], manifest["clips"][1]["resource"])
+
+        file = state.database.get_file(sources[0])
+        source_path = Path(file["path"])
+        source_path.write_bytes(source_path.read_bytes() + b"changed after handoff")
+        stat = source_path.stat()
+        state.database.execute("UPDATE files SET size=?,mtime_ns=? WHERE id=?", (stat.st_size,stat.st_mtime_ns,sources[0]))
+        rejected = self.client.post(f"/api/projects/{self.project}/edit-handoff", headers=self.owner_headers, json={
+            "frame_rate":"25", "clips":[{k:mapped[0][k] for k in ("version_id","start_time","end_time","source_revision")} | {"media_path":"/Volumes/FixtureEdit/source.mp4"}],
+        })
+        self.assertEqual(rejected.status_code,409)

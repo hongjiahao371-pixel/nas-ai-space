@@ -47,6 +47,17 @@ def validate_clip_file(file: dict[str, Any], end_time: float) -> None:
         raise ClipConflict("片段出点不能超过当前视频时长")
 
 
+def source_revision(file: dict[str, Any]) -> str:
+    return f"{file.get('mtime_ns')}:{file.get('size')}"
+
+
+def validate_clip_revision(clip: dict[str, Any], file: dict[str, Any]) -> None:
+    # Old rows intentionally remain unbound: never silently bind them to new content.
+    if (clip.get("source_mtime_ns") is None or clip.get("source_size") is None
+        or (clip["source_mtime_ns"], clip["source_size"]) != (file.get("mtime_ns"), file.get("size"))):
+        raise ClipConflict("片段源文件已变化或缺少版本记录，请移除后重新核对选片")
+
+
 def clip_frame_rate(file: dict[str, Any]) -> float | None:
     try:
         rate = float(json.loads(file.get("metadata_json") or "{}").get("frame_rate") or 0)
@@ -73,7 +84,7 @@ class MaterialBasket:
     @staticmethod
     def _clips(connection: Connection, user_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute(
-            """SELECT id, file_id, start_time, end_time, position FROM material_basket_clips
+            """SELECT id, file_id, start_time, end_time, position, source_mtime_ns, source_size FROM material_basket_clips
                WHERE user_id = ? ORDER BY position, id""", (user_id,),
         ).fetchall()]
 
@@ -112,15 +123,18 @@ class MaterialBasket:
     def add_clip(self, user_id: int, file_id: int, start: float, end: float, lookup: FileLookup) -> None:
         start, end = clip_times(start, end)
         with self.database.transaction() as connection:
-            validate_clip_file(lookup(file_id), end)
+            file = lookup(file_id)
+            validate_clip_file(file, end)
             clips = self._clips(connection, user_id)
-            if any((clip["file_id"], clip["start_time"], clip["end_time"]) == (file_id, start, end) for clip in clips):
-                return
+            for clip in clips:
+                if (clip["file_id"], clip["start_time"], clip["end_time"]) == (file_id, start, end):
+                    validate_clip_revision(clip, file)
+                    return
             if len(clips) + len(self._ids(connection, user_id)) >= MAX_ITEMS:
                 raise BasketFull(f"素材篮最多可保存 {MAX_ITEMS} 项")
             connection.execute(
-                "INSERT INTO material_basket_clips(user_id,file_id,start_time,end_time,position) VALUES (?,?,?,?,?)",
-                (user_id, file_id, start, end, len(clips)),
+                "INSERT INTO material_basket_clips(user_id,file_id,start_time,end_time,position,source_mtime_ns,source_size) VALUES (?,?,?,?,?,?,?)",
+                (user_id, file_id, start, end, len(clips), file["mtime_ns"], file["size"]),
             )
 
     def edit_clip(self, user_id: int, clip_id: int, start: float, end: float, lookup: FileLookup) -> None:
@@ -130,7 +144,9 @@ class MaterialBasket:
             clip = next((clip for clip in clips if clip["id"] == clip_id), None)
             if not clip:
                 raise ClipNotFound("片段不存在")
-            validate_clip_file(lookup(clip["file_id"]), end)
+            file = lookup(clip["file_id"])
+            validate_clip_revision(clip, file)
+            validate_clip_file(file, end)
             if any(
                 other["id"] != clip_id
                 and (other["file_id"], other["start_time"], other["end_time"]) == (clip["file_id"], start, end)
@@ -181,6 +197,7 @@ class MaterialBasket:
             files = {file_id: lookup(file_id) for file_id in file_ids}
             for clip in clips:
                 _, end = clip_times(clip["start_time"], clip["end_time"])
+                validate_clip_revision(clip, files[clip["file_id"]])
                 validate_clip_file(files[clip["file_id"]], end)
             placeholders = ",".join("?" for _ in file_ids)
             rows = connection.execute(
@@ -221,6 +238,7 @@ class MaterialBasket:
                     "start_time": clip["start_time"], "end_time": clip["end_time"],
                     "duration": round(clip["end_time"] - clip["start_time"], 6),
                     "source_duration": files[file_id]["duration"],
+                    "source_revision": source_revision(files[file_id]),
                     "frame_rate": clip_frame_rate(files[file_id]),
                 })
             return {"project_id": project_id, "added": added, "skipped": len(items) - added,
