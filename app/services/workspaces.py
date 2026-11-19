@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from sqlite3 import Connection
 from datetime import datetime, timezone
 from typing import Any
 
@@ -268,26 +269,39 @@ class WorkspaceService:
             (folder_id, project_id),
         ):
             raise ValueError("项目文件夹不存在")
-        now = utc_now()
         with self.database.transaction() as connection:
-            cursor = connection.execute(
-                """INSERT INTO assets(project_id, folder_id, title, created_by, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (project_id, folder_id, title.strip() or file["name"], user_id, now, now),
-            )
-            asset_id = int(cursor.lastrowid)
-            version = connection.execute(
-                """INSERT INTO asset_versions(
-                   asset_id, file_id, version_number, label, file_name, mime_type, kind, size,
-                   duration, width, height, created_by, created_at)
-                   VALUES (?, ?, 1, '初始版本', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (asset_id, *self._version_snapshot(file), user_id, now),
-            )
-            connection.execute(
-                "UPDATE assets SET cover_version_id = ? WHERE id = ?",
-                (int(version.lastrowid), asset_id),
-            )
+            asset_id = self.insert_asset(connection, project_id, file, folder_id, title, user_id)
         return self.asset_detail(asset_id) or {}
+
+    def insert_asset(
+        self,
+        connection: Connection,
+        project_id: int,
+        file: dict[str, Any],
+        folder_id: int | None,
+        title: str,
+        user_id: int | None,
+    ) -> int:
+        """Create an asset and its cover version in the caller's transaction."""
+        now = utc_now()
+        cursor = connection.execute(
+            """INSERT INTO assets(project_id, folder_id, title, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (project_id, folder_id, title.strip() or file["name"], user_id, now, now),
+        )
+        asset_id = int(cursor.lastrowid)
+        version = connection.execute(
+            """INSERT INTO asset_versions(
+               asset_id, file_id, version_number, label, file_name, mime_type, kind, size,
+               duration, width, height, created_by, created_at)
+               VALUES (?, ?, 1, '初始版本', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (asset_id, *self._version_snapshot(file), user_id, now),
+        )
+        connection.execute(
+            "UPDATE assets SET cover_version_id = ? WHERE id = ?",
+            (int(version.lastrowid), asset_id),
+        )
+        return asset_id
 
     def add_version(
         self,

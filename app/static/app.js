@@ -1106,7 +1106,7 @@ function resultCard(item) {
     : '';
   const clipExport = item.kind==='video' ? `<button class="find-similar" data-video-moments="${item.id}" data-time="${item.match_time ?? ''}">核对片段</button><button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
-  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
+  return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${MaterialBasket.button(item.id)}${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
 }
 
 // 阶段三（布局重构）：列表行模式，与网格卡片并列；缩略图复用同一条懒加载管线
@@ -1120,7 +1120,7 @@ function resultRow(item) {
   const meta = [item.kind, fmtBytes(item.size), date ? fmtDate(date) : '', library ? library.name : '']
     .filter(Boolean).join(' · ');
   const favorite = item.favorite != null ? `<button class="card-favorite ${item.favorite ? 'active' : ''}" data-favorite-card="${item.id}" data-enabled="${item.favorite ? '1' : '0'}" aria-label="${item.favorite ? '取消收藏' : '收藏'}">${icon('star')}</button>` : '';
-  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${favorite}</div>`;
+  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${MaterialBasket.button(item.id)}${favorite}</div>`;
 }
 
 // 按当前布局模式渲染结果容器（grid 卡片 / list 行），并恢复选中态
@@ -1189,6 +1189,7 @@ function renderInspector(details) {
     ${summary ? `<p class="inspector-caption">${esc(summary)}</p>` : ''}
     <div class="inspector-actions">
       ${favoriteButton}
+      ${MaterialBasket.button(details.id)}
       <button class="secondary" data-inspector-detail="${details.id}">打开完整详情</button>
       <button class="primary" data-inspector-open="${details.id}">打开原文件</button>
     </div>`;
@@ -1607,6 +1608,7 @@ function isAdmin() {
 }
 
 function applyRole() {
+  MaterialBasket.userChanged();
   const admin = isAdmin();
   $$('.admin-only').forEach(element => { element.hidden = !admin; });
   $$('.personal-only').forEach(element => { element.hidden = !state.user?.id; });
@@ -5363,3 +5365,5 @@ document.addEventListener('click', async event => {
     catch { $('#integrationKeyValue').select(); toast('请手动复制选中的密钥'); }
   }
 });
+
+MaterialBasket.init({api, user:()=>state.user, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject});

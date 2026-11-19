@@ -27,7 +27,7 @@ from typing import Annotated, Any, Optional
 from urllib.parse import quote, unquote
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as RoutePath, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -40,6 +40,7 @@ from app.services.extractors import create_thumbnail
 from app.services.hardware import detect_hardware, memory_runtime, runtime_metrics
 from app.services.ingest import project_inbox
 from app.services.local_ai import LocalAIClient
+from app.services.material_basket import MAX_ITEMS as MATERIAL_BASKET_LIMIT, BasketFull, MaterialBasket
 from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
@@ -375,6 +376,17 @@ class AutomationRunCreate(BaseModel):
     file_ids: list[int] = Field(default_factory=list, max_length=500)
 
 
+BasketID = Annotated[int, Field(ge=1, le=2**63 - 1, strict=True)]
+
+
+class MaterialBasketAdd(BaseModel):
+    file_ids: list[BasketID] = Field(min_length=1, max_length=MATERIAL_BASKET_LIMIT)
+
+
+class MaterialBasketHandoff(BaseModel):
+    project_id: BasketID
+
+
 class AppState:
     database: Database
     ai: LocalAIClient
@@ -384,6 +396,7 @@ class AppState:
     watcher: LibraryWatcher
     recycle: RecycleBin
     workspaces: WorkspaceService
+    material_basket: MaterialBasket
     productivity: ProductivityService
     media_tickets: dict[str, tuple[int, float]]
     workspace_tickets: dict[str, tuple[str, str, str, float, bool, str]]
@@ -444,6 +457,7 @@ async def lifespan(_: FastAPI):
     state.productivity = state.tasks.productivity
     state.recycle = RecycleBin(state.database, settings, state.vectors)
     state.workspaces = WorkspaceService(state.database)
+    state.material_basket = MaterialBasket(state.database, state.workspaces)
     state.media_tickets = {}
     state.workspace_tickets = {}
     await state.tasks.start()
@@ -2198,6 +2212,93 @@ def delete_automation(workflow_id: int, principal: Auth) -> dict[str, bool]:
     state.database.execute("DELETE FROM automation_workflows WHERE id = ?", (workflow_id,))
     _audit(principal, "automation.delete", "automation", str(workflow_id))
     return {"ok": True}
+
+
+def _basket_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
+    file = _visible_file(file_id, principal)
+    try:
+        if Path(file["path"]).is_file():
+            return file
+    except OSError:
+        pass
+    raise HTTPException(status_code=404, detail="文件不存在")
+
+
+def _basket_payload(user_id: int, principal: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for file_id in state.material_basket.ids(user_id):
+        try:
+            file = _basket_file(file_id, principal)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            items.append({"id": file_id, "available": False})
+        else:
+            items.append(_public_file(file) | {"available": True})
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/material-basket")
+def get_material_basket(principal: Auth) -> dict[str, Any]:
+    return _basket_payload(_personal_user_id(principal), principal)
+
+
+@app.post("/api/material-basket")
+def add_material_basket(payload: MaterialBasketAdd, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    try:
+        state.material_basket.add(user_id, payload.file_ids, lambda file_id: _basket_file(file_id, principal))
+    except BasketFull as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _basket_payload(user_id, principal)
+
+
+@app.delete("/api/material-basket")
+def clear_material_basket(principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    state.material_basket.clear(user_id)
+    return _basket_payload(user_id, principal)
+
+
+@app.delete("/api/material-basket/{file_id}")
+def remove_material_basket(
+    file_id: Annotated[int, RoutePath(ge=1, le=2**63 - 1)],
+    principal: Auth,
+) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    state.material_basket.remove(user_id, file_id)
+    return _basket_payload(user_id, principal)
+
+
+@app.post("/api/material-basket/handoff")
+def handoff_material_basket(payload: MaterialBasketHandoff, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    project_id = payload.project_id
+    current_principal = principal.copy()
+
+    def check_project() -> None:
+        # Read current account permissions after acquiring the write lock, rather
+        # than reusing a session snapshot taken before a concurrent permission change.
+        user = state.database.get_user(user_id)
+        if not user or not user["enabled"]:
+            raise HTTPException(status_code=401, detail="账号会话已失效")
+        current_principal.update(role=user["role"], library_ids=user["library_ids"])
+        _project_context(project_id, current_principal, EDIT_ROLES)
+
+    def lookup(file_id: int) -> dict[str, Any]:
+        try:
+            return _basket_file(file_id, current_principal)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            raise HTTPException(status_code=409, detail="素材篮包含已失效或不可访问的素材，请移除后重试") from exc
+
+    result = state.material_basket.handoff(user_id, project_id, check_project, lookup)
+    if result["added"]:
+        _audit(principal, "material_basket.handoff", "project", str(project_id), {
+            "added": result["added"], "skipped": result["skipped"],
+        })
+    return result
 
 
 @app.get("/api/projects")

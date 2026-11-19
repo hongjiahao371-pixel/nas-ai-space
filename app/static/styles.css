@@ -1980,3 +1980,21 @@ button.productivity-feed-row { width: 100%; cursor: pointer; }
 .guest-annotation-tools button, [data-public-annotation] { min-height: 44px; padding: 8px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--inset); color: var(--text); cursor: pointer; }
 .guest-annotation-tools button:disabled { opacity: .45; cursor: default; }
 .guest-annotation-tools [role=status] { font-size: var(--fs-sm); color: var(--text-soft); }
+
+/* Cross-directory persistent material basket. */
+.basket-add { white-space: nowrap; min-height: 36px; padding: 6px 9px; font-size: var(--fs-xs); }
+.basket-add[aria-pressed=true] { color: var(--accent); border-color: var(--accent); }
+.basket-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+#materialBasketItems { max-height: 48vh; overflow-y: auto; margin: 14px 0; }
+.basket-item { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--line-soft); }
+.basket-item > div { flex:1; min-width:0; }
+.basket-item small { display:block; color:var(--muted); overflow-wrap:anywhere; margin-top:4px; }
+.basket-item .text-button { text-align:left; overflow-wrap:anywhere; }
+#materialBasketResult { margin-top:14px; line-height:1.7; }
+@media (max-width:600px) { #materialBasketOpen { padding:8px; white-space:nowrap; } .result-row .basket-add { font-size:11px; padding:5px; } }
+
+#editHandoffClips { display: grid; gap: 12px; padding-inline-start: 22px; }
+#editHandoffClips > li { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+#editHandoffClips .form-row { display: flex; flex-wrap: wrap; gap: 8px; }
+#editHandoffClips .form-row label { flex: 1 1 110px; min-width: 0; }
+#editHandoffClips input { width: 100%; }

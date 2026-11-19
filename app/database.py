@@ -173,6 +173,15 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT
 );
 
+-- Keep a missing file ID as a personal tombstone without keeping its metadata.
+CREATE TABLE IF NOT EXISTS material_basket_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    file_id INTEGER NOT NULL,
+    UNIQUE(user_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_material_basket_user_order ON material_basket_items(user_id, id);
+
 CREATE TABLE IF NOT EXISTS video_moment_annotations (
  id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
  query_key TEXT NOT NULL, query TEXT NOT NULL, time REAL NOT NULL, revision TEXT NOT NULL,

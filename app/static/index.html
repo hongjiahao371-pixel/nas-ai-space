@@ -120,6 +120,7 @@
           <span>搜索所有资料</span><kbd>⌘ K</kbd>
         </button>
         <div class="top-actions">
+          <button class="secondary personal-only" id="materialBasketOpen" hidden>素材篮 <span id="materialBasketCount">0</span></button>
           <span class="privacy-pill"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.8 8.2 7 10 4.2-1.8 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>数据不出 NAS</span>
           <button class="icon-button notification-button personal-only" id="notificationButton" title="通知" aria-label="通知"><svg viewBox="0 0 24 24"><path d="M6 17h12l-1.5-2.5V10a4.5 4.5 0 0 0-9 0v4.5z"/><path d="M10 20h4"/></svg><i id="notificationCount" hidden>0</i></button>
           <button class="secondary compact" id="uploadButton"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M5 14v5h14v-5"/></svg>上传</button>
@@ -646,7 +647,9 @@
       </form>
     </div>
   </div>
-  <script src="/assets/guest-annotations.js?v=59"></script>
+<div class="modal" role="dialog" aria-modal="true" id="materialBasketModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭素材篮">×</button><h2>素材篮</h2><p id="materialBasketStatus" role="status"></p><div class="basket-actions"><button type="button" class="secondary" id="materialBasketRefresh">复查可用性</button><button type="button" class="secondary" id="materialBasketClear">清空</button></div><div id="materialBasketItems"></div><label>交接项目<select id="materialBasketProject"><option value="">选择项目</option></select></label><p>项目成员将按项目权限访问这些素材。重复交接不重复创建资产。</p><button class="primary" id="materialBasketHandoff" disabled>加入所选项目</button><div id="materialBasketResult" role="status"></div></div></div>
+  <script src="/assets/material-basket.js?v=60"></script>
+  <script src="/assets/guest-annotations.js?v=60"></script>
   <script src="/assets/app.js?v=60"></script>
 </body>
 </html>
