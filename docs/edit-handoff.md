@@ -12,7 +12,7 @@ This is distinct from the existing review-export marker list. It builds real med
 
 Use the normal authenticated session. Project owner/manager/editor and current source-library visibility are required, including enabled libraries. Standard bootstrap/local authentication behavior is unchanged. Clip count 1–200; body limit 128 KiB; unknown fields rejected. Sources must be readable under configured scan/upload roots and match current indexed size/mtime. Revision fields are compared again before returning to reject an intervening rescan.
 
-Response: `application/zip`, attachment `edit-handoff.zip`, no-store. Contents: `timeline.fcpxml`, `manifest.json`, `README.txt`.
+Response: `application/zip`, attachment `edit-handoff.zip`, no-store. Contents: `Timeline.fcpxmld/Info.fcpxml`, `timeline.fcpxml` (identical XML for compatible tools), `manifest.json`, `README.txt`.
 
 Each path is an explicitly supplied editor-machine absolute file path. No NAS path is guessed or copied into the package. Local POSIX and Windows drive paths are accepted; URLs, UNC, traversal, control characters and empty mappings are rejected. Windows paths are serialized, not a claim of Final Cut support on Windows. Map the actual media before import; server cannot verify editor-machine mounts.
 
@@ -24,7 +24,7 @@ Pure service tests cover path escaping, rational rates, in/out bounds, resource 
 
 A generated video+audio sample passed Apple's official FCPXML 1.10 DTD with lxml. The DTD was obtained separately, not vendored or added as a dependency. DTD validation is syntax/structure evidence only, NOT an actual Final Cut Pro, Premiere Pro or Resolve import test.
 
-Apple documents that Final Cut exports 1.10+ as `.fcpxmld` bundles, whereas this first exporter writes a standalone `.fcpxml`. Actual standalone import compatibility for the user's Final Cut version remains to be tested. No Premiere or Resolve compatibility promise. Media, effects, subtitles, color, review comments and proxies are not included. Indexed files are not immutable historical copies: stat/revision checks protect this export window, not every historic version after a prior rescan. VFR, embedded source timecode, multichannel audio and mixed dimensions need real-editor acceptance before production use.
+The included `Timeline.fcpxmld` follows Apple's 1.10 bundle layout. Extract the outer ZIP and select the whole bundle in Final Cut Pro → File → Import → XML. Keep your original media at the mapped paths. Do not import both copies. Actual import compatibility with target versions remains to be tested. No Premiere or Resolve compatibility promise. Media, effects, subtitles, color, review comments and proxies are not included. Indexed files are not immutable historical copies: stat/revision checks protect this export window, not every historic version after a prior rescan. VFR, embedded source timecode, multichannel audio and mixed dimensions need real-editor acceptance before production use.
 
 Official references:
 - https://developer.apple.com/documentation/professional-video-applications/document-type-definition

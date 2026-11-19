@@ -7,7 +7,7 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
   <title>NAS AI Space · 本地 AI 生产力平台</title>
   <script src="/assets/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/assets/styles.css?v=61">
+  <link rel="stylesheet" href="/assets/styles.css?v=68">
 </head>
 <body>
   <div class="app-shell">
@@ -624,7 +624,7 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" id="dialogModal"><div class="modal-card compact-modal"><span class="eyebrow" id="dialogEyebrow">确认操作</span><h2 id="dialogTitle"></h2><p id="dialogBody"></p><label id="dialogField" hidden><span id="dialogLabel"></span><input id="dialogInput"></label><div class="dialog-actions"><button class="secondary" id="dialogCancel" type="button">取消</button><button class="primary" id="dialogConfirm" type="button">确定</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="modal" role="dialog" aria-modal="true" id="imageSearchModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">视觉检索</span><h2>以图搜图</h2><p>选择参考图片后可拖动框选局部；不框选则搜索整张图。图片仅用于本次检索。</p><label class="secondary image-file-label">选择图片<input id="visualReference" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><canvas id="visualCanvas" hidden></canvas><div class="card-actions"><button class="secondary" id="resetVisualCrop">使用整张图</button><button class="primary" id="submitVisualSearch" disabled>搜索素材库</button></div></div></div>
-<div class="modal" role="dialog" aria-modal="true" id="clipModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">片段交付</span><h2>导出视频片段</h2><p>保留原始视频，生成可下载的 MP4 片段，最长 5 分钟。</p><form id="clipForm"><input name="file_id" type="hidden"><div class="form-grid"><label>开始（秒）<input name="start" type="number" min="0" step="0.01" required></label><label>结束（秒）<input name="end" type="number" min="0" step="0.01" required></label></div><button class="primary">开始导出</button></form></div></div>
+<div class="modal" role="dialog" aria-modal="true" id="clipModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><span class="eyebrow">片段交付</span><h2>导出视频片段</h2><p>原始视频保持不变。可将入出点保存到选片篮；单独导出 MP4 最长 5 分钟。</p><form id="clipForm"><input name="file_id" type="hidden"><div class="form-grid"><label>开始（秒）<input name="start" type="number" min="0" step="any" required></label><label>结束（秒）<input name="end" type="number" min="0" step="any" required></label></div><button type="button" class="secondary personal-only" id="saveClipToBasket">保存入出点到选片篮</button><button class="primary">开始导出</button></form></div></div>
 
   <div class="modal" role="dialog" aria-modal="true" id="integrationKeyModal"><div class="modal-card"><button class="modal-close" data-close aria-label="关闭">×</button><h2>保存集成密钥</h2><p>密钥仅显示这一次。请放在调用方服务端，关闭后无法再次查看。</p><label>只读密钥<input id="integrationKeyValue" readonly autocomplete="off" spellcheck="false"></label><button class="secondary" id="copyIntegrationKey">复制密钥</button></div></div>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editHandoffTitle" id="editHandoffModal">
@@ -641,15 +641,16 @@
           <option value="30000/1001">29.97</option><option value="30">30</option><option value="50">50</option>
           <option value="60000/1001">59.94</option><option value="60">60</option>
         </select></label>
+        <div id="editHandoffSources" aria-label="各源版本共用的剪辑电脑路径"></div>
         <ol id="editHandoffClips"></ol>
         <p id="editHandoffStatus" class="muted" role="status"></p>
         <button type="submit" class="primary" id="editHandoffExport" disabled>下载粗剪 ZIP</button>
       </form>
     </div>
   </div>
-<div class="modal" role="dialog" aria-modal="true" id="materialBasketModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭素材篮">×</button><h2>素材篮</h2><p id="materialBasketStatus" role="status"></p><div class="basket-actions"><button type="button" class="secondary" id="materialBasketRefresh">复查可用性</button><button type="button" class="secondary" id="materialBasketClear">清空</button></div><div id="materialBasketItems"></div><label>交接项目<select id="materialBasketProject"><option value="">选择项目</option></select></label><p>项目成员将按项目权限访问这些素材。重复交接不重复创建资产。</p><button class="primary" id="materialBasketHandoff" disabled>加入所选项目</button><div id="materialBasketResult" role="status"></div></div></div>
-  <script src="/assets/material-basket.js?v=61"></script>
-  <script src="/assets/guest-annotations.js?v=60"></script>
-  <script src="/assets/app.js?v=61"></script>
+<div class="modal" role="dialog" aria-modal="true" id="materialBasketModal"><div class="modal-card wide-modal"><button class="modal-close" data-close aria-label="关闭素材篮">×</button><h2>素材篮</h2><p id="materialBasketStatus" role="status"></p><div class="basket-actions"><button type="button" class="secondary" id="materialBasketRefresh">复查可用性</button><button type="button" class="secondary" id="materialBasketClear">清空</button></div><div id="materialBasketItems"></div><h3>选片顺序与入出点</h3><div id="materialBasketClips"></div><label>交接项目<select id="materialBasketProject"><option value="">选择项目</option></select></label><p>项目成员将按项目权限访问这些素材。重复交接不重复创建资产。</p><button class="primary" id="materialBasketHandoff" disabled>加入所选项目</button><div id="materialBasketResult" role="status"></div></div></div>
+  <script src="/assets/material-basket.js?v=64"></script>
+  <script src="/assets/guest-annotations.js?v=63"></script>
+  <script src="/assets/app.js?v=68"></script>
 </body>
 </html>

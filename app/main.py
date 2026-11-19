@@ -40,7 +40,11 @@ from app.services.extractors import create_thumbnail
 from app.services.hardware import detect_hardware, memory_runtime, runtime_metrics
 from app.services.ingest import project_inbox
 from app.services.local_ai import LocalAIClient
-from app.services.material_basket import MAX_ITEMS as MATERIAL_BASKET_LIMIT, BasketFull, MaterialBasket
+from app.services.material_basket import source_revision, validate_clip_revision
+from app.services.material_basket import (
+    MAX_ITEMS as MATERIAL_BASKET_LIMIT, BasketFull, ClipConflict, ClipNotFound, InvalidClip,
+    MaterialBasket, clip_frame_rate, validate_clip_file,
+)
 from app.services.productivity import ARTIFACT_TYPES, ProductivityService
 from app.services.recycle import RecycleBin
 from app.services.search import SearchService
@@ -385,6 +389,19 @@ class MaterialBasketAdd(BaseModel):
 
 class MaterialBasketHandoff(BaseModel):
     project_id: BasketID
+
+
+class MaterialBasketClipRange(BaseModel):
+    start_time: Annotated[float, Field(strict=True)]
+    end_time: Annotated[float, Field(strict=True)]
+
+
+class MaterialBasketClipAdd(MaterialBasketClipRange):
+    file_id: BasketID
+
+
+class MaterialBasketClipOrder(BaseModel):
+    clip_ids: list[BasketID] = Field(max_length=MATERIAL_BASKET_LIMIT)
 
 
 class AppState:
@@ -2228,17 +2245,37 @@ def _basket_file(file_id: int, principal: dict[str, Any]) -> dict[str, Any]:
 
 
 def _basket_payload(user_id: int, principal: dict[str, Any]) -> dict[str, Any]:
-    items = []
-    for file_id in state.material_basket.ids(user_id):
+    file_ids, clips = state.material_basket.snapshot(user_id)
+    files: dict[int, dict[str, Any] | None] = {}
+    for file_id in dict.fromkeys([*file_ids, *(clip["file_id"] for clip in clips)]):
         try:
-            file = _basket_file(file_id, principal)
+            files[file_id] = _basket_file(file_id, principal)
         except HTTPException as exc:
             if exc.status_code != 404:
                 raise
-            items.append({"id": file_id, "available": False})
-        else:
-            items.append(_public_file(file) | {"available": True})
-    return {"items": items, "total": len(items)}
+            files[file_id] = None
+    items = [
+        (_public_file(file) | {"available": True}) if (file := files[file_id])
+        else {"id": file_id, "available": False}
+        for file_id in file_ids
+    ]
+    for clip in clips:
+        file = files[clip["file_id"]]
+        clip["available"] = False
+        if not file:
+            continue
+        try:
+            validate_clip_revision(clip, file)
+            validate_clip_file(file, clip["end_time"])
+        except ClipConflict:
+            continue
+        clip.update(available=True, name=file["name"], kind=file["kind"], duration=file["duration"],
+                    frame_rate=clip_frame_rate(file))
+    for clip in clips:
+        clip.pop("source_mtime_ns", None)
+        clip.pop("source_size", None)
+    return {"items": items, "total": len(items), "clips": clips, "clip_total": len(clips),
+            "combined_total": len(items) + len(clips)}
 
 
 @app.get("/api/material-basket")
@@ -2273,6 +2310,57 @@ def remove_material_basket(
     return _basket_payload(user_id, principal)
 
 
+def _basket_clip_mutation(operation: Any) -> None:
+    try:
+        operation()
+    except (BasketFull, ClipConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidClip as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ClipNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/material-basket/clips")
+def add_material_basket_clip(payload: MaterialBasketClipAdd, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    _basket_clip_mutation(lambda: state.material_basket.add_clip(
+        user_id, payload.file_id, payload.start_time, payload.end_time,
+        lambda file_id: _basket_file(file_id, principal),
+    ))
+    return _basket_payload(user_id, principal)
+
+
+@app.put("/api/material-basket/clips/order")
+def order_material_basket_clips(payload: MaterialBasketClipOrder, principal: Auth) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    _basket_clip_mutation(lambda: state.material_basket.reorder_clips(user_id, payload.clip_ids))
+    return _basket_payload(user_id, principal)
+
+
+@app.patch("/api/material-basket/clips/{clip_id}")
+def edit_material_basket_clip(
+    clip_id: Annotated[int, RoutePath(ge=1, le=2**63 - 1)],
+    payload: MaterialBasketClipRange,
+    principal: Auth,
+) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    _basket_clip_mutation(lambda: state.material_basket.edit_clip(
+        user_id, clip_id, payload.start_time, payload.end_time, lambda file_id: _basket_file(file_id, principal),
+    ))
+    return _basket_payload(user_id, principal)
+
+
+@app.delete("/api/material-basket/clips/{clip_id}")
+def remove_material_basket_clip(
+    clip_id: Annotated[int, RoutePath(ge=1, le=2**63 - 1)],
+    principal: Auth,
+) -> dict[str, Any]:
+    user_id = _personal_user_id(principal)
+    _basket_clip_mutation(lambda: state.material_basket.remove_clip(user_id, clip_id))
+    return _basket_payload(user_id, principal)
+
+
 @app.post("/api/material-basket/handoff")
 def handoff_material_basket(payload: MaterialBasketHandoff, principal: Auth) -> dict[str, Any]:
     user_id = _personal_user_id(principal)
@@ -2296,7 +2384,10 @@ def handoff_material_basket(payload: MaterialBasketHandoff, principal: Auth) -> 
                 raise
             raise HTTPException(status_code=409, detail="素材篮包含已失效或不可访问的素材，请移除后重试") from exc
 
-    result = state.material_basket.handoff(user_id, project_id, check_project, lookup)
+    try:
+        result = state.material_basket.handoff(user_id, project_id, check_project, lookup)
+    except (InvalidClip, ClipConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result["added"]:
         _audit(principal, "material_basket.handoff", "project", str(project_id), {
             "added": result["added"], "skipped": result["skipped"],
@@ -2958,6 +3049,7 @@ class EditHandoffClip(BaseModel):
     start_time: float = Field(ge=0, le=2678400, allow_inf_nan=False)
     end_time: float = Field(gt=0, le=2678400, allow_inf_nan=False)
     media_path: str = Field(min_length=1, max_length=4096)
+    source_revision: str | None = Field(default=None, max_length=80, pattern=r"^[0-9]+:[0-9]+$")
 
 
 class EditHandoffRequest(BaseModel):
@@ -2996,6 +3088,8 @@ def _export_edit_handoff(project_id: int, payload: EditHandoffRequest, principal
         library = state.database.get_library(int(file["library_id"]))
         if not library or not library.get("enabled"):
             raise HTTPException(status_code=404, detail="媒体库不可用")
+        if item.source_revision is not None and item.source_revision != source_revision(file):
+            raise HTTPException(status_code=409, detail="选片源文件已变化，请重新核对入出点")
         if version["kind"] != "video" or file["kind"] != "video":
             raise HTTPException(status_code=422, detail="首版剪辑交接仅支持视频素材")
         try:

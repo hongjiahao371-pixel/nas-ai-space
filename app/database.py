@@ -182,6 +182,19 @@ CREATE TABLE IF NOT EXISTS material_basket_items (
 );
 CREATE INDEX IF NOT EXISTS idx_material_basket_user_order ON material_basket_items(user_id, id);
 
+CREATE TABLE IF NOT EXISTS material_basket_clips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    file_id INTEGER NOT NULL,
+    start_time REAL NOT NULL CHECK (start_time >= 0),
+    end_time REAL NOT NULL CHECK (end_time > start_time),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    source_mtime_ns INTEGER,
+    source_size INTEGER,
+    UNIQUE(user_id, file_id, start_time, end_time)
+);
+CREATE INDEX IF NOT EXISTS idx_material_basket_clip_order ON material_basket_clips(user_id, position, id);
+
 CREATE TABLE IF NOT EXISTS video_moment_annotations (
  id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
  query_key TEXT NOT NULL, query TEXT NOT NULL, time REAL NOT NULL, revision TEXT NOT NULL,
@@ -814,6 +827,10 @@ class Database:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA temp_store = MEMORY")
             connection.executescript(SCHEMA)
+            clip_columns = {row[1] for row in connection.execute("PRAGMA table_info(material_basket_clips)").fetchall()}
+            for column in ("source_mtime_ns", "source_size"):
+                if column not in clip_columns:
+                    connection.execute(f"ALTER TABLE material_basket_clips ADD COLUMN {column} INTEGER")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(files)").fetchall()}
             migrations = {
                 "scan_token": "ALTER TABLE files ADD COLUMN scan_token TEXT NOT NULL DEFAULT ''",

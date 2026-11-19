@@ -1104,7 +1104,7 @@ function resultCard(item) {
   const feedback = state.searchQuery
     ? `<span class="card-feedback"><button data-card-feedback="relevant" data-feedback-file="${item.id}" title="相关">✓</button><button data-card-feedback="irrelevant" data-feedback-file="${item.id}" title="不相关">×</button></span>`
     : '';
-  const clipExport = item.kind==='video' ? `<button class="find-similar" data-video-moments="${item.id}" data-time="${item.match_time ?? ''}">核对片段</button><button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">导出片段</button>` : '';
+  const clipExport = item.kind==='video' ? `<button class="find-similar" data-video-moments="${item.id}" data-time="${item.match_time ?? ''}">核对片段</button><button class="find-similar" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">选片 / 导出</button>` : '';
   const similar = `<button class="find-similar" data-find-similar="${item.id}" type="button">找相似</button>`;
   return `<article class="result-card" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><div class="result-thumb">${visual}${moment}${favorite}</div><div class="result-body"><h3>${esc(item.name)}</h3><p>${esc(item.snippet || item.caption || item.ai_caption || item.relative_path || item.path)}</p>${matched}<div class="result-meta"><span>${status}${esc(item.kind)} · ${fmtBytes(item.size)}</span><span>${MaterialBasket.button(item.id)}${similar}${clipExport}${confidence}<span class="source-tag">${esc((item.sources || []).join(' + '))}</span>${feedback}</span></div></div></article>`;
 }
@@ -1120,7 +1120,7 @@ function resultRow(item) {
   const meta = [item.kind, fmtBytes(item.size), date ? fmtDate(date) : '', library ? library.name : '']
     .filter(Boolean).join(' · ');
   const favorite = item.favorite != null ? `<button class="card-favorite ${item.favorite ? 'active' : ''}" data-favorite-card="${item.id}" data-enabled="${item.favorite ? '1' : '0'}" aria-label="${item.favorite ? '取消收藏' : '收藏'}">${icon('star')}</button>` : '';
-  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${MaterialBasket.button(item.id)}${favorite}</div>`;
+  return `<div class="result-row" data-file="${item.id}" data-time="${item.match_time ?? ''}" tabindex="0" role="button"><span class="row-thumb">${thumb}</span><div class="row-body"><b>${esc(item.name)}</b><small>${esc(meta)}${esc(moment)}</small></div>${MaterialBasket.button(item.id)}${item.kind === 'video' ? `<button type="button" class="secondary" data-export-clip="${item.id}" data-time="${item.match_time ?? 0}">选片</button>` : ''}${favorite}</div>`;
 }
 
 // 按当前布局模式渲染结果容器（grid 卡片 / list 行），并恢复选中态
@@ -2417,6 +2417,7 @@ function resetEditHandoff() {
   handoffProjectId = null;
   $('#editHandoffForm').reset();
   $('#editHandoffClips').replaceChildren();
+  $('#editHandoffSources').replaceChildren();
   $('#editHandoffAsset').innerHTML = '<option value="">请选择视频素材</option>';
   $('#editHandoffVersion').innerHTML = '<option value="">先选择素材</option>';
   $('#editHandoffAsset').disabled = true;
@@ -2426,7 +2427,7 @@ function resetEditHandoff() {
   $('#editHandoffStatus').textContent = '';
 }
 
-$('#openEditHandoff').addEventListener('click', async () => {
+async function openEditHandoff(seedClips = []) {
   const id = state.currentProjectId;
   if (!state.authReady || !id || Number(state.projectDetails?.project?.id) !== id ||
       !['owner', 'manager', 'editor'].includes(state.projectDetails?.access_role)) return;
@@ -2443,12 +2444,15 @@ $('#openEditHandoff').addEventListener('click', async () => {
     const select = $('#editHandoffAsset');
     for (const item of videos) select.add(new Option(item.title || item.file_name, item.id));
     select.disabled = !videos.length;
-    status.textContent = !videos.length ? '当前项目没有可选的视频素材。'
+    for (const clip of seedClips) appendEditHandoffClip({id:clip.version_id,duration:clip.source_duration,frame_rate:clip.frame_rate,version_number:clip.version_number,source_revision:clip.source_revision}, clip.title, clip.start_time, clip.end_time);
+    if(seedClips.length) status.textContent = '已带入选片篮顺序与入出点。请填写剪辑电脑路径后导出。';
+    if (!seedClips.length) status.textContent = !videos.length ? '当前项目没有可选的视频素材。'
       : data.total > data.items.length ? '仅显示最近 200 项项目素材中的视频。' : '';
   } catch (error) {
     if (session === handoffSession) status.textContent = error.message;
   }
-});
+}
+$('#openEditHandoff').addEventListener('click', () => openEditHandoff());
 
 $('#editHandoffAsset').addEventListener('change', async event => {
   const request = ++handoffVersionRequest;
@@ -2483,26 +2487,55 @@ $('#editHandoffVersion').addEventListener('change', event => {
   $('#editHandoffAdd').disabled = !event.target.value;
 });
 
-$('#editHandoffAdd').addEventListener('click', () => {
-  const version = handoffVersions.find(v => Number(v.id) === Number($('#editHandoffVersion').value));
+function syncEditHandoffSources() {
+  const container = $('#editHandoffSources');
+  const versions = new Map();
+  for (const row of $('#editHandoffClips').children) {
+    if (!versions.has(row.dataset.versionId)) versions.set(row.dataset.versionId, row.querySelector('b').textContent);
+  }
+  const existing = new Map([...container.children].map(source => [source.dataset.sourceVersion, source]));
+  for (const [id, source] of existing) {
+    if (!versions.has(id)) { source.remove(); existing.delete(id); }
+  }
+  for (const [id, title] of versions) {
+    let source = existing.get(id);
+    if (!source) {
+      source = document.createElement('label');
+      source.dataset.sourceVersion = id;
+      const label = document.createElement('span');
+      label.textContent = `${title} · 剪辑电脑文件路径（同版本所有片段共用）`;
+      const input = document.createElement('input');
+      input.type = 'text'; input.dataset.cutPath = ''; input.maxLength = 4096;
+      input.required = true; input.placeholder = '/Volumes/素材库/视频.mp4';
+      source.append(label, input);
+      container.append(source);
+    }
+    // Existing source fields never move: clip order changes must preserve focus.
+  }
+}
+
+function editHandoffSourcePath(versionId) {
+  const source = [...$('#editHandoffSources').children].find(item => item.dataset.sourceVersion === String(versionId));
+  return source?.querySelector('[data-cut-path]').value.trim() || '';
+}
+
+function appendEditHandoffClip(version, title, start = 0, end = version?.duration) {
   const list = $('#editHandoffClips');
   if (!version || list.children.length >= 200) return;
   const row = document.createElement('li');
   row.dataset.versionId = version.id;
+  if(version.source_revision) row.dataset.sourceRevision = version.source_revision;
   const fps = Number(version.frame_rate);
-  row.innerHTML = `<b>${esc(handoffAssetTitle)} · V${esc(version.version_number)}</b>
+  row.innerHTML = `<b>${esc(title)} · V${esc(version.version_number)}</b>
     <div class="form-row">
-      <label>入点（秒）<input data-cut-start type="number" min="0" max="${Number(version.duration)}" step="any" value="0" required></label>
-      <label>出点（秒）<input data-cut-end type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(version.duration)}" required></label>
+      <label>入点（秒）<input data-cut-start type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(start)}" required></label>
+      <label>出点（秒）<input data-cut-end type="number" min="0" max="${Number(version.duration)}" step="any" value="${Number(end)}" required></label>
     </div>
-    <label>剪辑电脑文件路径<input data-cut-path type="text" maxlength="4096" required placeholder="/Volumes/素材库/视频.mp4"></label>
     <div class="form-row">
       <button type="button" class="secondary compact" data-cut-move="up">上移</button>
       <button type="button" class="secondary compact" data-cut-move="down">下移</button>
       <button type="button" class="secondary compact" data-cut-move="remove">移除</button>
     </div>`;
-  const prior = [...list.children].find(item => item.dataset.versionId === row.dataset.versionId);
-  if (prior) row.querySelector('[data-cut-path]').value = prior.querySelector('[data-cut-path]').value;
   if (!list.children.length && fps > 0) {
     const rates = $('#editHandoffForm').elements.frame_rate;
     const option = [...rates.options].find(o => {
@@ -2512,9 +2545,12 @@ $('#editHandoffAdd').addEventListener('click', () => {
     if (option) rates.value = option.value;
   }
   list.append(row);
+  syncEditHandoffSources();
   $('#editHandoffExport').disabled = false;
   row.querySelector('[data-cut-start]').focus();
-});
+}
+$('#editHandoffAdd').addEventListener('click', () => appendEditHandoffClip(handoffVersions.find(v => Number(v.id) === Number($('#editHandoffVersion').value)), handoffAssetTitle));
+
 $('#editHandoffClips').addEventListener('click', event => {
   const action = event.target.closest('[data-cut-move]');
   if (!action) return;
@@ -2527,6 +2563,7 @@ $('#editHandoffClips').addEventListener('click', event => {
     row.parentElement.insertBefore(row.nextElementSibling, row);
     action.focus();
   }
+  syncEditHandoffSources();
   $('#editHandoffExport').disabled = !$('#editHandoffClips').children.length;
 });
 $('#editHandoffForm').addEventListener('submit', async event => {
@@ -2540,10 +2577,11 @@ $('#editHandoffForm').addEventListener('submit', async event => {
     version_id: Number(row.dataset.versionId),
     start_time: Number(row.querySelector('[data-cut-start]').value),
     end_time: Number(row.querySelector('[data-cut-end]').value),
-    media_path: row.querySelector('[data-cut-path]').value.trim(),
+    media_path: editHandoffSourcePath(row.dataset.versionId),
+    ...(row.dataset.sourceRevision ? {source_revision:row.dataset.sourceRevision} : {}),
   }));
   if (!clips.length || clips.some(c => !c.media_path || c.end_time <= c.start_time)) {
-    status.textContent = '检查每段的剪辑电脑文件路径，并确保入点早于出点。';
+    status.textContent = '检查每个源版本的剪辑电脑文件路径，并确保入点早于出点。';
     return;
   }
   button.disabled = true;
@@ -2562,7 +2600,7 @@ $('#editHandoffForm').addEventListener('submit', async event => {
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
-    status.textContent = '粗剪包已生成。解压后，在剪辑软件里导入 FCPXML。';
+    status.textContent = '粗剪包已生成。解压后，Final Cut Pro 可尝试导入 Timeline.fcpxmld；另附独立 XML。';
   } catch (error) {
     if (session === handoffSession) status.textContent = error.message;
   } finally {
@@ -5326,8 +5364,17 @@ $('#submitVisualSearch').addEventListener('click',async()=>{
  try{const data=await api('/api/search/image?'+params,{method:'POST',headers:{'Content-Type':visualFile.type||'application/octet-stream'},body:visualFile});if(sequence!==state.searchSequence)return;state.searchResults=data.results||[];state.searchTotal=data.total;renderFileList($('#searchResults'),state.searchResults);$('#searchSummary').textContent=`以图搜图 · 找到 ${fmtCount(data.total)} 个素材`;}catch(error){if(sequence===state.searchSequence){toast(error.message,true);$('#searchSummary').textContent=error.message;}}
 });
 async function openClipModal(fileId,moment=0){
- try{const file=await api(`/api/files/${fileId}`);if(file.kind!=='video')return;const form=$('#clipForm');const duration=Number(file.duration||0);form.elements.file_id.value=fileId;form.elements.start.value=Math.max(0,Number(moment)-3).toFixed(2);form.elements.end.value=Math.min(duration,Number(form.elements.start.value)+20).toFixed(2);form.elements.end.max=duration;openModal($('#clipModal'));}catch(error){toast(error.message,true)}
+ try{const file=await api(`/api/files/${fileId}`);if(file.kind!=='video')return;const form=$('#clipForm');const duration=Number(file.duration||0);form.elements.file_id.value=fileId;form.elements.start.value=Math.max(0,Number(moment)-3).toFixed(6);form.elements.end.value=Math.min(duration,Number(form.elements.start.value)+20).toFixed(6);form.elements.end.max=duration;openModal($('#clipModal'));}catch(error){toast(error.message,true)}
 }
+$('#saveClipToBasket').addEventListener('click', async event => {
+ const form=$('#clipForm'), button=event.currentTarget;
+ if(!form.reportValidity())return;
+ const start=Number(form.elements.start.value), end=Number(form.elements.end.value);
+ if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start){toast('请检查入出点',true);return;}
+ button.disabled=true;
+ try{await MaterialBasket.addClip(Number(form.elements.file_id.value),start,end);toast('片段已保存到选片篮，入出点与顺序已保留');closeModal($('#clipModal'));}
+ catch(error){toast(error.message,true);}finally{button.disabled=false;}
+});
 $('#clipForm').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget;
  try{await api(`/api/files/${form.elements.file_id.value}/clips`,{method:'POST',body:JSON.stringify({start:Number(form.elements.start.value),end:Number(form.elements.end.value)})});closeModal($('#clipModal'));toast('片段导出已加入任务中心，完成后可下载');await loadTasks();}catch(error){toast(error.message,true)}
@@ -5370,4 +5417,10 @@ document.addEventListener('click', async event => {
   }
 });
 
-MaterialBasket.init({api, user:()=>state.authReady ? state.user : null, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject});
+MaterialBasket.init({api, user:()=>state.authReady ? state.user : null, escape:esc, bytes:fmtBytes, toast, open:openModal, close:closeModal, confirm:confirmDialog, preview:openFileViewer, project:openProject, roughCut: async (projectId, clips) => {
+  const ownerId = state.user?.id;
+  if (!state.authReady || !ownerId) return;
+  await openProject(projectId);
+  await loadProjectWorkspace(projectId);
+  if (state.authReady && state.user?.id === ownerId && state.currentProjectId === projectId) await openEditHandoff(clips);
+}});

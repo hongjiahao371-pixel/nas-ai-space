@@ -20,16 +20,29 @@ runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 
 
+def host_cpu_summary(cpuinfo: str) -> dict:
+    """Public CPU capabilities only; never persist arbitrary host proc data."""
+    allowed = {"model name", "vendor_id", "flags", "Features", "CPU implementer", "CPU architecture"}
+    fields = {}
+    for line in cpuinfo.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in allowed and key.strip() not in fields:
+            fields[key.strip()] = value.strip()[:4096]
+    return fields
+
+
 class OllamaAcceptance(runtime.Acceptance):
     def run(self):
         self.report['scope'] = ['native Linux Ollama CPU', 'default Qwen text embedding', 'default Qwen vision generation']
         self.report['not_covered'] = ['physical NAS hardware', 'GPU/NPU', 'speech', 'model quality', 'NAS load/latency']
+        self.report['host_cpu'] = host_cpu_summary(Path('/proc/cpuinfo').read_text())
+        self.save()
         daemon = json.loads(self.docker('info', '--format', '{{json .}}'))
         self.docker('pull', self.args.image, timeout=600)
         image = self.image_info(self.args.image)
         self.arch = runtime.require_native(platform.system(), platform.machine(), daemon, [image])
         self.record('native_platform', {'host': platform.machine(), 'architecture': self.arch,
-                                      'image': {k: image[k] for k in ('Id', 'Os', 'Architecture')}})
+                                      'image': {k: image[k] for k in ('Id', 'Os', 'Architecture', 'RepoDigests')}})
         self.docker('network', 'create', self.network)
         self.network_created = True
         volume = self.prefix + '-ollama'

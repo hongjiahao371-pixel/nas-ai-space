@@ -126,15 +126,18 @@ def build_edit_handoff(project_name: str, clips: list[dict], frame_rate: str = '
     for clip in normalized:
         ET.SubElement(spine, 'asset-clip', name=clip['name'], ref=clip['resource'], offset=clip['offset'], start=clip['start'], duration=clip['duration'], format=clip['format'])
     manifest = dict(schema_version=1, export_format='fcpxml-1.10', timeline_frame_rate=frame_rate,
+        timeline_bundle='Timeline.fcpxmld', timeline_document='timeline.fcpxml',
         timeline_duration=_time(offset), clips=normalized, warnings=warnings,
         limitations=['仅顺序粗剪，入出点为源文件零起点秒数，不保留嵌入时间码。',
                      '剪辑机路径由用户显式提供，未验证挂载或文件是否可在剪辑机读取。',
                      '不含媒体文件、字幕、特效、调色、审阅意见或代理；不支持混合帧率。',
-                     'Apple 自身导出的 1.10+ 使用 fcpxmld 包；本文件为独立 fcpxml，目标版本兼容性待实机确认。',
+                     'ZIP 同时提供 .fcpxmld 捆绑包和内容相同的独立 .fcpxml；目标版本兼容性待实机确认。',
                      '未进行 Final Cut Pro、Premiere Pro 或 DaVinci Resolve 实机导入验收。'])
+    xml = ET.tostring(root, encoding='utf-8', xml_declaration=True)
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as package:
-        package.writestr('timeline.fcpxml', ET.tostring(root, encoding='utf-8', xml_declaration=True))
+        package.writestr('Timeline.fcpxmld/Info.fcpxml', xml)
+        package.writestr('timeline.fcpxml', xml)
         package.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
-        package.writestr('README.txt', '先将媒体挂载到 manifest 中的剪辑机路径，再尝试导入 timeline.fcpxml。\n'+ '\n'.join(manifest['limitations']))
+        package.writestr('README.txt', '先解压 ZIP，并将原片挂载到 manifest 中的剪辑机路径。Final Cut Pro 可尝试「文件 > 导入 > XML」，选整个 Timeline.fcpxmld 捆绑包；另附 timeline.fcpxml 供支持独立 XML 的工具使用。只导入其中一种。\n'+ '\n'.join(manifest['limitations']))
     return output.getvalue()
