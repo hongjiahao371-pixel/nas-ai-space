@@ -1610,7 +1610,10 @@ function isAdmin() {
 
 function applyRole() {
   MaterialBasket.userChanged();
-  if (!state.authReady) closeModal($('#editHandoffModal'));
+  if (!state.authReady) {
+    closeModal($('#editHandoffModal'));
+    closeModal($('#projectInboxModal'));
+  }
   const admin = isAdmin();
   $$('.admin-only').forEach(element => { element.hidden = !admin; });
   $$('.personal-only').forEach(element => { element.hidden = !state.user?.id; });
@@ -3028,7 +3031,7 @@ function resetWebCapture() {
 }
 document.addEventListener('change', async event => {
   if (event.target.id !== 'webCaptureFile') return;
-  const epoch = ++webCaptureEpoch, project = Number(state.currentProjectId);
+  const epoch = ++webCaptureEpoch, project = Number(state.currentProjectId), actor = state.user;
   webCaptureDraft = null; $('#importWebCapture').disabled = true;
   $('#webCapturePreview').textContent = '';
   const file = event.target.files?.[0]; if (!file) return;
@@ -3038,8 +3041,8 @@ document.addEventListener('change', async event => {
     const data = JSON.parse(text);
     if (data.schema !== 'nas-ai-web-capture/v1' || data.selection_only !== true ||
         ['title','source_url','captured_at','text'].some(key => typeof data[key] !== 'string')) throw new Error('不是受支持的网页选区摘录');
-    if (epoch !== webCaptureEpoch || project !== Number(state.currentProjectId) || !$('#projectInboxModal').classList.contains('open')) return;
-    webCaptureDraft = { project, text };
+    if (epoch !== webCaptureEpoch || !state.authReady || actor !== state.user || project !== Number(state.currentProjectId) || !$('#projectInboxModal').classList.contains('open')) return;
+    webCaptureDraft = { project, text, actor, epoch };
     const name = state.projectDetails?.project?.name || `项目 ${project}`;
     $('#webCapturePreview').textContent = `目标：${name}（#${project}）\n文件：${file.name}\n标题：${data.title}\n来源（未经独立核验）：${data.source_url}\n浏览器提供时间：${data.captured_at}\n\n${data.text}`;
     $('#importWebCapture').disabled = false;
@@ -3048,22 +3051,27 @@ document.addEventListener('change', async event => {
 async function importWebCapture() {
   if (webCaptureBusy || !webCaptureDraft) return;
   const draft = webCaptureDraft;
-  if (draft.project !== Number(state.currentProjectId)) { resetWebCapture(); return toast('项目已改变，请重新选择文件并确认', true); }
+  const active = () => state.authReady && draft.actor === state.user && draft.epoch === webCaptureEpoch &&
+    draft.project === Number(state.currentProjectId) && $('#projectInboxModal').classList.contains('open');
+  if (!active()) { resetWebCapture(); return toast('账号或项目已改变，请重新选择文件并确认', true); }
   webCaptureBusy = true; $('#importWebCapture').disabled = true; $('#webCaptureFile').disabled = true;
   try {
     const result = await api(`/api/projects/${draft.project}/inbox/web-capture`, { method: 'POST', body: draft.text });
+    if (!active()) return;
     resetWebCapture();
     toast(`摘录已保存到项目 #${draft.project}，${result.task_id ? '本文件索引已排队' : '未确认新索引任务，请查看素材状态'}；未抓取来源网址`);
     if (draft.project === Number(state.currentProjectId)) await loadProjectAssets();
-  } catch (error) { toast(`导入未确认：${error.message}。同一文件可安全重试，不会覆盖已有内容。`, true); }
+  } catch (error) { if (active()) toast(`导入未确认：${error.message}。同一文件可安全重试，不会覆盖已有内容。`, true); }
   finally { webCaptureBusy = false; $('#webCaptureFile').disabled = false; $('#importWebCapture').disabled = !webCaptureDraft; }
 }
 
 async function openProjectInbox() {
   resetWebCapture();
-  if (!state.currentProjectId) return;
+  const project = state.currentProjectId, actor = state.user, epoch = webCaptureEpoch;
+  if (!state.authReady || !project) return;
   try {
-    const data = await api(`/api/projects/${state.currentProjectId}/inbox`);
+    const data = await api(`/api/projects/${project}/inbox`);
+    if (!state.authReady || actor !== state.user || project !== state.currentProjectId || epoch !== webCaptureEpoch || !$('#view-project').classList.contains('active')) return;
     $('#projectInboxPath').textContent = data.relative_path;
     $('#projectInboxStats').innerHTML = [
       `<div><span>已发现文件</span><b>${fmtCount(data.discovered_files)}</b></div>`,
