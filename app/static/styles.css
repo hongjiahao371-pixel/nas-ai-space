@@ -1181,9 +1181,16 @@ main { grid-column: 2; min-width: 0; }
   .folder-item { width: auto; min-width: 110px; }
   .workflow-summary { display: none; }
   .asset-board { overflow: visible; }
-  .review-body { grid-template-columns: 1fr; overflow-y: auto; }
-  .review-stage { min-height: 62vh; }
-  .review-sidebar { min-height: 60vh; border-top: 1px solid var(--line-soft); border-left: 0; }
+  /* One scroll owner on narrow reviews: preview and the entire active panel
+     share this column rather than nesting a clipped second scroll container. */
+  .asset-review-modal { grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  .asset-review-shell { min-height: 0; min-width: 0; }
+  .review-body { display: block; min-width: 0; overflow: hidden auto; }
+  .review-stage { height: 62vh; min-height: 0; }
+  .review-sidebar { display: block; min-height: 0; border-top: 1px solid var(--line-soft); border-left: 0; }
+  .review-tab { overflow: visible; }
+  #reviewCommentForm { position: static; }
+
   .public-asset-info { grid-template-columns: 1fr; }
 }
 
@@ -1269,7 +1276,7 @@ main { grid-column: 2; min-width: 0; }
   .review-head { padding: 8px; flex-wrap: wrap; }
   .review-head > div { min-width: calc(100% - 50px); }
   .review-head select { margin-left: 0; flex: 1; }
-  .review-stage { min-height: 56vh; }
+  .review-stage { height: 56vh; }
   .review-transport { overflow-x: auto; justify-content: flex-start; }
   .review-transport button { flex: 0 0 auto; }
   .public-share-main { width: calc(100% - 24px); padding-top: 32px; }
