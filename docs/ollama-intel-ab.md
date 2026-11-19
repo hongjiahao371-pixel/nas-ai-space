@@ -28,7 +28,7 @@ limits, CPU-only check, 1024-vector checks and vision completion checks. There a
 no CPU backend overrides, emulation, increased privileges or security disabling.
 The unchanged test stops a phase at its first failure; if baseline embedding
 fails, baseline vision is NOT tested. The candidate must pass both. All trial
-containers/volumes are disposable and cleaned by the original runner.
+containers/volumes are disposable and cleaned by the original runner. Any cleanup or evidence-collection error stops before the next phase and makes the comparison inconclusive, even if inference had already failed.
 
 A green result means only: baseline POST /api/embed for qwen3-embedding:0.6b returned HTTP 500 with SIGSEGV/segmentation fault and candidate passed
 both ordinary workloads with identical model identities on this host. It does not

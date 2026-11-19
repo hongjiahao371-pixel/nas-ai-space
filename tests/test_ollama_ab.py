@@ -31,3 +31,11 @@ class ComparisonTests(unittest.TestCase):
             self.assertFalse(ab.known_embedding_crash([dict(e,**{key:value})]))
         old=dict(status='failed',model_ids={'x':'a'},inference_failed=True,known_embedding_crash=False)
         self.assertEqual(ab.conclusion([old,dict(old,status='passed')]),'inconclusive_different_baseline_failure')
+
+    def test_cleanup_failure_blocks_comparison_even_if_baseline_already_failed(self):
+        old=dict(status='failed',model_ids={'x':'a'},inference_failed=True,known_embedding_crash=True)
+        new=dict(old,status='passed')
+        for phases in [[dict(old,cleanup_errors=['remove failed'])],
+                       [dict(old,cleanup_errors=['remove failed']),new],
+                       [old,dict(new,cleanup_errors=['collect failed'])]]:
+            self.assertEqual(ab.conclusion(phases),'inconclusive_cleanup')

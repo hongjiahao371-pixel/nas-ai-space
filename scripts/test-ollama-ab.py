@@ -40,6 +40,8 @@ def known_embedding_crash(errors):
 
 
 def conclusion(phases):
+    if any(p.get('cleanup_errors') for p in phases):
+        return 'inconclusive_cleanup'
     if len(phases) != 2 or not all(p.get('model_ids') for p in phases):
         return 'inconclusive_setup'
     if phases[0]['model_ids'] != phases[1]['model_ids']:
@@ -131,10 +133,13 @@ def main():
                                   'model_ids': trial.model_ids, 'inference_started': trial.inference_started,
                                   'inference_failed': trial.inference_failed,
                                   'known_embedding_crash': bool(known_embedding_crash(trial.report.get('http_errors', []))),
-                                  'http_errors': trial.report.get('http_errors', [])})
+                                  'http_errors': trial.report.get('http_errors', []),
+                                  'cleanup_errors': trial.report.get('cleanup_errors', [])})
         if version == VERSIONS[0]:
             lock = trial.model_ids
         save()
+        if trial.report.get('cleanup_errors'):
+            summary['status'] = 'inconclusive_cleanup'; save(); return 2
         if not lock:
             summary['status'] = 'inconclusive_setup'; save(); return 2
     summary['status'] = conclusion(summary['phases']); save()
