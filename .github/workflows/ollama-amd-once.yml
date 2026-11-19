@@ -1,0 +1,29 @@
+name: One-shot AMD Ollama comparison
+on:
+  push:
+    branches: [test/ollama-amd-once]
+    paths:
+      - '.github/workflows/ollama-amd-once.yml'
+      - 'scripts/test-ollama-amd.py'
+      - 'tests/test_ollama_amd.py'
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify independent AMD gates
+        run: python3 -m unittest discover -s tests -p test_ollama_amd.py -v
+      - name: One host four isolated workloads
+        run: python3 scripts/test-ollama-amd.py
+      - name: Preserve success failure or ineligible evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-amd-${{ github.run_id }}
+          path: ollama-amd-evidence/
+          if-no-files-found: warn
